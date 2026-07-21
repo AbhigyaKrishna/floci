@@ -856,6 +856,42 @@ class CognitoIntegrationTest {
                 "IdToken from refresh flow must contain aud claim set to the requesting client ID");
     }
 
+    @Test
+    @Order(100)
+    void refreshWithUnparseableTokenIsRejectedNotFabricated() {
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "not-a-real-refresh-token" }
+                }
+                """.formatted(clientId))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+    }
+
+    @Test
+    @Order(101)
+    void refreshWithExpiredTokenIsRejected() {
+        String raw = "some-pool|someone@example.com|" + clientId + "|1000000000000|"
+                + java.util.UUID.randomUUID();
+        String expiredToken = java.util.Base64.getEncoder().withoutPadding()
+                .encodeToString(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, expiredToken))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"))
+                .body("message", org.hamcrest.Matchers.equalTo("Refresh Token has expired"));
+    }
+
     // ── Issue #416: ListUserPoolClients response matches spec ──────────
 
     @Test
