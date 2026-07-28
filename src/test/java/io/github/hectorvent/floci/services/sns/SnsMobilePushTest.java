@@ -419,6 +419,57 @@ class SnsMobilePushTest {
         assertTrue(snsService.peekPushNotifications(device.getArn()).isEmpty());
     }
 
+    @Test
+    void publishBatch_rejectsEntryWithJsonStructureMissingDefaultWithoutFailingBatch() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        var result = snsService.publishBatch(topicArn, List.of(
+                Map.of("Id", "bad", "Message", "{\"GCM\":\"only gcm\"}", "MessageStructure", "json"),
+                Map.of("Id", "good", "Message", "{\"default\":\"ok body\"}", "MessageStructure", "json")),
+                REGION);
+
+        assertEquals(1, result.failed().size());
+        assertEquals("bad", result.failed().get(0)[0]);
+        assertEquals("InvalidParameter", result.failed().get(0)[1]);
+        assertTrue(result.failed().get(0)[2].contains("default"));
+        assertEquals("true", result.failed().get(0)[3]);
+
+        assertEquals(1, result.successful().size());
+        assertEquals("good", result.successful().get(0)[0]);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(device.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("ok body", captured.get(0).payload());
+    }
+
+    @Test
+    void publishBatch_rejectsEntryWithInvalidJsonStructureWithoutFailingBatch() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        var result = snsService.publishBatch(topicArn, List.of(
+                Map.of("Id", "bad", "Message", "not json at all", "MessageStructure", "json"),
+                Map.of("Id", "good", "Message", "plain text")),
+                REGION);
+
+        assertEquals(1, result.failed().size());
+        assertEquals("bad", result.failed().get(0)[0]);
+        assertEquals("InvalidParameter", result.failed().get(0)[1]);
+        assertEquals(1, result.successful().size());
+        assertEquals("good", result.successful().get(0)[0]);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(device.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("plain text", captured.get(0).payload());
+    }
+
     // --- Inspection helpers ---
 
     @Test

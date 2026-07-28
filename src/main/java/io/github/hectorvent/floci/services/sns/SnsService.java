@@ -693,6 +693,8 @@ public class SnsService implements Resettable {
      * top-level {@code default} entry. Validating here (rather than lazily inside per-subscriber
      * delivery) means a malformed envelope surfaces to the caller as {@code InvalidParameter}
      * instead of being silently swallowed while the {@code publish} call still reports success.
+     * {@code PublishBatch} runs the same check per entry, reporting a bad envelope as that entry's
+     * {@code BatchResultErrorEntry} rather than failing the whole batch.
      */
     private void validateTopicMessageStructure(String message, String messageStructure) {
         if (!"json".equals(messageStructure)) {
@@ -828,6 +830,13 @@ public class SnsService implements Resettable {
             String messageStructure = (String) entry.get("MessageStructure");
             String messageGroupId = (String) entry.get("MessageGroupId");
             String messageDeduplicationId = (String) entry.get("MessageDeduplicationId");
+
+            try {
+                validateTopicMessageStructure(message, messageStructure);
+            } catch (AwsException e) {
+                failed.add(new String[]{id, e.getErrorCode(), e.getMessage(), "true"});
+                continue;
+            }
 
             if (isFifo && (messageGroupId == null || messageGroupId.isBlank())) {
                 failed.add(new String[]{id, "InvalidParameter",
