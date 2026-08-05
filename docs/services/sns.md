@@ -142,6 +142,23 @@ aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
 
 Broadcast pushes surface in the same retrospection API, keyed by `EndpointArn`.
 
+### Per-protocol payloads on topic publish
+
+`MessageStructure="json"` resolves per subscriber, not just for mobile endpoints. Each
+subscription receives the value under its own protocol key — `sqs`, `lambda`, `http`,
+`https`, `email`, `email-json`, `sms`, or the push platform (`APNS`, `GCM`, …) for
+`application` — falling back to `default` when that key is absent.
+
+```bash
+aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
+  --message '{"default":"hello","sqs":"hi sqs","GCM":"{\"notification\":{\"body\":\"hi device\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+The SQS subscriber receives `hi sqs`, the platform endpoint receives the `GCM` payload,
+and every other subscriber receives `hello`. As with any topic publish, the envelope must
+be a JSON object carrying `default`, validated before fan-out begins.
+
 ### Inspecting captured pushes
 
 ```bash

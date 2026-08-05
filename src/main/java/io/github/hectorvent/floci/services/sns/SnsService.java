@@ -642,7 +642,7 @@ public class SnsService implements Resettable {
     private String capturePushForEndpoint(PlatformEndpoint endpoint, PlatformApplication app,
                                           String message, String subject, String messageStructure,
                                           Map<String, MessageAttributeValue> messageAttributes) {
-        String payload = resolvePushPayload(app.getPlatform(), message, messageStructure);
+        String payload = resolveProtocolPayload(app.getPlatform(), message, messageStructure);
         String messageId = UUID.randomUUID().toString();
         recordPushNotification(new PushNotification(
                 endpoint.getArn(), app.getArn(), app.getPlatform(), endpoint.getToken(),
@@ -652,12 +652,15 @@ public class SnsService implements Resettable {
     }
 
     /**
-     * Resolves the payload SNS would forward to APNS/FCM for this platform.
-     * If {@code messageStructure="json"}, pick the platform-specific key ({@code APNS},
-     * {@code APNS_SANDBOX}, {@code GCM}, {@code FCM}) from the JSON envelope, falling back
-     * to {@code default}. Otherwise return the raw message.
+     * Resolves the payload SNS would forward to a given delivery target.
+     * If {@code messageStructure="json"}, pick the target-specific key from the JSON envelope,
+     * falling back to {@code default}. The key is the push platform for mobile endpoints
+     * ({@code APNS}, {@code APNS_SANDBOX}, {@code GCM}, {@code FCM}) and the subscription
+     * protocol for every other subscriber ({@code sqs}, {@code lambda}, {@code http},
+     * {@code https}, {@code email}, {@code email-json}, {@code sms}).
+     * Otherwise return the raw message.
      */
-    private String resolvePushPayload(String platform, String message, String messageStructure) {
+    private String resolveProtocolPayload(String protocol, String message, String messageStructure) {
         if (messageStructure == null || !"json".equals(messageStructure)) {
             return message;
         }
@@ -673,16 +676,16 @@ public class SnsService implements Resettable {
                     "Invalid parameter: Message Reason: Messages must be a JSON object.",
                     400);
         }
-        JsonNode platformValue = root.get(platform);
-        if (platformValue != null && !platformValue.isNull()) {
-            return platformValue.isTextual() ? platformValue.asText() : platformValue.toString();
+        JsonNode protocolValue = root.get(protocol);
+        if (protocolValue != null && !protocolValue.isNull()) {
+            return protocolValue.isTextual() ? protocolValue.asText() : protocolValue.toString();
         }
         JsonNode defaultValue = root.get("default");
         if (defaultValue != null && !defaultValue.isNull()) {
             return defaultValue.isTextual() ? defaultValue.asText() : defaultValue.toString();
         }
         throw new AwsException("InvalidParameter",
-                "Invalid parameter: Message Reason: Messages must have a '" + platform
+                "Invalid parameter: Message Reason: Messages must have a '" + protocol
                         + "' or 'default' key.",
                 400);
     }
@@ -1283,6 +1286,12 @@ public class SnsService implements Resettable {
                                 String topicArn, String messageGroupId, String messageDeduplicationId,
                                 String messageStructure) {
         try {
+            // Under MessageStructure="json" every subscriber gets the value under its own
+            // protocol key, falling back to "default". The application case resolves against
+            // the push platform (APNS/GCM/...) inside capturePushForEndpoint instead.
+            String protocolMessage = "application".equals(sub.getProtocol())
+                    ? message
+                    : resolveProtocolPayload(sub.getProtocol(), message, messageStructure);
             switch (sub.getProtocol()) {
                 case "sqs" -> {
                     String region = extractRegionFromArn(sub.getEndpoint());
@@ -1292,8 +1301,8 @@ public class SnsService implements Resettable {
                     String queueUrl = sqsArnToUrl(sub.getEndpoint());
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
-                            ? message
-                            : buildSnsEnvelope(message, subject, messageAttributes, topicArn, messageId);
+                            ? protocolMessage
+                            : buildSnsEnvelope(protocolMessage, subject, messageAttributes, topicArn, messageId);
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
                             : Collections.emptyMap();
@@ -1303,7 +1312,7 @@ public class SnsService implements Resettable {
                 case "lambda" -> {
                     String fnName = extractFunctionName(sub.getEndpoint());
                     String region = extractRegionFromArn(sub.getEndpoint());
-                    String eventJson = buildSnsLambdaEvent(topicArn, messageId, message,
+                    String eventJson = buildSnsLambdaEvent(topicArn, messageId, protocolMessage,
                             subject, messageAttributes, sub.getSubscriptionArn());
                     lambdaService.invoke(region, fnName, eventJson.getBytes(), InvocationType.Event);
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
@@ -1312,8 +1321,8 @@ public class SnsService implements Resettable {
                     if (httpClient == null) break;
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
-                            ? message
-                            : buildSnsHttpNotification(message, subject, messageAttributes, topicArn, messageId, sub.getSubscriptionArn());
+                            ? protocolMessage
+                            : buildSnsHttpNotification(protocolMessage, subject, messageAttributes, topicArn, messageId, sub.getSubscriptionArn());
                     var requestBuilder = HttpRequest.newBuilder()
                             .uri(URI.create(sub.getEndpoint()))
                             .timeout(Duration.ofSeconds(5))
@@ -1359,8 +1368,8 @@ public class SnsService implements Resettable {
                     LOG.debugv("Delivered SNS message to platform endpoint: {0}", endpointArn);
                 }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
-                        sub.getEndpoint(), subject, message);
-                case "sms" -> LOG.infov("SNS SMS delivery (stub): to={0}, message={1}", sub.getEndpoint(), message);
+                        sub.getEndpoint(), subject, protocolMessage);
+                case "sms" -> LOG.infov("SNS SMS delivery (stub): to={0}, message={1}", sub.getEndpoint(), protocolMessage);
                 default -> LOG.debugv("Protocol {0} delivery not implemented, skipping: {1}",
                         sub.getProtocol(), sub.getEndpoint());
             }
