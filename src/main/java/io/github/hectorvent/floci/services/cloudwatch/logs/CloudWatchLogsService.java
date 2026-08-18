@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -131,11 +133,23 @@ public class CloudWatchLogsService {
 
     public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
                                boolean deletionProtectionEnabled, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, String region) {
+        createLogGroupForAccount(accountId, name, retentionInDays, tags, false, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, boolean deletionProtectionEnabled, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
         }
         String key = groupKey(region, name);
-        if (groupStore.get(key).isPresent()) {
+        if (getForAccount(groupStore, accountId, key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
                     "The specified log group already exists: " + name, 400);
         }
@@ -147,7 +161,7 @@ public class CloudWatchLogsService {
         if (tags != null) {
             group.setTags(new HashMap<>(tags));
         }
-        groupStore.put(key, group);
+        putForAccount(groupStore, accountId, key, group);
         LOG.infov("Created log group: {0} in region {1}", name, region);
     }
 
@@ -255,13 +269,18 @@ public class CloudWatchLogsService {
     // ──────────────────────────── Log Streams ────────────────────────────
 
     public void createLogStream(String groupName, String streamName, String region) {
+        createLogStreamForAccount(null, groupName, streamName, region);
+    }
+
+    public void createLogStreamForAccount(
+            String accountId, String groupName, String streamName, String region) {
         String groupKey = groupKey(region, groupName);
-        groupStore.get(groupKey)
+        getForAccount(groupStore, accountId, groupKey)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
 
         String streamKey = streamKey(region, groupName, streamName);
-        if (streamStore.get(streamKey).isPresent()) {
+        if (getForAccount(streamStore, accountId, streamKey).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
                     "The specified log stream already exists: " + streamName, 400);
         }
@@ -271,7 +290,7 @@ public class CloudWatchLogsService {
         stream.setLogStreamName(streamName);
         stream.setCreatedTime(System.currentTimeMillis());
         stream.setUploadSequenceToken(UUID.randomUUID().toString());
-        streamStore.put(streamKey, stream);
+        putForAccount(streamStore, accountId, streamKey, stream);
         LOG.infov("Created log stream: {0}/{1}", groupName, streamName);
     }
 
@@ -311,8 +330,14 @@ public class CloudWatchLogsService {
 
     public String putLogEvents(String groupName, String streamName,
                                List<Map<String, Object>> events, String region) {
+        return putLogEventsForAccount(null, groupName, streamName, events, region);
+    }
+
+    public String putLogEventsForAccount(
+            String accountId, String groupName, String streamName,
+            List<Map<String, Object>> events, String region) {
         String streamKey = streamKey(region, groupName, streamName);
-        LogStream stream = streamStore.get(streamKey)
+        LogStream stream = getForAccount(streamStore, accountId, streamKey)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
@@ -333,7 +358,7 @@ public class CloudWatchLogsService {
             logEvent.setSequence(ingestionSequence.incrementAndGet());
 
             String eventKey = eventKey(region, groupName, streamName, ts, logEvent.getEventId());
-            eventStore.put(eventKey, logEvent);
+            putForAccount(eventStore, accountId, eventKey, logEvent);
 
             totalBytes += msg.getBytes().length + 26; // approx overhead
             if (minTs == null || ts < minTs) { minTs = ts; }
@@ -353,9 +378,30 @@ public class CloudWatchLogsService {
         stream.setStoredBytes(stream.getStoredBytes() + totalBytes);
         String nextToken = UUID.randomUUID().toString();
         stream.setUploadSequenceToken(nextToken);
-        streamStore.put(streamKey, stream);
+        putForAccount(streamStore, accountId, streamKey, stream);
 
         return nextToken;
+    }
+
+    private <V> Optional<V> getForAccount(
+            StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            return aware.getForAccount(accountId, key);
+        }
+        return store.get(key);
+    }
+
+    private <V> void putForAccount(
+            StorageBackend<String, V> store, String accountId, String key, V value) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<?> rawAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> aware = (AccountAwareStorageBackend<V>) rawAware;
+            aware.putForAccount(accountId, key, value);
+            return;
+        }
+        store.put(key, value);
     }
 
     public record LogEventsResult(List<LogEvent> events, String nextForwardToken, String nextBackwardToken) {}
@@ -382,11 +428,16 @@ public class CloudWatchLogsService {
         if (nextToken != null && nextToken.startsWith("f/")) {
             int offset = parseTokenIndex(nextToken, 2);
             pageStart = Math.min(offset, total);
-            pageEnd = Math.min(pageStart + maxEvents, total);
+            // Take the window out of what is left rather than adding to the offset, so a
+            // max-events cap configured near Integer.MAX_VALUE cannot overflow the end
+            // index negative once pagination has moved past the first page.
+            pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
         } else if (nextToken != null && nextToken.startsWith("b/")) {
             int end = parseTokenIndex(nextToken, 2);
             pageEnd = Math.min(end, total);
             pageStart = Math.max(pageEnd - maxEvents, 0);
+        } else if (nextToken != null) {
+            throw invalidNextToken();
         } else if (!startFromHead) {
             pageEnd = total;
             pageStart = Math.max(total - maxEvents, 0);
@@ -400,13 +451,21 @@ public class CloudWatchLogsService {
     }
 
     private int parseTokenIndex(String token, int prefixLen) {
+        int index;
         try {
-            return Integer.parseInt(token.substring(prefixLen));
+            index = Integer.parseInt(token.substring(prefixLen));
         } catch (NumberFormatException e) {
-            return 0;
+            throw invalidNextToken();
         }
+        if (index < 0) {
+            throw invalidNextToken();
+        }
+        return index;
     }
 
+    private AwsException invalidNextToken() {
+        return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
+    }
     /**
      * A FilterLogEvents match paired with the stream that emitted it. FilterLogEvents is the
      * cross-stream API, so the stream is what lets a caller attribute a hit; GetLogEvents needs
@@ -419,7 +478,7 @@ public class CloudWatchLogsService {
     public FilteredLogEventsResult filterLogEvents(String groupName, List<String> streamNames,
                                                     Long startTime, Long endTime,
                                                     String filterPattern, int limit,
-                                                    String region) {
+                                                    String nextToken, String region) {
         int maxEvents = Math.min(limit > 0 ? limit : Integer.MAX_VALUE,
                 maxEventsPerQuery);
 
@@ -444,16 +503,38 @@ public class CloudWatchLogsService {
 
         all.sort(Comparator.comparing(FilteredEvent::event, EVENT_ORDER));
 
-        List<FilteredEvent> result = all.stream()
+        List<FilteredEvent> matches = all.stream()
                 .filter(f -> (startTime == null || f.event().getTimestamp() >= startTime)
                         && (endTime == null || f.event().getTimestamp() <= endTime))
                 .filter(f -> filterPattern == null || filterPattern.isBlank()
                         || f.event().getMessage().contains(filterPattern))
-                .limit(maxEvents)
                 .toList();
 
-        String nextToken = result.size() >= maxEvents ? UUID.randomUUID().toString() : null;
-        return new FilteredLogEventsResult(result, nextToken);
+        // The cursor indexes matches rather than stored events, which is why the window is applied
+        // here instead of folded into the stream as a limit. Forward-only, so one prefix where
+        // GetLogEvents needs two.
+        int total = matches.size();
+        int pageStart;
+        if (nextToken != null && nextToken.startsWith("f/")) {
+            pageStart = Math.min(parseTokenIndex(nextToken, 2), total);
+        } else if (nextToken != null) {
+            throw invalidNextToken();
+        } else {
+            pageStart = 0;
+        }
+        // Subtracting from `total` rather than adding to `pageStart` keeps the arithmetic inside
+        // the list's own bounds, so a max-events cap configured near Integer.MAX_VALUE cannot
+        // overflow the end index negative.
+        int pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
+
+        List<FilteredEvent> page = matches.subList(pageStart, pageEnd);
+
+        // Unlike GetLogEvents, which echoes its token back so an SDK paginator can stop on a repeat,
+        // FilterLogEvents signals exhaustion by omitting the token, and its paginators keep going
+        // while one is present. The second clause refuses a cursor that cannot advance, which a
+        // max-events cap of zero would otherwise produce.
+        String pageToken = pageEnd < total && pageEnd > pageStart ? "f/" + pageEnd : null;
+        return new FilteredLogEventsResult(page, pageToken);
     }
 
     // ──────────────────────────── Logs Insights Queries ────────────────────────────

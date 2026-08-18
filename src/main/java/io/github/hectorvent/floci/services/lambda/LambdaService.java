@@ -72,6 +72,7 @@ public class LambdaService {
     private final KinesisEventSourcePoller kinesisPoller;
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final StorageFactory storageFactory;
+    private final LambdaLayerService layerService;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     /**
@@ -139,6 +140,7 @@ public class LambdaService {
         this.kinesisPoller = null;
         this.dynamodbStreamsPoller = null;
         this.storageFactory = storageFactory;
+        this.layerService = null;
     }
 
     @Inject
@@ -157,7 +159,8 @@ public class LambdaService {
                           SqsEventSourcePoller poller,
                           KinesisEventSourcePoller kinesisPoller,
                           DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
-                          StorageFactory storageFactory) {
+                          StorageFactory storageFactory,
+                          LambdaLayerService layerService) {
         this.functionStore = functionStore;
         this.executorService = executorService;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -174,6 +177,23 @@ public class LambdaService {
         this.kinesisPoller = kinesisPoller;
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
         this.storageFactory = storageFactory;
+        this.layerService = layerService;
+    }
+
+    // Real AWS validates a function's Layers eagerly at CreateFunction/UpdateFunctionConfiguration
+    // time with InvalidParameterValueException, not lazily at invoke time - resolveLayerByArn's
+    // caller in ContainerLauncher only logs a warning and silently launches without the layer's
+    // content mounted, which is correct AWS-parity behavior for a layer deleted *after* being
+    // attached (AWS doesn't re-validate on every invoke either), but was previously the only
+    // signal at all for a bad ARN, even a typo caught at attach time on real AWS.
+    private void validateLayersResolvable(List<String> layerArns) {
+        if (layerArns == null || layerService == null) return;
+        for (String arn : layerArns) {
+            if (layerService.resolveLayerByArn(arn) == null) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Layer version " + arn + " does not exist.", 400);
+            }
+        }
     }
 
     /** Package-private accessor for tests that want to assert limiter state directly. */
@@ -321,6 +341,7 @@ public class LambdaService {
         List<String> layers = request.get("Layers") instanceof List
                 ? (List<String>) request.get("Layers") : null;
         if (layers != null) {
+            validateLayersResolvable(layers);
             fn.setLayers(new ArrayList<>(layers));
         }
 
@@ -463,6 +484,18 @@ public class LambdaService {
     public LambdaFunction updateFunctionConfiguration(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
 
+        // Validated before any field mutation below, not inline where Layers is applied further
+        // down - fn is the live object backing this store entry (InMemoryStorage#get returns the
+        // same reference, not a copy), so validating this late would leave every
+        // already-applied field (Description, Timeout, ...) live on a rejected update, since
+        // nothing here is transactional and there's a single save() at the very end.
+        @SuppressWarnings("unchecked")
+        List<String> layerList = request.containsKey("Layers") && request.get("Layers") instanceof List
+                ? (List<String>) request.get("Layers") : null;
+        if (request.containsKey("Layers")) {
+            validateLayersResolvable(layerList);
+        }
+
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (request.get("VpcConfig") instanceof Map<?, ?>) {
             @SuppressWarnings("unchecked")
@@ -545,9 +578,6 @@ public class LambdaService {
         }
 
         if (request.containsKey("Layers")) {
-            @SuppressWarnings("unchecked")
-            List<String> layerList = request.get("Layers") instanceof List
-                    ? (List<String>) request.get("Layers") : null;
             fn.setLayers(layerList != null ? new ArrayList<>(layerList) : new ArrayList<>());
         }
 
@@ -979,6 +1009,27 @@ public class LambdaService {
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
 
+        // Everything that determines what actually runs. Without these the snapshot describes a
+        // function with no code: a version-qualified invoke resolves to it, launches a container
+        // with nothing in it, and hangs to the function timeout instead of failing (#1987). A
+        // published version is an immutable snapshot of code plus configuration, so it carries the
+        // code location for every package type, not only Zip.
+        snapshot.setCodeLocalPath(fn.getCodeLocalPath());
+        snapshot.setCodeSha256(fn.getCodeSha256());
+        snapshot.setS3Bucket(fn.getS3Bucket());
+        snapshot.setS3Key(fn.getS3Key());
+        snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
+        snapshot.setImageUri(fn.getImageUri());
+        snapshot.setImageConfigCommand(fn.getImageConfigCommand());
+        snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
+        snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());
+        snapshot.setLayers(fn.getLayers());
+        snapshot.setArchitectures(fn.getArchitectures());
+        snapshot.setEphemeralStorageSize(fn.getEphemeralStorageSize());
+        snapshot.setTracingMode(fn.getTracingMode());
+        snapshot.setDeadLetterTargetArn(fn.getDeadLetterTargetArn());
+        snapshot.setKmsKeyArn(fn.getKmsKeyArn());
+
         functionStore.save(region, snapshot);
         LOG.infov("Published version {0} for function {1}", version, functionName);
         return snapshot;
@@ -1045,6 +1096,21 @@ public class LambdaService {
     public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // verify function exists
         return functionStore.listVersions(region, fn.getFunctionName());
+    }
+
+    /**
+     * Deletes a single published version of a function (DeleteFunction with a numeric qualifier),
+     * leaving {@code $LATEST} and every other version untouched. Deleting an already-gone version
+     * is a no-op; a missing function is a 404.
+     */
+    public void deleteVersion(String region, String functionName, String version) {
+        if (version == null || version.isBlank() || "$LATEST".equals(version)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Version must be a published version number, got: " + version, 400);
+        }
+        LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
+        functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        LOG.infov("Deleted version {0} of function {1}", version, fn.getFunctionName());
     }
 
     // ──────────────────────────── Aliases ────────────────────────────
@@ -1564,6 +1630,27 @@ public class LambdaService {
         policy.put("Id", "default");
         policy.put("Statement", statements);
         return Map.of("policy", policy, "revisionId", fn.getRevisionId());
+    }
+
+    /**
+     * Puts a previously captured policy statement back. Used to compensate when a replacement fails
+     * after the original was removed: it takes the stored statement shape rather than an
+     * AddPermission request, so what goes back is exactly what came out.
+     *
+     * <p>Scoped to the unqualified function, matching where the captured statement came from. A Sid
+     * is unique only within one resource ARN, so matching on it alone would take out an
+     * identically named statement on an alias or version and leave that one lost.
+     */
+    public void restorePermissionStatement(String region, String functionName, Map<String, Object> statement) {
+        LambdaFunction fn = getFunction(region, functionName);
+        String statementId = (String) statement.get("Sid");
+        String resourceArn = policyResourceArn(fn, null);
+        if (statementId != null) {
+            fn.getPolicies().removeIf(s -> statementId.equals(s.get("Sid")) && scopedTo(s, resourceArn));
+        }
+        fn.getPolicies().add(statement);
+        functionStore.save(region, fn);
+        LOG.infov("Restored permission {0} on function {1}", statementId, functionName);
     }
 
     public void removePermission(String region, String functionName, String qualifier, String statementId) {

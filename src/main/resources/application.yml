@@ -59,6 +59,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=graphql.util.IdGenerator
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
 
 
 floci:
@@ -116,6 +117,8 @@ floci:
         flush-interval-ms: 5000
       s3vectors:
         flush-interval-ms: 5000
+      s3tables:
+        flush-interval-ms: 5000
       ecs:
         flush-interval-ms: 5000
       codebuild:
@@ -140,6 +143,8 @@ floci:
       appsync:
         flush-interval-ms: 5000
       rum:
+        flush-interval-ms: 5000
+      guardduty:
         flush-interval-ms: 5000
 
   dns:
@@ -234,6 +239,9 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
+                           # without creating it first. Unset means the account has no alias,
+                           # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
     msk:
       enabled: true
       mock: false
@@ -306,6 +314,8 @@ floci:
       enabled: true
     firehose:
       enabled: true
+      tick-interval-seconds: 10
+      flush-record-count: 0
     kms:
       enabled: true
     cognito:
@@ -313,6 +323,10 @@ floci:
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
+    swf:
+      enabled: true
+      timeout-sweep-enabled: true
+      timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
     acm:
@@ -354,6 +368,7 @@ floci:
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
       mock: false
+      aws-faithful-private-ip: false
     ecs:
       enabled: true
       mock: false
@@ -468,6 +483,8 @@ floci:
       schema-worker-shutdown-timeout-seconds: 30
     s3vectors:
       enabled: true
+    s3tables:
+      enabled: true
     iot:
       enabled: true
       mqtt:
@@ -477,5 +494,8 @@ floci:
         port: 1883
     iotdata:
       enabled: true
+    cloudhsmv2:
     rum:
+      enabled: true
+    guardduty:
       enabled: true

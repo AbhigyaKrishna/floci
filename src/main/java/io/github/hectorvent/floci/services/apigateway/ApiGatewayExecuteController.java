@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -92,6 +93,7 @@ public class ApiGatewayExecuteController {
     private final ElbV2Service elbV2Service;
     private final SqsQueryHandler sqsQueryHandler;
     private final ApiGatewayExecuteRouteContext routeContext;
+    private final JwtSignatureVerifier jwtSignatureVerifier;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -101,7 +103,8 @@ public class ApiGatewayExecuteController {
                                        WebSocketConnectionManager webSocketConnectionManager,
                                        ElbV2Service elbV2Service,
                                        SqsQueryHandler sqsQueryHandler,
-                                       ApiGatewayExecuteRouteContext routeContext) {
+                                       ApiGatewayExecuteRouteContext routeContext,
+                                       JwtSignatureVerifier jwtSignatureVerifier) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -113,6 +116,7 @@ public class ApiGatewayExecuteController {
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
         this.routeContext = routeContext;
+        this.jwtSignatureVerifier = jwtSignatureVerifier;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -256,8 +260,12 @@ public class ApiGatewayExecuteController {
         }
 
         String preferredRegion = region;
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null || auth.isBlank()) {
+        // True for SigV4-unsigned requests, and also for requests whose Authorization header
+        // isn't a SigV4 credential at all (e.g. a Cognito bearer JWT) - resolveRegion silently
+        // fell back to defaultRegion in both cases, so the resolved region is a guess.
+        boolean regionUnresolved = regionResolver.resolveRegionFromAuthOrNull(
+                headers == null ? null : headers.getHeaderString("Authorization")) == null;
+        if (regionUnresolved) {
             region = apiGatewayService.resolveRestApiRegion(region, apiId);
         }
 
@@ -1336,9 +1344,11 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
+        Map<String, String> jwtClaims = null;
         if ("JWT".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
-            Response authError = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
-            if (authError != null) return authError;
+            JwtAuthorizerResult jwtResult = enforceJwtAuthorizer(region, apiId, route, headers, uriInfo);
+            if (jwtResult.errorResponse() != null) return jwtResult.errorResponse();
+            jwtClaims = jwtResult.claims();
         }
 
         if ("CUSTOM".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
@@ -1369,7 +1379,8 @@ public class ApiGatewayExecuteController {
         if (integrationType == null || integrationType.isEmpty()) integrationType = "AWS_PROXY";
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
-            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName);
+            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body,
+                    apiId, stageName, jwtClaims);
         }
 
         String functionName = functionNameFromUri(integration.getIntegrationUri());
@@ -1381,7 +1392,7 @@ public class ApiGatewayExecuteController {
 
         String requestId = UUID.randomUUID().toString();
         String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
-                apiId, region, stageName, headers, uriInfo, body, requestId);
+                apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → Lambda {4}", httpMethod, apiId, stageName, path, functionName);
 
@@ -1405,7 +1416,7 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName) {
+                                          String apiId, String stageName, Map<String, String> jwtClaims) {
         // CDK HttpAlbIntegration sets integrationUri to an ALB listener ARN. Resolve it
         // to the listener's bound localhost port so HttpProxyInvoker (which assumes a
         // concrete http(s) URL) can forward through the listener's data plane.
@@ -1438,14 +1449,14 @@ public class ApiGatewayExecuteController {
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
 
-        Map<String, Object> claims = Map.of();
-        if ("JWT".equalsIgnoreCase(route.getAuthorizationType())) {
-            String token = extractBearerToken(headers);
-            if (token != null) {
-                Map<String, Object> parsed = parseAllJwtClaims(token);
-                if (parsed != null) claims = parsed;
-            }
-        }
+        // Reuses the claims dispatchV2 already verified via enforceJwtAuthorizer, rather than
+        // independently re-extracting a token and re-parsing it here: extractBearerToken only
+        // reads the Authorization header, ignoring the authorizer's configured identitySource
+        // (which - see HttpApiJwtAuthorizerQuerystringTest - can be a querystring parameter). A
+        // caller passing a valid token via the configured source plus an unrelated Bearer header
+        // would otherwise have $context.authorizer.claims.* resolve from the unverified header
+        // token instead of the one the authorizer actually checked.
+        Map<String, Object> claims = jwtClaims != null ? Map.copyOf(jwtClaims) : Map.of();
 
         String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
@@ -1511,28 +1522,6 @@ public class ApiGatewayExecuteController {
         return copy;
     }
 
-    private static String extractBearerToken(HttpHeaders headers) {
-        String auth = headers.getHeaderString("Authorization");
-        if (auth == null) return null;
-        if (auth.startsWith("Bearer ")) return auth.substring("Bearer ".length()).trim();
-        return null;
-    }
-
-    /** Extracts ALL JWT claims as a Map<String,Object> for use as $context.authorizer.claims.X source values. */
-    private Map<String, Object> parseAllJwtClaims(String token) {
-        try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) return null;
-            byte[] payloadBytes = Base64.getUrlDecoder().decode(padBase64(parts[1]));
-            String payload = new String(payloadBytes, StandardCharsets.UTF_8);
-            JsonNode root = objectMapper.readTree(payload);
-            return objectMapper.convertValue(root, MAP_TYPE);
-        } catch (Exception e) {
-            LOG.debugv("JWT full-claims parse error: {0}", e.getMessage());
-            return null;
-        }
-    }
-
     /**
      * Captures path parameters from a route key like {@code "ANY /wallet/{proxy+}"} matched
      * against an actual path. Compiled regexes are cached per route key so the regex is
@@ -1566,43 +1555,65 @@ public class ApiGatewayExecuteController {
     /** Extracts parameter names from a route template; the pattern itself is constant. */
     private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
-    private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
+    // Mirrors AuthorizerResult's shape (used by the v1/REST CUSTOM-authorizer path) for the same
+    // reason: a null errorResponse means "authorized, proceed", and claims (when non-null) is what
+    // the caller threads through to buildV2ProxyEvent so requestContext.authorizer.jwt.claims is
+    // actually populated - previously this information was parsed and validated, then discarded.
+    private record JwtAuthorizerResult(Response errorResponse, Map<String, String> claims) {}
+
+    private JwtAuthorizerResult enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers,
                                           UriInfo uriInfo) {
         Authorizer authorizer;
         try {
             authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
         } catch (AwsException e) {
-            return Response.status(500)
+            return new JwtAuthorizerResult(Response.status(500)
                     .entity(jsonMessage("Authorizer not found"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build(), null);
         }
 
         String token = extractToken(authorizer, headers, uriInfo);
         if (token == null) {
-            return Response.status(401)
+            return new JwtAuthorizerResult(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build(), null);
+        }
+
+        // Signature verification happens before anything in the payload is trusted (including the
+        // exp/iss/aud checks below) - a claim from an unverified token proves nothing about who
+        // sent it. Mirrors what real API Gateway's JWT authorizer does against the issuer's real
+        // JWKS; failure here (bad signature, unreachable issuer, unsupported alg) is a 401 the same
+        // as any other rejection, not a fallback to unverified acceptance.
+        String configuredIssuer = authorizer.getJwtConfiguration() != null
+                ? authorizer.getJwtConfiguration().issuer() : null;
+        try {
+            jwtSignatureVerifier.verify(token, configuredIssuer);
+        } catch (JwtSignatureVerifier.JwtVerificationException e) {
+            LOG.debugv("JWT signature verification failed for API {0}: {1}", apiId, e.getMessage());
+            return new JwtAuthorizerResult(Response.status(401)
+                    .entity(jsonMessage("Unauthorized"))
+                    .type(MediaType.APPLICATION_JSON).build(), null);
         }
 
         JwtClaims claims = parseJwtClaims(token);
         if (claims == null) {
-            return Response.status(401)
+            return new JwtAuthorizerResult(Response.status(401)
                     .entity(jsonMessage("Unauthorized"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build(), null);
         }
 
         if (claims.exp > 0 && claims.exp < System.currentTimeMillis() / 1000) {
-            return Response.status(401)
+            return new JwtAuthorizerResult(Response.status(401)
                     .entity(jsonMessage("The incoming token has expired"))
-                    .type(MediaType.APPLICATION_JSON).build();
+                    .type(MediaType.APPLICATION_JSON).build(), null);
         }
 
         if (authorizer.getJwtConfiguration() != null) {
             String issuer = authorizer.getJwtConfiguration().issuer();
             if (issuer != null && !issuer.isBlank() && !issuer.equals(claims.iss)) {
-                return Response.status(401)
+                return new JwtAuthorizerResult(Response.status(401)
                         .entity(jsonMessage("Unauthorized"))
-                        .type(MediaType.APPLICATION_JSON).build();
+                        .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
             List<String> audiences = authorizer.getJwtConfiguration().audience();
@@ -1612,14 +1623,14 @@ public class ApiGatewayExecuteController {
                 boolean audMatch = audiences.stream().anyMatch(a ->
                         a.equals(claims.aud) || a.equals(claims.clientId));
                 if (!audMatch) {
-                    return Response.status(401)
+                    return new JwtAuthorizerResult(Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
-                            .type(MediaType.APPLICATION_JSON).build();
+                            .type(MediaType.APPLICATION_JSON).build(), null);
                 }
             }
         }
 
-        return null; // authorized
+        return new JwtAuthorizerResult(null, claims.raw); // authorized
     }
 
     // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
@@ -1916,7 +1927,11 @@ public class ApiGatewayExecuteController {
         return value;
     }
 
-    private record JwtClaims(String iss, String aud, String clientId, long exp) {}
+    // `raw` carries every claim the token actually presented (as strings, since that's the shape
+    // requestContext.authorizer.jwt.claims uses on real AWS - a Lambda reads e.g. "sub" out of it
+    // the same way regardless of provider), so enforceJwtAuthorizer's caller can propagate the full
+    // set into the outgoing Lambda event instead of only the fields needed for verification.
+    private record JwtClaims(String iss, String aud, String clientId, long exp, Map<String, String> raw) {}
 
     private JwtClaims parseJwtClaims(String token) {
         try {
@@ -1931,7 +1946,20 @@ public class ApiGatewayExecuteController {
             // JWT authorizers accept either when matching the configured audience list.
             String clientId = claims.path("client_id").asText(null);
             long exp = claims.path("exp").asLong(0);
-            return new JwtClaims(iss, aud, clientId, exp);
+
+            // AWS's real requestContext.authorizer.jwt.claims flattens every claim to a string,
+            // including non-scalar ones (arrays/objects become their JSON text) - mirrored here
+            // rather than dropping or restructuring anything, since callers may read any claim
+            // name, not just the ones this method itself validates.
+            Map<String, String> raw = new java.util.LinkedHashMap<>();
+            java.util.Iterator<Map.Entry<String, JsonNode>> fields = claims.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                JsonNode value = field.getValue();
+                raw.put(field.getKey(), value.isTextual() ? value.asText() : value.toString());
+            }
+
+            return new JwtClaims(iss, aud, clientId, exp, raw);
         } catch (Exception e) {
             LOG.debugv("JWT parse error: {0}", e.getMessage());
             return null;
@@ -1950,6 +1978,19 @@ public class ApiGatewayExecuteController {
                                      String apiId, String region, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
+        return buildV2ProxyEvent(httpMethod, path, routeKey, apiId, region, stageName,
+                headers, uriInfo, body, requestId, null);
+    }
+
+    // jwtClaims is non-null only when the route's authorizer is JWT-type and verification
+    // succeeded (see dispatchV2/enforceJwtAuthorizer) - null means either no authorizer on this
+    // route (Auth: NONE) or a CUSTOM/REQUEST authorizer. Unlike the v1/REST CUSTOM-authorizer
+    // path (buildV1ProxyEvent's principalId/context handling), a v2 CUSTOM/REQUEST authorizer's
+    // response context is not currently threaded into requestContext.authorizer here at all.
+    String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
+                                     String apiId, String region, String stageName,
+                                     HttpHeaders headers, UriInfo uriInfo,
+                                     byte[] body, String requestId, Map<String, String> jwtClaims) {
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "2.0");
         event.put("routeKey", routeKey != null ? routeKey : "$default");
@@ -1996,6 +2037,27 @@ public class ApiGatewayExecuteController {
         http.put("sourceIp", "127.0.0.1");
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
+
+        // Matches AWS's real HTTP API JWT authorizer shape: requestContext.authorizer.jwt.claims
+        // retains the token's claims, while jwt.scopes contains the standard OAuth2 scope claim
+        // split on whitespace. This differs from the v1/REST CUSTOM-authorizer shape
+        // (requestContext.authorizer.principalId/<claim>) built elsewhere in this class.
+        // Previously enforceJwtAuthorizer's claims were discarded instead of reaching here, so
+        // this node was never present at all.
+        if (jwtClaims != null && !jwtClaims.isEmpty()) {
+            ObjectNode authorizerNode = ctx.putObject("authorizer");
+            ObjectNode jwtNode = authorizerNode.putObject("jwt");
+            ObjectNode claimsNode = jwtNode.putObject("claims");
+            jwtClaims.forEach(claimsNode::put);
+
+            String scopeClaim = jwtClaims.get("scope");
+            if (scopeClaim != null && !scopeClaim.isBlank()) {
+                ArrayNode scopesNode = jwtNode.putArray("scopes");
+                for (String scope : scopeClaim.trim().split("\\s+")) {
+                    scopesNode.add(scope);
+                }
+            }
+        }
 
         if (body != null && body.length > 0) {
             boolean isText = isV2TextContentType(headers.getHeaderString(HttpHeaders.CONTENT_TYPE));
