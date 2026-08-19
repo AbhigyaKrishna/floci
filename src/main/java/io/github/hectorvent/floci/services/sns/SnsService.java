@@ -676,13 +676,15 @@ public class SnsService implements Resettable {
                     "Invalid parameter: Message Reason: Messages must be a JSON object.",
                     400);
         }
+        // Real SNS ignores a key whose value isn't a string ("Non-string values will cause the
+        // key to be ignored"), falling through to default rather than stringifying it.
         JsonNode protocolValue = root.get(protocol);
-        if (protocolValue != null && !protocolValue.isNull()) {
-            return protocolValue.isTextual() ? protocolValue.asText() : protocolValue.toString();
+        if (protocolValue != null && protocolValue.isTextual()) {
+            return protocolValue.asText();
         }
         JsonNode defaultValue = root.get("default");
-        if (defaultValue != null && !defaultValue.isNull()) {
-            return defaultValue.isTextual() ? defaultValue.asText() : defaultValue.toString();
+        if (defaultValue != null && defaultValue.isTextual()) {
+            return defaultValue.asText();
         }
         throw new AwsException("InvalidParameter",
                 "Invalid parameter: Message Reason: Messages must have a '" + protocol
@@ -715,7 +717,7 @@ public class SnsService implements Resettable {
                     "Invalid parameter: Message Structure - JSON message body should be an object.", 400);
         }
         JsonNode defaultValue = root.get("default");
-        if (defaultValue == null || defaultValue.isNull()) {
+        if (defaultValue == null || !defaultValue.isTextual()) {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Message Structure - No default entry in JSON message body", 400);
         }

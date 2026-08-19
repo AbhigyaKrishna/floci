@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sns;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.model.PlatformApplication;
@@ -79,6 +80,31 @@ class SnsProtocolPayloadResolutionTest {
         List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
         assertEquals(1, messages.size());
         assertEquals("hello", messages.get(0).getBody());
+    }
+
+    @Test
+    void publish_jsonStructure_ignoresNonStringProtocolKeyAndFallsBackToDefault() {
+        String queueUrl = subscribeQueue("nonstring-queue", Map.of("RawMessageDelivery", "true"));
+
+        // Real SNS ignores a key whose value isn't a string, delivering default instead of "42".
+        snsService.publish(topic("alerts"), null, null,
+                "{\"default\":\"hi\",\"sqs\":42}", null, "json",
+                null, null, null, REGION);
+
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        assertEquals("hi", messages.get(0).getBody());
+    }
+
+    @Test
+    void publish_jsonStructure_rejectsNonStringDefault() {
+        subscribeQueue("nonstring-default-queue", Map.of("RawMessageDelivery", "true"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.publish(
+                topic("alerts"), null, null,
+                "{\"default\":42}", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", ex.getErrorCode());
     }
 
     @Test
