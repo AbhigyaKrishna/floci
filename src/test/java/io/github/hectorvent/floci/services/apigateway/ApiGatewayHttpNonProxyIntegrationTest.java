@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * Covers the REST (v1) {@code HTTP} integration type — the non-proxy form, where API Gateway builds
+ * Covers the REST (v1) {@code HTTP} integration type, the non-proxy form, where API Gateway builds
  * the backend request from mapping templates and explicit parameter mappings, then maps the
  * backend's response back through the method's integration responses.
  *
@@ -282,7 +282,7 @@ class ApiGatewayHttpNonProxyIntegrationTest {
     @Test
     void tellsTheBackendTheMediaTypeOfTheTemplateItRendered() {
         resetRecordings();
-        // The template is keyed under text/plain, so the rendered payload is text/plain — the
+        // The template is keyed under text/plain, so the rendered payload is text/plain: the
         // backend must be told that, not the JSON default.
         String apiId = createHttpApi("http-nonproxy-contenttype",
                 ",\"requestTemplates\":{\"text/plain\":\"rendered-as-plain\"}", false);

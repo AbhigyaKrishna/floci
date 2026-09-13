@@ -487,13 +487,23 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
+        // Two views of the same inbound data. The multi-value maps are what gets forwarded: a
+        // proxy integration passes the request through, so "?tag=a&tag=b" has to arrive as two
+        // tag parameters and not as "tag=a,b". The joined single-value maps are only the lookup
+        // surface for method.request.* parameter mapping, which resolves to one value in AWS too.
+        Map<String, List<String>> multiValueHeaders = new java.util.LinkedHashMap<>();
         Map<String, String> headerMap = new java.util.LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
-            if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), String.join(",", e.getValue()));
+            if (e.getValue().isEmpty()) continue;
+            multiValueHeaders.put(e.getKey(), List.copyOf(e.getValue()));
+            headerMap.put(e.getKey(), String.join(",", e.getValue()));
         }
+        Map<String, List<String>> multiValueQuery = new java.util.LinkedHashMap<>();
         Map<String, String> queryMap = new java.util.LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
-            if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), String.join(",", e.getValue()));
+            if (e.getValue().isEmpty()) continue;
+            multiValueQuery.put(e.getKey(), List.copyOf(e.getValue()));
+            queryMap.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, String> pathMap = new java.util.LinkedHashMap<>();
         if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
@@ -508,10 +518,15 @@ public class ApiGatewayExecuteController {
                 String dest = param.getKey();
                 String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap);
                 if (resolved == null) continue;
+                // An explicit mapping overwrites, so it replaces any repeated inbound values too.
                 if (dest.startsWith("integration.request.header.")) {
-                    headerMap.put(dest.substring("integration.request.header.".length()), resolved);
+                    String name = dest.substring("integration.request.header.".length());
+                    headerMap.put(name, resolved);
+                    multiValueHeaders.put(name, List.of(resolved));
                 } else if (dest.startsWith("integration.request.querystring.")) {
-                    queryMap.put(dest.substring("integration.request.querystring.".length()), resolved);
+                    String name = dest.substring("integration.request.querystring.".length());
+                    queryMap.put(name, resolved);
+                    multiValueQuery.put(name, List.of(resolved));
                 } else if (dest.startsWith("integration.request.path.")) {
                     pathMap.put(dest.substring("integration.request.path.".length()), resolved);
                 }
@@ -534,7 +549,8 @@ public class ApiGatewayExecuteController {
                         UUID.randomUUID().toString(),
                         headerMap.getOrDefault("X-Forwarded-For", "127.0.0.1"),
                         headerMap, queryMap, pathMap, body,
-                        Map.of(), Map.of());
+                        Map.of(), Map.of(),
+                        multiValueHeaders, multiValueQuery);
 
         LOG.debugv("execute-api: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, uri);
@@ -545,8 +561,12 @@ public class ApiGatewayExecuteController {
         Response.ResponseBuilder rb = Response.status(result.statusCode());
         if (result.body() != null) rb.entity(result.body());
         if (result.headers() != null) {
-            for (Map.Entry<String, String> e : result.headers().entrySet()) {
-                rb.header(e.getKey(), e.getValue());
+            // One header line per value, so a backend that sent two Set-Cookie headers relays as
+            // two. Joining them would be lossy: a cookie's Expires attribute contains a comma.
+            for (Map.Entry<String, List<String>> e : result.headers().entrySet()) {
+                for (String value : e.getValue()) {
+                    rb.header(e.getKey(), value);
+                }
             }
         }
         return rb.build();
@@ -663,8 +683,13 @@ public class ApiGatewayExecuteController {
                 ? new String(result.body(), StandardCharsets.UTF_8) : "";
         // java.net.http lowercases response header names, so this must be case-insensitive for an
         // integration.response.header.X-Backend-Id mapping to resolve.
+        // Non-proxy responses run through integration responses, whose
+        // integration.response.header.X mappings resolve to a single value, so the multi-valued
+        // backend headers collapse here rather than on the way out of the transport.
         Map<String, String> responseHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        if (result.headers() != null) responseHeaders.putAll(result.headers());
+        if (result.headers() != null) {
+            result.headers().forEach((name, values) -> responseHeaders.put(name, String.join(",", values)));
+        }
 
         VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
                 responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
@@ -2081,8 +2106,10 @@ public class ApiGatewayExecuteController {
         Response.ResponseBuilder rb = Response.status(result.statusCode());
         if (result.body() != null) rb.entity(result.body());
         if (result.headers() != null) {
-            for (Map.Entry<String, String> e : result.headers().entrySet()) {
-                rb.header(e.getKey(), e.getValue());
+            for (Map.Entry<String, List<String>> e : result.headers().entrySet()) {
+                for (String value : e.getValue()) {
+                    rb.header(e.getKey(), value);
+                }
             }
         }
         return rb.build();

@@ -14,7 +14,9 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
@@ -29,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>{@code putIntegration} already accepted {@code "type":"HTTP_PROXY"}, but dispatch handled only
  * {@code AWS_PROXY}/{@code AWS}/{@code MOCK} and fell through to a 500 "Unsupported integration
- * type" — so a REST API fronting an HTTP microservice, the shape CDK's
+ * type": so a REST API fronting an HTTP microservice, the shape CDK's
  * {@code HttpIntegration}/{@code addProxy} emits, could be created but never invoked.
  */
 @QuarkusTest
@@ -47,6 +49,7 @@ class ApiGatewayHttpProxyIntegrationTest {
     private static final AtomicReference<String> lastForwardedHeader = new AtomicReference<>();
     private static final AtomicReference<String> lastAuthorization = new AtomicReference<>();
     private static final AtomicReference<String> lastHost = new AtomicReference<>();
+    private static final AtomicReference<List<String>> lastTraceHeaders = new AtomicReference<>();
 
     private final List<String> createdApis = new ArrayList<>();
 
@@ -75,6 +78,8 @@ class ApiGatewayHttpProxyIntegrationTest {
         lastForwardedHeader.set(exchange.getRequestHeaders().getFirst("X-Forwarded-Tenant"));
         lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
         lastHost.set(exchange.getRequestHeaders().getFirst("Host"));
+        List<String> trace = exchange.getRequestHeaders().get("X-Trace");
+        lastTraceHeaders.set(trace == null ? null : List.copyOf(trace));
 
         // /missing exercises relaying a backend error status untouched.
         int status = exchange.getRequestURI().getPath().endsWith("/missing") ? 404 : 200;
@@ -82,6 +87,11 @@ class ApiGatewayHttpProxyIntegrationTest {
                 .getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json");
         exchange.getResponseHeaders().add("X-Backend-Marker", "hit");
+        // Two separate Set-Cookie lines, the canonical repeated response header. The Expires
+        // attribute carries its own comma, so a comma-joined relay cannot be split back apart.
+        exchange.getResponseHeaders().add("Set-Cookie",
+                "session=abc; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT");
+        exchange.getResponseHeaders().add("Set-Cookie", "tracking=xyz; Path=/");
         exchange.sendResponseHeaders(status, response.length);
         exchange.getResponseBody().write(response);
         exchange.close();
@@ -95,6 +105,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         lastForwardedHeader.set(null);
         lastAuthorization.set(null);
         lastHost.set(null);
+        lastTraceHeaders.set(null);
     }
 
     /**
@@ -194,7 +205,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         String apiId = createProxyApi("http-proxy-error-api", backendUri(), null);
 
         // HTTP_PROXY performs no integration-response selection, so a backend 404 must reach the
-        // caller as a 404 carrying the backend's own body — not be remapped to a gateway error.
+        // caller as a 404 carrying the backend's own body, not be remapped to a gateway error.
         given()
                 .when().get("/execute-api/" + apiId + "/test/orders/missing")
                 .then().statusCode(404)
@@ -251,5 +262,69 @@ class ApiGatewayHttpProxyIntegrationTest {
         // gateway's, or virtual-hosted backends route the request to the wrong vhost.
         assertTrue(lastHost.get() != null && lastHost.get().contains(String.valueOf(backendPort)),
                 "backend should see its own Host authority, saw: " + lastHost.get());
+    }
+
+    @Test
+    void repeatedQueryParametersReachTheBackendSeparately() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-multi-query-api", backendUri(), null);
+
+        given()
+                .when().get("/execute-api/" + apiId + "/test/orders?tag=a&tag=b&limit=5")
+                .then().statusCode(200);
+
+        // AWS documents HTTP_PROXY as passing the request through, and multi-valued query strings
+        // are explicitly supported. Collapsing these to "tag=a,b" is a different request: most
+        // frameworks parse it as one value containing a comma, not as two values.
+        //
+        // Asserted per parameter rather than on the whole query string: the relative order of two
+        // differently named parameters is not part of the contract and is not stable across runs.
+        // The order of repeated values for one name is, and is checked.
+        Map<String, List<String>> received = parseQuery(lastQuery.get());
+        assertEquals(List.of("a", "b"), received.get("tag"));
+        assertEquals(List.of("5"), received.get("limit"));
+    }
+
+    /** Query string to name → values, preserving the order values appear in for a given name. */
+    private static Map<String, List<String>> parseQuery(String query) {
+        Map<String, List<String>> parsed = new LinkedHashMap<>();
+        if (query == null || query.isEmpty()) return parsed;
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            String name = eq < 0 ? pair : pair.substring(0, eq);
+            String value = eq < 0 ? "" : pair.substring(eq + 1);
+            parsed.computeIfAbsent(name, k -> new ArrayList<>()).add(value);
+        }
+        return parsed;
+    }
+
+    @Test
+    void repeatedRequestHeadersReachTheBackendSeparately() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-multi-header-api", backendUri(), null);
+
+        given()
+                .header("X-Trace", "first")
+                .header("X-Trace", "second")
+                .when().get("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200);
+
+        assertEquals(List.of("first", "second"), lastTraceHeaders.get());
+    }
+
+    @Test
+    void repeatedResponseHeadersRelayToTheCallerSeparately() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-multi-response-header-api", backendUri(), null);
+
+        List<String> cookies = given()
+                .when().get("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200)
+                .extract().headers().getValues("Set-Cookie");
+
+        assertEquals(2, cookies.size(), "expected both Set-Cookie headers, got: " + cookies);
+        assertTrue(cookies.contains("session=abc; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT"),
+                "session cookie should relay with its Expires comma intact, got: " + cookies);
+        assertTrue(cookies.contains("tracking=xyz; Path=/"), "got: " + cookies);
     }
 }
