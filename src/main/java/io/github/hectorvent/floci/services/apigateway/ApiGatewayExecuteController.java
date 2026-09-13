@@ -413,8 +413,9 @@ public class ApiGatewayExecuteController {
                     matched, stage, integration, headers, uriInfo, body, authorizerResult, resolvedApiKey,
                     iamIdentity);
             case "AWS" -> invokeAwsIntegration(region, httpMethod, path, stageName,
-                    matched, integration, headers, uriInfo, body);
-            case "MOCK" -> invokeMock(region, httpMethod, path, stageName, matched, integration, headers, uriInfo, body);
+                    matched, integration, headers, uriInfo, body, authorizerResult);
+            case "MOCK" -> invokeMock(region, httpMethod, path, stageName,
+                    matched, integration, headers, uriInfo, body, authorizerResult);
             default -> Response.status(500)
                     .entity(jsonMessage("Unsupported integration type: " + integration.getType()))
                     .type(MediaType.APPLICATION_JSON).build();
@@ -993,10 +994,27 @@ public class ApiGatewayExecuteController {
         return params;
     }
 
+    static Map<String, Object> vtlAuthorizerContext(
+            String principalId, Map<String, Object> authorizerContext) {
+        Map<String, Object> result = new HashMap<>();
+        if (authorizerContext != null) {
+            authorizerContext.forEach((key, value) -> {
+                if (value != null) {
+                    result.put(key, value.toString());
+                }
+            });
+        }
+        if (principalId != null) {
+            result.put("principalId", principalId);
+        }
+        return result.isEmpty() ? null : result;
+    }
+
     private Response invokeAwsIntegration(String region, String httpMethod, String path,
                                           String stageName, ApiGatewayResource resource,
                                           Integration integration, HttpHeaders headers,
-                                          UriInfo uriInfo, byte[] body) {
+                                          UriInfo uriInfo, byte[] body,
+                                          AuthorizerResult authorizerResult) {
         AwsServiceRouter.IntegrationTarget target = serviceRouter.parseIntegrationUri(integration.getUri());
         if (target == null) {
             return Response.status(500)
@@ -1022,10 +1040,13 @@ public class ApiGatewayExecuteController {
 
         String incomingContentType = headerMap.getOrDefault("Content-Type",
                 headerMap.getOrDefault("content-type", "application/json"));
+        Map<String, Object> vtlAuthorizerContext = vtlAuthorizerContext(
+                authorizerResult.principalId(), authorizerResult.context());
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+                resource.getPath(), requestId, regionResolver.getAccountId(), null,
+                vtlAuthorizerContext);
 
         // AWS selects the request template by the *incoming* request Content-Type. Capture it
         // before parameter mapping runs, since an integration.request.header.Content-Type
@@ -1244,7 +1265,8 @@ public class ApiGatewayExecuteController {
                 if (responseTemplate != null && !responseTemplate.isEmpty()) {
                     VtlTemplateEngine.VtlContext responseMappingCtx = new VtlTemplateEngine.VtlContext(
                             responseBodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                            resource.getPath(), requestId, regionResolver.getAccountId(), null);
+                            resource.getPath(), requestId, regionResolver.getAccountId(), null,
+                            vtlAuthorizerContext);
                     templateResult = vtlEngine.evaluate(responseTemplate, responseMappingCtx);
                     finalBody = templateResult.body();
                 } else {
@@ -1359,7 +1381,8 @@ public class ApiGatewayExecuteController {
 
     private Response invokeMock(String region, String httpMethod, String path, String stageName,
                                 ApiGatewayResource resource, Integration integration,
-                                HttpHeaders headers, UriInfo uriInfo, byte[] body) {
+                                HttpHeaders headers, UriInfo uriInfo, byte[] body,
+                                AuthorizerResult authorizerResult) {
         String requestId = UUID.randomUUID().toString();
         String bodyStr = body != null && body.length > 0 ? new String(body) : null;
 
@@ -1380,7 +1403,8 @@ public class ApiGatewayExecuteController {
 
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
-                resource.getPath(), requestId, regionResolver.getAccountId(), null);
+                resource.getPath(), requestId, regionResolver.getAccountId(), null,
+                vtlAuthorizerContext(authorizerResult.principalId(), authorizerResult.context()));
 
         // A MOCK has no backend: the request template *is* the integration response, and the
         // "statusCode" it renders is what the integration responses' selectionPatterns are
