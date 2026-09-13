@@ -123,6 +123,10 @@ AWS::RDS::DBParameterGroup	RdsCfnProvisioner
 AWS::RDS::DBProxy	RdsCfnProvisioner
 AWS::RDS::DBProxyTargetGroup	RdsCfnProvisioner
 AWS::RDS::DBSubnetGroup	RdsCfnProvisioner
+AWS::Redshift::Cluster	RedshiftClusterCfnProvisioner
+AWS::Redshift::ClusterParameterGroup	RedshiftClusterCfnProvisioner
+AWS::Redshift::ClusterSecurityGroup	RedshiftClusterCfnProvisioner
+AWS::Redshift::ClusterSubnetGroup	RedshiftClusterCfnProvisioner
 AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	LEGACY_SWITCH
 AWS::S3::Bucket	S3CfnProvisioner
