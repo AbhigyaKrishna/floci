@@ -215,7 +215,7 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 | `requestParameters` / `requestTemplates` | Applied at invoke time and returned on read-back |
 | `passthroughBehavior` | `NEVER` and `WHEN_NO_TEMPLATES` reject an unmatched Content-Type with `415` |
 | `timeoutInMillis` | Honoured; defaults to AWS's 29,000 ms. Values below 50 are rejected. The 29s ceiling is an edge-optimized limit, so Regional APIs may exceed it |
-| `tlsConfig.insecureSkipVerification` | Honoured — skips backend certificate *and* hostname verification, for a backend behind a private CA or self-signed cert |
+| `tlsConfig.insecureSkipVerification` | Honoured, with AWS's semantics: it stops requiring the backend certificate to be issued by a trusted CA, so a private-CA or self-signed backend is reachable, but expiration, hostname and the presence of a root certificate authority are still checked |
 | `contentHandling` | `CONVERT_TO_TEXT` base64-encodes a binary request for mapping templates; `CONVERT_TO_BINARY` base64-decodes a text request before sending it |
 | `connectionType` / `connectionId` | `VPC_LINK` requires `connectionId` to name an existing, available VPC link; an unknown link yields `502` |
 | `cacheNamespace` / `cacheKeyParameters` | Form the response cache key (see below) |
@@ -229,11 +229,11 @@ Set `binaryMediaTypes` on the RestApi (exact types or a subtype wildcard such as
 
 ### Caching
 
-Response caching needs both switches AWS requires: `cacheClusterEnabled` on the stage and `caching/enabled` on the method (or the `*/*` wildcard) via `UpdateStage` patch operations. Entries are keyed by the integration's `cacheNamespace` and the values of its `cacheKeyParameters`, expire after `caching/ttlInSeconds` (default 300s), and only successful (`< 400`) responses are stored. There is no real cache cluster — `cacheClusterSize` is recorded and reported but has no effect on capacity.
+Response caching needs both switches AWS requires: `cacheClusterEnabled` on the stage and `caching/enabled` on the method (or the `*/*` wildcard) via `UpdateStage` patch operations. Entries are keyed by the integration's `cacheNamespace` and the values of its `cacheKeyParameters`, and by nothing else: AWS lets separate resources share a `cacheNamespace` precisely so they can return the same cached data, so the method and request path are deliberately not part of the key. The namespace defaults to the resource id, which keeps resources that did not opt into sharing separate. Entries expire after `caching/ttlInSeconds` (default 300s), and only successful (`< 400`) responses are stored. There is no real cache cluster — `cacheClusterSize` is recorded and reported but has no effect on capacity.
 
 ### VPC Links
 
-The five REST VPC Link operations (`CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`) are emulated at `/vpclinks`. `CreateVpcLink` requires a name and at least one target ARN, answers `202`, and provisions the link as `AVAILABLE` immediately rather than transitioning through `PENDING`. Since Floci has no real VPC, a valid link routes straight to the integration URI; what is enforced is that the link exists and is available.
+The five REST VPC Link operations (`CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`) are emulated at `/vpclinks`. `CreateVpcLink` requires a name and at least one target ARN, answers `202`, and provisions the link as `AVAILABLE` immediately rather than transitioning through `PENDING`. Since Floci has no real VPC, a valid link routes straight to the integration URI; what is enforced is that the link exists and is available. `UpdateVpcLink` follows AWS's patch-operation table: only `replace` on `/name` and `/description` is accepted, and any other operation or path returns `BadRequestException` rather than being applied or silently ignored.
 
 ### Examples
 

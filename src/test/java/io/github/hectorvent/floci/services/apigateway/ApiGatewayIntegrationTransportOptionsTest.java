@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.x500.X500Name;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.AfterAll;
@@ -19,11 +20,15 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -43,8 +48,12 @@ class ApiGatewayIntegrationTransportOptionsTest {
 
     private static HttpServer slowServer;
     private static HttpsServer tlsServer;
+    private static HttpsServer wrongHostTlsServer;
+    private static HttpsServer expiredTlsServer;
     private static int slowPort;
     private static int tlsPort;
+    private static int wrongHostTlsPort;
+    private static int expiredTlsPort;
 
     private final List<String> createdApis = new ArrayList<>();
 
@@ -60,12 +69,30 @@ class ApiGatewayIntegrationTransportOptionsTest {
         tlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
         tlsServer.start();
         tlsPort = tlsServer.getAddress().getPort();
+
+        // Same self-signed shape, but the certificate names a host this server is not reachable at,
+        // so only hostname verification can reject it.
+        wrongHostTlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        wrongHostTlsServer.setHttpsConfigurator(new HttpsConfigurator(
+                selfSignedContextFor("wrong.example", List.of("wrong.example"))));
+        wrongHostTlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
+        wrongHostTlsServer.start();
+        wrongHostTlsPort = wrongHostTlsServer.getAddress().getPort();
+
+        // Correct hostname, self-signed, but expired two days ago.
+        expiredTlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        expiredTlsServer.setHttpsConfigurator(new HttpsConfigurator(expiredSelfSignedContext()));
+        expiredTlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
+        expiredTlsServer.start();
+        expiredTlsPort = expiredTlsServer.getAddress().getPort();
     }
 
     @AfterAll
     static void stopBackends() {
         if (slowServer != null) slowServer.stop(0);
         if (tlsServer != null) tlsServer.stop(0);
+        if (wrongHostTlsServer != null) wrongHostTlsServer.stop(0);
+        if (expiredTlsServer != null) expiredTlsServer.stop(0);
     }
 
     /** Sleeps when asked to, so a configured timeout can be observed firing. */
@@ -91,9 +118,30 @@ class ApiGatewayIntegrationTransportOptionsTest {
 
     /** An SSLContext serving a genuinely self-signed cert no default trust store will accept. */
     private static SSLContext selfSignedContext() throws Exception {
+        return selfSignedContextFor("localhost", List.of("localhost", "127.0.0.1"));
+    }
+
+    /**
+     * A self-signed certificate for localhost whose validity window closed two days ago. Trusting
+     * everything accepts it; AWS does not, because expiration is part of the basic validation that
+     * survives insecureSkipVerification.
+     */
+    private static SSLContext expiredSelfSignedContext() throws Exception {
+        CertificateGenerator generator = new CertificateGenerator();
+        KeyPair keyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
+        X500Name dn = new X500Name("CN=localhost");
+        Instant now = Instant.now();
+        X509Certificate certificate = generator.signCertificate(
+                dn, keyPair.getPublic(), dn, keyPair.getPrivate(),
+                List.of("localhost", "127.0.0.1"), false, CertificateGenerator.LeafUsage.SERVER,
+                now.minus(10, ChronoUnit.DAYS), now.minus(2, ChronoUnit.DAYS));
+        return contextFor(certificate, keyPair.getPrivate());
+    }
+
+    private static SSLContext selfSignedContextFor(String commonName, List<String> sans) throws Exception {
         CertificateGenerator generator = new CertificateGenerator();
         CertificateGenerator.GeneratedCertificate generated = generator.generateSelfSignedCertificate(
-                "localhost", List.of("localhost", "127.0.0.1"), KeyAlgorithm.RSA_2048);
+                commonName, sans, KeyAlgorithm.RSA_2048);
 
         X509Certificate certificate = (X509Certificate) CertificateFactory.getInstance("X.509")
                 .generateCertificate(new ByteArrayInputStream(
@@ -103,6 +151,10 @@ class ApiGatewayIntegrationTransportOptionsTest {
         // own parser rather than PKCS8EncodedKeySpec.
         PrivateKey privateKey = generator.parsePrivateKey(generated.privateKeyPem());
 
+        return contextFor(certificate, privateKey);
+    }
+
+    private static SSLContext contextFor(X509Certificate certificate, PrivateKey privateKey) throws Exception {
         char[] password = "floci-test".toCharArray();
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
         keyStore.load(null, null);
@@ -220,5 +272,32 @@ class ApiGatewayIntegrationTransportOptionsTest {
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
                 .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+    }
+
+    @Test
+    void insecureSkipVerificationStillVerifiesTheHostname() {
+        String apiId = createApi("tls-insecure-wrong-host",
+                "https://localhost:" + wrongHostTlsPort + "/{proxy}",
+                ",\"tlsConfig\":{\"insecureSkipVerification\":true}");
+
+        // AWS documents insecureSkipVerification as skipping only the check that the certificate
+        // was issued by a supported CA: expiration, hostname and the presence of a root CA are
+        // still verified. A certificate issued for wrong.example must therefore fail against a
+        // backend addressed as localhost.
+        // See https://docs.aws.amazon.com/apigateway/latest/api/API_TlsConfig.html
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(502);
+    }
+
+    @Test
+    void insecureSkipVerificationStillRejectsAnExpiredCertificate() {
+        String apiId = createApi("tls-insecure-expired",
+                "https://localhost:" + expiredTlsPort + "/{proxy}",
+                ",\"tlsConfig\":{\"insecureSkipVerification\":true}");
+
+        // Expiration is the other half of the basic validation AWS keeps. A backend whose
+        // certificate has lapsed has to fail here too, or it works locally and breaks in AWS.
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(502);
     }
 }

@@ -22,6 +22,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -60,8 +61,10 @@ public class HttpProxyInvoker {
      * Per-integration transport settings.
      *
      * @param timeout     how long to wait for the backend response
-     * @param insecureTls skip backend certificate and hostname verification, for an integration
-     *                    configured with {@code tlsConfig.insecureSkipVerification}
+     * @param insecureTls stop requiring the backend certificate to be issued by a trusted
+     *                    certificate authority, for an integration configured with
+     *                    {@code tlsConfig.insecureSkipVerification}. Expiration, hostname and the
+     *                    presence of a root certificate authority are still checked, as in AWS.
      */
     public record ProxyOptions(Duration timeout, boolean insecureTls) {
         /** HTTP API (v2) defaults: 30s, certificates verified. */
@@ -94,26 +97,16 @@ public class HttpProxyInvoker {
 
     private HttpClient buildInsecureClient() {
         try {
-            TrustManager[] trustAll = {
-                    new X509TrustManager() {
-                        @Override
-                        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-
-                        @Override
-                        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-
-                        @Override
-                        public X509Certificate[] getAcceptedIssuers() {
-                            return new X509Certificate[0];
-                        }
-                    }
-            };
+            TrustManager[] trustManagers = {new CaIssuanceSkippingTrustManager()};
             SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, trustAll, new SecureRandom());
-            // A null endpoint identification algorithm turns off hostname verification, which
-            // insecureSkipVerification must also cover — a self-signed cert rarely matches the host.
+            sslContext.init(null, trustManagers, new SecureRandom());
+            // Hostname verification stays on. insecureSkipVerification waives only the "issued by a
+            // supported CA" check; AWS documents that it still verifies the hostname, so a
+            // certificate for the wrong host must fail here exactly as it would in AWS. Setting this
+            // explicitly matters: SSLParameters defaults the algorithm to null, so handing
+            // HttpClient a fresh instance without it would silently disable the check.
             SSLParameters sslParameters = new SSLParameters();
-            sslParameters.setEndpointIdentificationAlgorithm(null);
+            sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
             return HttpClient.newBuilder()
                     .version(HttpClient.Version.HTTP_1_1)
                     .connectTimeout(Duration.ofSeconds(10))
@@ -124,6 +117,78 @@ public class HttpProxyInvoker {
         } catch (GeneralSecurityException e) {
             LOG.warnv("Could not build insecure TLS client, falling back to verified: {0}", e.getMessage());
             return client;
+        }
+    }
+
+    /**
+     * The trust behaviour {@code tlsConfig.insecureSkipVerification} actually buys in AWS: API
+     * Gateway stops checking that the endpoint's certificate was issued by a supported certificate
+     * authority, so private-CA and self-signed certificates are accepted, but it still performs
+     * basic certificate validation covering the expiration date, the hostname and the presence of a
+     * root certificate authority. A trust-all manager is looser than that, and looser in the
+     * direction that hides bugs: a backend whose certificate has expired, or whose chain is broken,
+     * would work locally and fail in AWS.
+     *
+     * <p>Hostname verification is not done here, it is the SSL engine's endpoint identification.
+     */
+    private static final class CaIssuanceSkippingTrustManager implements X509TrustManager {
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            // This manager only ever verifies a backend as a client would; it never authenticates
+            // an inbound peer. Accepting one silently would be a genuine trust-all.
+            throw new CertificateException("client certificates are not accepted by this proxy");
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            if (chain == null || chain.length == 0) {
+                throw new CertificateException("backend presented no certificate");
+            }
+
+            // Expiration (and not-yet-valid), for every certificate in the chain.
+            for (X509Certificate certificate : chain) {
+                certificate.checkValidity();
+            }
+
+            // The chain has to hold together and terminate in a self-signed certificate: that
+            // trailing self-signed certificate is the "root certificate authority" whose presence
+            // AWS still requires. What is skipped is only whether that root is one we trust.
+            for (int i = 0; i < chain.length - 1; i++) {
+                verifySignedBy(chain[i], chain[i + 1]);
+            }
+            X509Certificate root = chain[chain.length - 1];
+            if (!root.getIssuerX500Principal().equals(root.getSubjectX500Principal())) {
+                throw new CertificateException(
+                        "certificate chain does not terminate in a root certificate authority: "
+                                + root.getSubjectX500Principal());
+            }
+            verifySignedBy(root, root);
+
+            // A chain longer than one certificate means a real root issued a leaf, and AWS requires
+            // such a root to carry cA=true with keyCertSign. A single self-signed certificate is the
+            // plain self-signed-server case the setting exists to enable, and is its own root, so
+            // requiring CA extensions on it would reject what AWS documents as supported.
+            if (chain.length > 1 && root.getBasicConstraints() < 0) {
+                throw new CertificateException(
+                        "root certificate is not a certificate authority (BasicConstraints cA=false): "
+                                + root.getSubjectX500Principal());
+            }
+        }
+
+        private static void verifySignedBy(X509Certificate certificate, X509Certificate issuer)
+                throws CertificateException {
+            try {
+                certificate.verify(issuer.getPublicKey());
+            } catch (GeneralSecurityException e) {
+                throw new CertificateException("certificate chain signature does not verify: "
+                        + e.getMessage(), e);
+            }
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
         }
     }
 

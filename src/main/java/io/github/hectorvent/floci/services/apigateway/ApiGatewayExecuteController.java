@@ -609,6 +609,12 @@ public class ApiGatewayExecuteController {
      * caching. The key is the integration's {@code cacheNamespace} plus the values of its
      * {@code cacheKeyParameters}, so two requests differing only in an uncached parameter share an
      * entry, which is exactly the behaviour that surprises people in production.
+     *
+     * <p>Nothing identifying the resource goes into the key beyond the namespace itself. AWS
+     * documents {@code cacheNamespace} as shareable across resources precisely so those resources
+     * can return the same cached data; mixing the method and request path back in would mean two
+     * resources could never share an entry, which is the setting's whole purpose. The namespace
+     * defaults to the resource id, so resources that did not opt into sharing stay separate.
      */
     private String cacheKeyFor(Stage stage, ApiGatewayResource resource, String httpMethod,
                                String path, Integration integration, HttpHeaders headers, UriInfo uriInfo) {
@@ -619,7 +625,6 @@ public class ApiGatewayExecuteController {
         StringBuilder key = new StringBuilder();
         key.append(integration.getCacheNamespace() != null
                 ? integration.getCacheNamespace() : resource.getId());
-        key.append('|').append(httpMethod).append('|').append(path);
         for (String param : integration.getCacheKeyParameters()) {
             key.append('|').append(param).append('=')
                     .append(cacheKeyParameterValue(param, headers, uriInfo, resource.getPath(), path));
