@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.backup.BackupService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
@@ -33,6 +34,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScali
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
@@ -137,6 +139,7 @@ final class CfnProvisionerFixture {
         private SnsService snsService;
         private DynamoDbService dynamoDbService;
         private LambdaService lambdaService;
+        private AppSyncService appSyncService;
         private IamService iamService;
         private SsmService ssmService;
         private KmsService kmsService;
@@ -284,6 +287,9 @@ final class CfnProvisionerFixture {
             if (acmService != null) {
                 discovered.add(new AcmCfnProvisioner(acmService));
             }
+            if (appSyncService != null) {
+                discovered.add(new AppSyncCfnProvisioner(appSyncService));
+            }
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
                 discovered.add(new LambdaEventInvokeConfigCfnProvisioner(lambdaService));
@@ -369,6 +375,11 @@ final class CfnProvisionerFixture {
 
         public Builder lambda(LambdaService v) {
             this.lambdaService = v;
+            return this;
+        }
+
+        public Builder appSync(AppSyncService v) {
+            this.appSyncService = v;
             return this;
         }
 
