@@ -52,10 +52,14 @@ public record RequestContext(
     }
 
     private static Map<String, List<String>> expand(Map<String, String> single) {
-        if (single == null) return null;
+        if (single == null) {
+            return null;
+        }
         Map<String, List<String>> expanded = new LinkedHashMap<>();
         single.forEach((name, value) -> {
-            if (value != null) expanded.put(name, List.of(value));
+            if (value != null) {
+                expanded.put(name, List.of(value));
+            }
         });
         return expanded;
     }

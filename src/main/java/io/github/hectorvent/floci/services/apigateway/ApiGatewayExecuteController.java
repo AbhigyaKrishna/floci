@@ -49,6 +49,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -491,21 +492,21 @@ public class ApiGatewayExecuteController {
         // proxy integration passes the request through, so "?tag=a&tag=b" has to arrive as two
         // tag parameters and not as "tag=a,b". The joined single-value maps are only the lookup
         // surface for method.request.* parameter mapping, which resolves to one value in AWS too.
-        Map<String, List<String>> multiValueHeaders = new java.util.LinkedHashMap<>();
-        Map<String, String> headerMap = new java.util.LinkedHashMap<>();
+        Map<String, List<String>> multiValueHeaders = new LinkedHashMap<>();
+        Map<String, String> headerMap = new LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
             if (e.getValue().isEmpty()) continue;
             multiValueHeaders.put(e.getKey(), List.copyOf(e.getValue()));
             headerMap.put(e.getKey(), String.join(",", e.getValue()));
         }
-        Map<String, List<String>> multiValueQuery = new java.util.LinkedHashMap<>();
-        Map<String, String> queryMap = new java.util.LinkedHashMap<>();
+        Map<String, List<String>> multiValueQuery = new LinkedHashMap<>();
+        Map<String, String> queryMap = new LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
             if (e.getValue().isEmpty()) continue;
             multiValueQuery.put(e.getKey(), List.copyOf(e.getValue()));
             queryMap.put(e.getKey(), String.join(",", e.getValue()));
         }
-        Map<String, String> pathMap = new java.util.LinkedHashMap<>();
+        Map<String, String> pathMap = new LinkedHashMap<>();
         if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
 
@@ -624,9 +625,9 @@ public class ApiGatewayExecuteController {
 
         // Only explicitly mapped parameters reach the backend — the defining difference from
         // HTTP_PROXY, which seeds the outgoing request with every inbound header and query param.
-        Map<String, String> outHeaders = new java.util.LinkedHashMap<>();
-        Map<String, String> outQuery = new java.util.LinkedHashMap<>();
-        Map<String, String> outPath = new java.util.LinkedHashMap<>(pathMap);
+        Map<String, String> outHeaders = new LinkedHashMap<>();
+        Map<String, String> outQuery = new LinkedHashMap<>();
+        Map<String, String> outPath = new LinkedHashMap<>(pathMap);
         Map<String, String> requestParameters = integration.getRequestParameters();
         if (requestParameters != null) {
             for (Map.Entry<String, String> param : requestParameters.entrySet()) {
@@ -2069,12 +2070,26 @@ public class ApiGatewayExecuteController {
             }
         }
 
-        Map<String, String> requestHeaders = new java.util.LinkedHashMap<>();
+        // Same two views of the inbound data as the REST proxy path: the multi-value maps are what
+        // reaches the backend, so "?tag=a&tag=b" stays two parameters, while the joined single-value
+        // maps are the lookup surface for $request.header.X / $request.querystring.X, which resolve
+        // to one value in AWS.
+        Map<String, List<String>> multiValueHeaders = new LinkedHashMap<>();
+        Map<String, String> requestHeaders = new LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (e.getValue().isEmpty()) {
+                continue;
+            }
+            multiValueHeaders.put(e.getKey(), List.copyOf(e.getValue()));
             requestHeaders.put(e.getKey(), String.join(",", e.getValue()));
         }
-        Map<String, String> queryParams = new java.util.LinkedHashMap<>();
+        Map<String, List<String>> multiValueQueryParams = new LinkedHashMap<>();
+        Map<String, String> queryParams = new LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+            if (e.getValue().isEmpty()) {
+                continue;
+            }
+            multiValueQueryParams.put(e.getKey(), List.copyOf(e.getValue()));
             queryParams.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
@@ -2095,7 +2110,7 @@ public class ApiGatewayExecuteController {
                         pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
                         UUID.randomUUID().toString(), sourceIp,
                         requestHeaders, queryParams, pathParams, body,
-                        claims, Map.of());
+                        claims, Map.of(), multiValueHeaders, multiValueQueryParams);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());
@@ -2145,7 +2160,7 @@ public class ApiGatewayExecuteController {
     private static io.github.hectorvent.floci.services.apigatewayv2.model.Integration withResolvedUriAndHost(
             io.github.hectorvent.floci.services.apigatewayv2.model.Integration original, String targetUri, String host) {
         io.github.hectorvent.floci.services.apigatewayv2.model.Integration copy = withResolvedUri(original, targetUri);
-        Map<String, String> requestParameters = new java.util.LinkedHashMap<>();
+        Map<String, String> requestParameters = new LinkedHashMap<>();
         if (copy.getRequestParameters() != null) {
             requestParameters.putAll(copy.getRequestParameters());
         }
@@ -2170,7 +2185,7 @@ public class ApiGatewayExecuteController {
         Matcher m = compiled.pattern().matcher(actualPath);
         if (!m.matches()) return Map.of();
 
-        Map<String, String> result = new java.util.LinkedHashMap<>();
+        Map<String, String> result = new LinkedHashMap<>();
         for (int i = 0; i < compiled.parameterNames().size(); i++) {
             result.put(compiled.parameterNames().get(i), m.group(i + 1));
         }
@@ -2703,7 +2718,7 @@ public class ApiGatewayExecuteController {
             // - mirrored here rather than dropping or restructuring anything, since callers may
             // read any claim name, not just the ones this method itself validates. The exact
             // per-type rendering is renderClaimValue's (measured, not JSON for arrays/nulls).
-            Map<String, String> raw = new java.util.LinkedHashMap<>();
+            Map<String, String> raw = new LinkedHashMap<>();
             java.util.Iterator<Map.Entry<String, JsonNode>> fields = claims.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();

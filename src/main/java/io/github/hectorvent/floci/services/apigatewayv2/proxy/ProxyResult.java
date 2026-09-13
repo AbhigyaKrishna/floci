@@ -23,18 +23,4 @@ public record ProxyResult(int statusCode, Map<String, List<String>> headers, byt
         headers.forEach((name, value) -> expanded.put(name, List.of(value)));
         return new ProxyResult(statusCode, expanded, body);
     }
-
-    /**
-     * First value of {@code name} (case-insensitive), or null when absent. For
-     * callers that only ever expect one value, such as {@code Content-Type}.
-     */
-    public String firstHeader(String name) {
-        if (headers == null) return null;
-        for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-            if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
-                return entry.getValue().get(0);
-            }
-        }
-        return null;
-    }
 }
