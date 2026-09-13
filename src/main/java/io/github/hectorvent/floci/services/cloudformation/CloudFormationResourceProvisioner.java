@@ -3319,6 +3319,7 @@ public class CloudFormationResourceProvisioner {
         if (authorizerId != null) {
             req.put("authorizerId", authorizerId);
         }
+        req.put("apiKeyRequired", Boolean.parseBoolean(resolveOrDefault(props, "ApiKeyRequired", engine, "false")));
 
         apiGatewayService.putMethod(region, apiId, resourceId, httpMethod, req);
         r.setPhysicalId(apiId + "-" + resourceId + "-" + httpMethod);

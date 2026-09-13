@@ -386,6 +386,15 @@ public class ApiGatewayExecuteController {
         AuthorizerResult authorizerResult = invokeAuthorizer(region, apiId, stageName, httpMethod, path, matched.getPath(), matched.getId(), stage, method, headers, uriInfo, resolvedApiKey);
         if (authorizerResult.errorResponse() != null) return authorizerResult.errorResponse();
 
+        // API Gateway checks the API key requirement after authorization but before request
+        // validation and throttling. resolvedApiKey is null when the header is missing or matches
+        // no enabled key linked to this (apiId, stage) through a usage plan.
+        if (method.isApiKeyRequired() && resolvedApiKey == null) {
+            return Response.status(403)
+                    .entity(jsonMessage("Forbidden"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
         // 2. Request validation
         Response validationResponse = validateRequest(region, apiId, method, headers, uriInfo, body);
         if (validationResponse != null) return validationResponse;
