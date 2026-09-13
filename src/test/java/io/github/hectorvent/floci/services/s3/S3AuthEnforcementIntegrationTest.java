@@ -1392,6 +1392,75 @@ class S3AuthEnforcementIntegrationTest {
             .body(containsString("<VersionId>" + versionId + "</VersionId>"));
     }
 
+    @Test
+    @Order(45)
+    void batchDeleteBypassPermissionOnlyAppliesToGovernanceLockedEntries() {
+        String bucket = "auth-batch-bypass-scope-bucket";
+        String unlockedKey = "unlocked.txt";
+        String lockedKey = "locked.txt";
+        given().when().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+            .body("unlocked")
+        .when()
+            .put("/" + bucket + "/" + unlockedKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2030-01-01T00:00:00Z")
+            .body("locked")
+        .when()
+            .put("/" + bucket + "/" + lockedKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body(publicObjectActionPolicy(bucket, "s3:DeleteObject"))
+        .when()
+            .put("/" + bucket + "?policy")
+        .then()
+            .statusCode(200);
+
+        String deleteXml = """
+                <Delete>
+                  <Object><Key>%s</Key></Object>
+                  <Object><Key>%s</Key></Object>
+                </Delete>
+                """.formatted(unlockedKey, lockedKey);
+
+        given()
+            .header("x-amz-bypass-governance-retention", "true")
+            .contentType("application/xml")
+            .body(deleteXml)
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Deleted><Key>" + unlockedKey + "</Key>"))
+            .body(containsString("<Error><Key>" + lockedKey + "</Key>"))
+            .body(containsString("<Code>AccessDenied</Code>"));
+
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+        .when()
+            .get("/" + bucket + "/" + unlockedKey)
+        .then()
+            .statusCode(404);
+
+        given()
+            .header("Authorization", LOCAL_AUTH_HEADER)
+        .when()
+            .get("/" + bucket + "/" + lockedKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo("locked"));
+    }
+
     private static String conditionalDenyObjectActionPolicy(String bucket, String action) {
         return """
                 {
