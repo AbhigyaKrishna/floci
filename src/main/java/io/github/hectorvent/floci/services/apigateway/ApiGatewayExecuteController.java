@@ -338,18 +338,24 @@ public class ApiGatewayExecuteController {
 
         ApiGatewayResource matched = null;
         MethodConfig method = null;
+        // Candidates are ordered exact, then parameterised, then greedy. AWS picks the most
+        // specific resource that can serve the method, so one declaring methods but not this
+        // one yields to a less specific sibling that declares it: /users/me carrying only PATCH
+        // does not hide GET /users/{userId}, and /devices carrying only POST falls through to
+        // GET /{proxy+}. The request is refused only when no candidate declares the method.
         for (ApiGatewayResource r : matchedResources) {
-            if (r.getResourceMethods() != null && !r.getResourceMethods().isEmpty()) {
-                MethodConfig m = r.getResourceMethods().get(httpMethod.toUpperCase());
-                if (m == null) {
-                    m = r.getResourceMethods().get("ANY");
-                }
-                if (m != null) {
-                    matched = r;
-                    method = m;
-                }
-                // Once we match a path that has methods configured, we must not fall back
-                // to less specific sibling resources (e.g. /{proxy+}), even on method mismatch.
+            Map<String, MethodConfig> resourceMethods = r.getResourceMethods();
+            if (resourceMethods == null || resourceMethods.isEmpty()) {
+                continue;
+            }
+
+            MethodConfig m = resourceMethods.get(httpMethod.toUpperCase());
+            if (m == null) {
+                m = resourceMethods.get("ANY");
+            }
+            if (m != null) {
+                matched = r;
+                method = m;
                 break;
             }
         }
