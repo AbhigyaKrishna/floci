@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * Covers the REST (v1) VPC Link operations and stage-level response caching, both previously absent.
  *
- * <p>Floci has no real VPC, so a VPC_LINK integration routes straight to its URI — what is enforced
+ * <p>Floci has no real VPC, so a VPC_LINK integration routes straight to its URI. What is enforced
  * is the misconfiguration AWS also rejects: naming a link that does not exist.
  *
  * <p>Caching follows AWS's two-level switch: the stage needs a cache cluster and the method needs
@@ -122,6 +122,60 @@ class ApiGatewayVpcLinkAndCachingTest {
         return apiId;
     }
 
+    /**
+     * A deployed API with GET /alpha and GET /beta, both proxying to the same backend with caching
+     * on. When {@code cacheNamespace} is non-null both integrations declare it, which is how AWS
+     * lets separate resources return the same cached data.
+     */
+    private String createTwoResourceApi(String name, String cacheNamespace) {
+        String apiId = given().contentType(ContentType.JSON)
+                .body("{\"name\":\"" + name + "\"}")
+                .when().post("/restapis").then().statusCode(201).extract().path("id");
+        createdApis.add(apiId);
+
+        String rootId = given().when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200).extract().path("item[0].id");
+
+        String namespaceField = cacheNamespace == null
+                ? "" : ",\"cacheNamespace\":\"" + cacheNamespace + "\"";
+        for (String pathPart : List.of("alpha", "beta")) {
+            String resourceId = given().contentType(ContentType.JSON)
+                    .body("{\"pathPart\":\"" + pathPart + "\"}")
+                    .when().post("/restapis/" + apiId + "/resources/" + rootId)
+                    .then().statusCode(201).extract().path("id");
+
+            given().contentType(ContentType.JSON).body("{\"authorizationType\":\"NONE\"}")
+                    .when().put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                    .then().statusCode(201);
+
+            given().contentType(ContentType.JSON)
+                    .body("{\"type\":\"HTTP_PROXY\",\"httpMethod\":\"GET\","
+                            + "\"uri\":\"http://127.0.0.1:" + backendPort + "/widget\""
+                            + namespaceField + "}")
+                    .when().put("/restapis/" + apiId + "/resources/" + resourceId
+                            + "/methods/GET/integration")
+                    .then().statusCode(201);
+        }
+
+        String deploymentId = given().contentType(ContentType.JSON).body("{}")
+                .when().post("/restapis/" + apiId + "/deployments")
+                .then().statusCode(201).extract().path("id");
+        given().contentType(ContentType.JSON)
+                .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deploymentId + "\","
+                        + "\"cacheClusterEnabled\":true}")
+                .when().post("/restapis/" + apiId + "/stages")
+                .then().statusCode(201);
+
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":["
+                        + "{\"op\":\"replace\",\"path\":\"/~1alpha/GET/caching/enabled\",\"value\":\"true\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/~1beta/GET/caching/enabled\",\"value\":\"true\"}]}")
+                .when().patch("/restapis/" + apiId + "/stages/test")
+                .then().statusCode(200);
+
+        return apiId;
+    }
+
     /** Turns on caching for GET /widget on the stage. */
     private void enableMethodCaching(String apiId, int ttlSeconds) {
         given().contentType(ContentType.JSON)
@@ -196,7 +250,7 @@ class ApiGatewayVpcLinkAndCachingTest {
     @Test
     void cachingIsOffWhenTheStageHasNoCacheCluster() {
         backendHits.set(0);
-        // Method-level caching alone is not enough — AWS needs the stage's cache cluster too.
+        // Method-level caching alone is not enough: AWS needs the stage's cache cluster too.
         String apiId = createApi("cache-no-cluster", "", "");
         enableMethodCaching(apiId, 300);
 
@@ -220,6 +274,64 @@ class ApiGatewayVpcLinkAndCachingTest {
         given().when().get("/execute-api/" + apiId + "/test/widget?tenant=b").then().statusCode(200);
 
         assertEquals(2, backendHits.get(), "tenant=a should be cached, tenant=b should miss");
+    }
+
+    @Test
+    void aSharedCacheNamespaceLetsTwoResourcesReturnTheSameCachedData() {
+        backendHits.set(0);
+        String apiId = createTwoResourceApi("cache-shared-ns", "reports");
+
+        given().when().get("/execute-api/" + apiId + "/test/alpha")
+                .then().statusCode(200).body("hit", equalTo(1));
+        // AWS documents cacheNamespace as shareable across resources so that those resources can
+        // return the same cached data. Folding the method and request path into the key would make
+        // that impossible, since two resources never share a path.
+        given().when().get("/execute-api/" + apiId + "/test/beta")
+                .then().statusCode(200).body("hit", equalTo(1));
+
+        assertEquals(1, backendHits.get(),
+                "the second resource shares the namespace, so it should read the first one's entry");
+    }
+
+    @Test
+    void resourcesKeepSeparateEntriesWithoutASharedNamespace() {
+        backendHits.set(0);
+        // cacheNamespace defaults to the resource id, so resources that did not opt into sharing
+        // still get an entry each.
+        String apiId = createTwoResourceApi("cache-default-ns", null);
+
+        given().when().get("/execute-api/" + apiId + "/test/alpha").then().statusCode(200);
+        given().when().get("/execute-api/" + apiId + "/test/beta").then().statusCode(200);
+
+        assertEquals(2, backendHits.get(), "distinct default namespaces should not share an entry");
+    }
+
+    @Test
+    void updateVpcLinkRejectsAnUnsupportedOperation() {
+        String linkId = createVpcLink("patch-op-link");
+
+        // AWS's patch-operation table supports only replace on a VPC link, and applying an
+        // unsupported operation returns an error. Accepting remove here would have set the name to
+        // the supplied value instead.
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"remove\",\"path\":\"/name\",\"value\":\"gone\"}]}")
+                .when().patch("/vpclinks/" + linkId)
+                .then().statusCode(400);
+
+        given().when().get("/vpclinks/" + linkId)
+                .then().statusCode(200).body("name", equalTo("patch-op-link"));
+    }
+
+    @Test
+    void updateVpcLinkRejectsAnUnsupportedPath() {
+        String linkId = createVpcLink("patch-path-link");
+
+        // Only /name and /description are patchable. Silently ignoring /targetArns would report
+        // success for a change that never happened.
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/targetArns\",\"value\":\"x\"}]}")
+                .when().patch("/vpclinks/" + linkId)
+                .then().statusCode(400);
     }
 
     @Test

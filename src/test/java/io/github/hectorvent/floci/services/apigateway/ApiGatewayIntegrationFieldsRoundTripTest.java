@@ -14,9 +14,9 @@ import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * Round-trips the {@code PutIntegration} fields AWS documents that Floci previously accepted and
- * silently dropped — {@code contentHandling}, {@code timeoutInMillis}, {@code connectionType},
+ * silently dropped: {@code contentHandling}, {@code timeoutInMillis}, {@code connectionType},
  * {@code connectionId}, {@code credentials}, {@code cacheNamespace}, {@code cacheKeyParameters} and
- * {@code tlsConfig} — plus {@code contentHandling} on an integration response and
+ * {@code tlsConfig}, plus {@code contentHandling} on an integration response and
  * {@code binaryMediaTypes} on the RestApi.
  *
  * <p>The mapping configuration these sit alongside ({@code requestParameters},

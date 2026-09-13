@@ -3220,16 +3220,33 @@ public class ApiGatewayService {
         return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
     }
 
+    /**
+     * AWS's patch-operation table for a VPC link supports only {@code replace}, and only on
+     * {@code /name} and {@code /description}. Applying anything else is an error rather than a
+     * no-op: silently accepting {@code op=remove,path=/name} would have set the name to the
+     * supplied value, and silently ignoring an unknown path would report success for a change that
+     * never happened.
+     */
     public VpcLink updateVpcLink(String region, String vpcLinkId, List<Map<String, String>> patchOperations) {
         VpcLink link = getVpcLink(region, vpcLinkId);
-        for (Map<String, String> op : patchOperations) {
-            String path = op.get("path");
-            String value = op.get("value");
-            if (path == null) continue;
-            switch (path) {
-                case "/name" -> link.setName(value);
-                case "/description" -> link.setDescription(value);
-                default -> LOG.debugv("Ignoring unsupported VPC link patch path: {0}", path);
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                String operation = op.get("op");
+                String path = op.get("path");
+                String value = op.get("value");
+                if (!"replace".equals(operation)) {
+                    throw new AwsException("BadRequestException", "Unsupported operation", 400);
+                }
+                if (path == null) {
+                    throw new AwsException("BadRequestException", "Missing path", 400);
+                }
+                switch (path) {
+                    case "/name" -> link.setName(value);
+                    case "/description" -> link.setDescription(value);
+                    default -> throw new AwsException("BadRequestException",
+                            "Invalid patch path  '" + path + "' specified for op 'replace'. "
+                                    + "Must be one of: [/name, /description]", 400);
+                }
             }
         }
         vpcLinkStore.put(vpcLinkKey(region, vpcLinkId), link);

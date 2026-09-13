@@ -24,12 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Covers {@code binaryMediaTypes} on the RestApi together with {@code contentHandling} on the
- * integration and its integration responses — AWS's mechanism for moving binary payloads through a
+ * integration and its integration responses, AWS's mechanism for moving binary payloads through a
  * REST API.
  *
  * <p>{@code CONVERT_TO_TEXT} base64-encodes a binary payload so it can be handled as a string;
  * {@code CONVERT_TO_BINARY} decodes a base64 text payload back into bytes. Both are applied on the
- * way out of the stage they belong to — request-side for the integration, response-side for the
+ * way out of the stage they belong to: request-side for the integration, response-side for the
  * integration response.
  */
 @QuarkusTest
@@ -186,15 +186,15 @@ class ApiGatewayBinaryContentHandlingTest {
                 .when().post("/execute-api/" + apiId + "/test/widget")
                 .then().statusCode(200);
 
-        // No conversion requested, so the payload is handled as text — decidedly not base64.
+        // No conversion requested, so the payload is handled as text, decidedly not base64.
         assertEquals(false,
                 Base64.getEncoder().encodeToString(BINARY_PAYLOAD)
                         .equals(new String(receivedBody.get(), StandardCharsets.UTF_8)));
     }
 
     /**
-     * AWS documents the wildcard character for {@code binaryMediaTypes} generally — "You can use the
-     * wildcard character (*) to cover multiple media types" — not only as the full catch-all entry.
+     * AWS documents the wildcard character for {@code binaryMediaTypes} generally: "You can use the
+     * wildcard character (*) to cover multiple media types", not only as the full catch-all entry.
      * So an {@code image/*} entry has to cover {@code image/png}, which is never named explicitly.
      */
     @Test
