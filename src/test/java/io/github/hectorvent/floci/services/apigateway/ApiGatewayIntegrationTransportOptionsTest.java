@@ -65,14 +65,20 @@ class ApiGatewayIntegrationTransportOptionsTest {
     private static HttpsServer expiredTlsServer;
     private static HttpsServer privateCaTlsServer;
     private static HttpsServer nonSigningRootTlsServer;
+    private static HttpsServer keyUsagelessRootTlsServer;
     private static HttpsServer nameConstrainedRootTlsServer;
+    private static HttpsServer nameConstrainedIntermediateTlsServer;
+    private static HttpsServer permissiveIntermediateTlsServer;
     private static int slowPort;
     private static int tlsPort;
     private static int wrongHostTlsPort;
     private static int expiredTlsPort;
     private static int privateCaTlsPort;
     private static int nonSigningRootTlsPort;
+    private static int keyUsagelessRootTlsPort;
     private static int nameConstrainedRootTlsPort;
+    private static int nameConstrainedIntermediateTlsPort;
+    private static int permissiveIntermediateTlsPort;
 
     private final List<String> createdApis = new ArrayList<>();
 
@@ -123,17 +129,41 @@ class ApiGatewayIntegrationTransportOptionsTest {
         nonSigningRootTlsServer.start();
         nonSigningRootTlsPort = nonSigningRootTlsServer.getAddress().getPort();
 
-        // A fully-formed root that constrains itself to issuing for internal.example, issuing for
-        // localhost anyway. AWS enforces X509v3 name constraints on the chain.
-        NameConstraints internalOnly = new NameConstraints(
-                new GeneralSubtree[]{new GeneralSubtree(new GeneralName(GeneralName.dNSName, "internal.example"))},
-                null);
+        // Same chain again, except the root carries no keyUsage extension at all. AWS states the
+        // extension itself as a requirement on a private root, not just the bit inside it.
+        keyUsagelessRootTlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        keyUsagelessRootTlsServer.setHttpsConfigurator(new HttpsConfigurator(privateCaContext(null, null)));
+        keyUsagelessRootTlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
+        keyUsagelessRootTlsServer.start();
+        keyUsagelessRootTlsPort = keyUsagelessRootTlsServer.getAddress().getPort();
+
+        // A fully-formed root that additionally carries Name Constraints of its own.
+        NameConstraints internalOnly = permittedDnsSubtree("internal.example");
         nameConstrainedRootTlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         nameConstrainedRootTlsServer.setHttpsConfigurator(new HttpsConfigurator(privateCaContext(
                 KeyUsage.digitalSignature | KeyUsage.keyCertSign | KeyUsage.cRLSign, internalOnly)));
         nameConstrainedRootTlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
         nameConstrainedRootTlsServer.start();
         nameConstrainedRootTlsPort = nameConstrainedRootTlsServer.getAddress().getPort();
+
+        // Three certificates, with the constraints on the intermediate where the validator actually
+        // reads them: the intermediate permits itself internal.example and issued for localhost.
+        nameConstrainedIntermediateTlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        nameConstrainedIntermediateTlsServer.setHttpsConfigurator(new HttpsConfigurator(
+                intermediateCaContext(permittedDnsSubtree("internal.example"))));
+        nameConstrainedIntermediateTlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
+        nameConstrainedIntermediateTlsServer.start();
+        nameConstrainedIntermediateTlsPort = nameConstrainedIntermediateTlsServer.getAddress().getPort();
+
+        // The same three-certificate shape whose intermediate permits localhost. Without this, the
+        // test above would pass for any three-certificate chain rather than because of the
+        // constraint it names.
+        permissiveIntermediateTlsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        permissiveIntermediateTlsServer.setHttpsConfigurator(new HttpsConfigurator(
+                intermediateCaContext(permittedDnsSubtree("localhost"))));
+        permissiveIntermediateTlsServer.createContext("/", exchange -> respond(exchange, 200, "{\"tls\":\"ok\"}"));
+        permissiveIntermediateTlsServer.start();
+        permissiveIntermediateTlsPort = permissiveIntermediateTlsServer.getAddress().getPort();
     }
 
     @AfterAll
@@ -144,7 +174,10 @@ class ApiGatewayIntegrationTransportOptionsTest {
         if (expiredTlsServer != null) expiredTlsServer.stop(0);
         if (privateCaTlsServer != null) privateCaTlsServer.stop(0);
         if (nonSigningRootTlsServer != null) nonSigningRootTlsServer.stop(0);
+        if (keyUsagelessRootTlsServer != null) keyUsagelessRootTlsServer.stop(0);
         if (nameConstrainedRootTlsServer != null) nameConstrainedRootTlsServer.stop(0);
+        if (nameConstrainedIntermediateTlsServer != null) nameConstrainedIntermediateTlsServer.stop(0);
+        if (permissiveIntermediateTlsServer != null) permissiveIntermediateTlsServer.stop(0);
     }
 
     /** Sleeps when asked to, so a configured timeout can be observed firing. */
@@ -212,7 +245,68 @@ class ApiGatewayIntegrationTransportOptionsTest {
      * private certificate authority looks like on the wire, and both are the knobs AWS documents as
      * still mattering under {@code insecureSkipVerification}.
      */
-    private static SSLContext privateCaContext(int rootKeyUsageBits, NameConstraints nameConstraints)
+    /** Permitted subtrees naming a single DNS name, the usual private-CA scoping shape. */
+    private static NameConstraints permittedDnsSubtree(String dnsName) {
+        return new NameConstraints(
+                new GeneralSubtree[]{new GeneralSubtree(new GeneralName(GeneralName.dNSName, dnsName))},
+                null);
+    }
+
+    /**
+     * A three-certificate chain, root to intermediate to {@code localhost} leaf, where the
+     * intermediate carries {@code nameConstraints}. Constraints belong on the intermediate to be
+     * enforced: it sits inside the certification path, where the validator reads extensions, rather
+     * than being the trust anchor, whose extensions are never looked at.
+     */
+    private static SSLContext intermediateCaContext(NameConstraints nameConstraints) throws Exception {
+        KeyPairGenerator keys = KeyPairGenerator.getInstance("RSA");
+        keys.initialize(2048);
+        KeyPair rootKeyPair = keys.generateKeyPair();
+        KeyPair intermediateKeyPair = keys.generateKeyPair();
+        KeyPair leafKeyPair = keys.generateKeyPair();
+
+        Instant now = Instant.now();
+        int caKeyUsage = KeyUsage.digitalSignature | KeyUsage.keyCertSign | KeyUsage.cRLSign;
+
+        X500Name rootDn = new X500Name("CN=Floci Test Root");
+        X509Certificate root = buildCa(rootDn, rootKeyPair.getPublic(), rootDn, rootKeyPair.getPrivate(),
+                caKeyUsage, null, now);
+
+        X500Name intermediateDn = new X500Name("CN=Floci Test Intermediate");
+        X509Certificate intermediate = buildCa(intermediateDn, intermediateKeyPair.getPublic(),
+                rootDn, rootKeyPair.getPrivate(), caKeyUsage, nameConstraints, now);
+
+        X509Certificate leaf = new CertificateGenerator().signCertificate(
+                new X500Name("CN=localhost"), leafKeyPair.getPublic(), intermediateDn,
+                intermediateKeyPair.getPrivate(), List.of("localhost", "127.0.0.1"), false,
+                CertificateGenerator.LeafUsage.SERVER, now.minus(1, ChronoUnit.DAYS),
+                now.plus(30, ChronoUnit.DAYS));
+
+        return contextFor(leafKeyPair.getPrivate(), leaf, intermediate, root);
+    }
+
+    /** A CA certificate, self-signed when {@code issuerDn} is its own subject. */
+    private static X509Certificate buildCa(X500Name subjectDn, java.security.PublicKey subjectKey,
+                                           X500Name issuerDn, PrivateKey issuerKey, Integer keyUsageBits,
+                                           NameConstraints nameConstraints, Instant now) throws Exception {
+        JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                issuerDn, new BigInteger(128, new SecureRandom()),
+                Date.from(now.minus(1, ChronoUnit.DAYS)), Date.from(now.plus(365, ChronoUnit.DAYS)),
+                subjectDn, subjectKey);
+        builder.addExtension(Extension.basicConstraints, true, new BasicConstraints(true));
+        // A null bit set means the extension is left off entirely, which is its own case: AWS
+        // requires the extension to be there, not merely to have the right bit when present.
+        if (keyUsageBits != null) {
+            builder.addExtension(Extension.keyUsage, true, new KeyUsage(keyUsageBits));
+        }
+        if (nameConstraints != null) {
+            builder.addExtension(Extension.nameConstraints, true, nameConstraints);
+        }
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(issuerKey);
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
+    }
+
+    private static SSLContext privateCaContext(Integer rootKeyUsageBits, NameConstraints nameConstraints)
             throws Exception {
         KeyPairGenerator keys = KeyPairGenerator.getInstance("RSA");
         keys.initialize(2048);
@@ -221,18 +315,8 @@ class ApiGatewayIntegrationTransportOptionsTest {
 
         Instant now = Instant.now();
         X500Name rootDn = new X500Name("CN=Floci Test Root");
-        JcaX509v3CertificateBuilder rootBuilder = new JcaX509v3CertificateBuilder(
-                rootDn, new BigInteger(128, new SecureRandom()),
-                Date.from(now.minus(1, ChronoUnit.DAYS)), Date.from(now.plus(365, ChronoUnit.DAYS)),
-                rootDn, rootKeyPair.getPublic());
-        rootBuilder.addExtension(Extension.basicConstraints, true, new BasicConstraints(true));
-        rootBuilder.addExtension(Extension.keyUsage, true, new KeyUsage(rootKeyUsageBits));
-        if (nameConstraints != null) {
-            rootBuilder.addExtension(Extension.nameConstraints, true, nameConstraints);
-        }
-        ContentSigner rootSigner = new JcaContentSignerBuilder("SHA256withRSA").build(rootKeyPair.getPrivate());
-        X509Certificate root = new JcaX509CertificateConverter()
-                .getCertificate(rootBuilder.build(rootSigner));
+        X509Certificate root = buildCa(rootDn, rootKeyPair.getPublic(), rootDn,
+                rootKeyPair.getPrivate(), rootKeyUsageBits, nameConstraints, now);
 
         X509Certificate leaf = new CertificateGenerator().signCertificate(
                 new X500Name("CN=localhost"), leafKeyPair.getPublic(), rootDn, rootKeyPair.getPrivate(),
@@ -423,14 +507,60 @@ class ApiGatewayIntegrationTransportOptionsTest {
     }
 
     @Test
-    void insecureSkipVerificationStillEnforcesNameConstraints() {
+    void insecureSkipVerificationRejectsAPrivateRootWithNoKeyUsageExtension() {
+        String apiId = createApi("tls-insecure-root-without-key-usage",
+                "https://localhost:" + keyUsagelessRootTlsPort + "/{proxy}",
+                ",\"tlsConfig\":{\"insecureSkipVerification\":true}");
+
+        // AWS states the constraint as "x509 extension keyUsage must have keyCertSign", which a
+        // root carrying no keyUsage extension does not satisfy. Generic PKIX would read the absent
+        // extension as leaving the key unrestricted, and that looser reading accepts a certificate
+        // authority real API Gateway turns away.
+        // See https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-extensions-integration-tls-config.html
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(502);
+    }
+
+    @Test
+    void insecureSkipVerificationEnforcesNameConstraintsOnAnIntermediate() {
+        String apiId = createApi("tls-insecure-name-constrained-intermediate",
+                "https://localhost:" + nameConstrainedIntermediateTlsPort + "/{proxy}",
+                ",\"tlsConfig\":{\"insecureSkipVerification\":true}");
+
+        // The intermediate permits itself only internal.example and issued for localhost anyway.
+        // AWS documents certificate chain validation as including X509v3 Name Constraints
+        // enforcement, so an issuer overreaching its own declared scope must not be honoured here.
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(502);
+    }
+
+    @Test
+    void insecureSkipVerificationReachesABackendWhoseIntermediatePermitsIt() {
+        String apiId = createApi("tls-insecure-permissive-intermediate",
+                "https://localhost:" + permissiveIntermediateTlsPort + "/{proxy}",
+                ",\"tlsConfig\":{\"insecureSkipVerification\":true}");
+
+        // Same three-certificate shape, same code path, with the constraint satisfied. Without this
+        // the test above would be satisfied by any rejection of a three-certificate chain rather
+        // than by the constraint it names.
+        given().when().get("/execute-api/" + apiId + "/test/thing")
+                .then().statusCode(200)
+                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+    }
+
+    @Test
+    void insecureSkipVerificationRejectsARootCarryingNameConstraints() {
         String apiId = createApi("tls-insecure-name-constrained-root",
                 "https://localhost:" + nameConstrainedRootTlsPort + "/{proxy}",
                 ",\"tlsConfig\":{\"insecureSkipVerification\":true}");
 
-        // The root permits itself only internal.example and issued for localhost regardless. AWS
-        // documents X509v3 name constraints as enforced on the chain, so a root overreaching its
-        // own declared scope must not be honoured here either.
+        // Constraints on the trust anchor itself are a separate case from the one above, and they
+        // cannot be evaluated: the platform validator refuses to process constraints supplied with
+        // an anchor rather than read from a certificate in the path. Rejecting is the safe
+        // direction and the documented one. AWS tells operators hitting validation errors under
+        // insecureSkipVerification to check that their CA certificates carry no Name Constraints
+        // extension and to reissue them without it, so such a certificate does not work in AWS
+        // either.
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(502);
     }

@@ -30,7 +30,6 @@ import java.security.cert.PKIXParameters;
 import java.security.cert.TrustAnchor;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -138,7 +137,9 @@ public class HttpProxyInvoker {
      * <p>For anything beyond a lone self-signed certificate the chain goes through the platform's
      * PKIX validator, anchored on the chain's own root, so the rules AWS keeps for a private
      * certificate authority (cA=true together with keyUsage keyCertSign, pathLenConstraint, and
-     * name constraints) are enforced by the code that already implements them correctly.
+     * name constraints on the intermediates) are enforced by the code that already implements them
+     * correctly. The root's own constraints are checked here instead, because PKIX treats a trust
+     * anchor as given and never reads its extensions.
      *
      * <p>Hostname verification is not done here, it is the SSL engine's endpoint identification.
      */
@@ -147,7 +148,6 @@ public class HttpProxyInvoker {
         /** X509v3 Name Constraints, RFC 5280 §4.2.1.10. */
         private static final String NAME_CONSTRAINTS_OID = "2.5.29.30";
 
-        private static final byte DER_OCTET_STRING_TAG = 0x04;
 
         /** Position of {@code keyCertSign} in the KeyUsage bit string, RFC 5280 §4.2.1.3. */
         private static final int KEY_CERT_SIGN_BIT = 5;
@@ -192,22 +192,45 @@ public class HttpProxyInvoker {
                 return;
             }
 
-            // A longer chain means a real certificate authority issued the leaf, and AWS documents
-            // two things such a root has to carry together: basicConstraints cA=true, and a
-            // keyUsage extension including keyCertSign. These are checked here rather than left to
-            // the validator below, which treats the trust anchor as given and never looks at its
-            // extensions. An absent keyUsage extension is not a rejection: RFC 5280 leaves the key
-            // unrestricted when it is missing, which is how PKIX reads it too.
+            // A longer chain means a real certificate authority issued the leaf, and AWS states two
+            // constraints such a root "must satisfy": the x509 extension keyUsage must have
+            // keyCertSign, and the x509 extension basicConstraints must have CA:TRUE. These are
+            // checked here rather than left to the validator below, which treats the trust anchor
+            // as given and never looks at its extensions.
+            //
+            // A root carrying no keyUsage extension at all fails the first of those. Generic PKIX
+            // would read the missing extension as leaving the key unrestricted (RFC 5280 §4.2.1.3),
+            // but API Gateway states the extension as a requirement on the root rather than a bit
+            // to inspect when present, so the looser reading would accept a certificate authority
+            // that real API Gateway turns away.
             if (root.getBasicConstraints() < 0) {
                 throw new CertificateException(
                         "root certificate is not a certificate authority (BasicConstraints cA=false): "
                                 + root.getSubjectX500Principal());
             }
             boolean[] keyUsage = root.getKeyUsage();
-            if (keyUsage != null && (keyUsage.length <= KEY_CERT_SIGN_BIT || !keyUsage[KEY_CERT_SIGN_BIT])) {
+            if (keyUsage == null) {
+                throw new CertificateException(
+                        "root certificate carries no keyUsage extension, which API Gateway requires "
+                                + "on a private certificate authority: " + root.getSubjectX500Principal());
+            }
+            if (keyUsage.length <= KEY_CERT_SIGN_BIT || !keyUsage[KEY_CERT_SIGN_BIT]) {
                 throw new CertificateException(
                         "root certificate is not permitted to sign certificates "
                                 + "(keyUsage without keyCertSign): " + root.getSubjectX500Principal());
+            }
+
+            // Name constraints on the root itself cannot be honoured: the platform validator refuses
+            // to process constraints handed to it with a trust anchor, as opposed to ones it reads
+            // from a certificate inside the path, so a root carrying them can be rejected but never
+            // evaluated. Rejecting is both the safe direction and the documented one: AWS tells
+            // operators hitting validation errors under insecureSkipVerification to check that their
+            // CA certificates carry no Name Constraints extension and to reissue them without it.
+            // Constraints on an intermediate sit in the path proper and are enforced normally.
+            if (root.getExtensionValue(NAME_CONSTRAINTS_OID) != null) {
+                throw new CertificateException(
+                        "root certificate carries X509v3 Name Constraints, which cannot be enforced "
+                                + "for a privately trusted root: " + root.getSubjectX500Principal());
             }
 
             // The rest of the rules AWS keeps are the ordinary PKIX ones. Handing them to the
@@ -219,7 +242,7 @@ public class HttpProxyInvoker {
                 CertPath path = CertificateFactory.getInstance("X.509")
                         .generateCertPath(List.of(chain).subList(0, chain.length - 1));
                 PKIXParameters parameters = new PKIXParameters(
-                        Set.of(new TrustAnchor(root, nameConstraintsOf(root))));
+                        Set.of(new TrustAnchor(root, null)));
                 // Revocation would mean CRL or OCSP fetches for an issuer we are deliberately not
                 // trusting: AWS lists expiration, hostname and the presence of a root as what
                 // survives insecureSkipVerification, not revocation.
@@ -228,44 +251,6 @@ public class HttpProxyInvoker {
             } catch (GeneralSecurityException e) {
                 throw new CertificateException("certificate chain is not valid: " + e.getMessage(), e);
             }
-        }
-
-        /**
-         * The root's own NameConstraints extension value, or null when it declares none.
-         * {@link TrustAnchor} wants the bare extension value, while
-         * {@link X509Certificate#getExtensionValue} returns it wrapped in a DER OCTET STRING, so
-         * that wrapper is stripped here. Name constraints on the intermediates need no such help:
-         * the validator reads those from the certificates in the path directly.
-         */
-        private static byte[] nameConstraintsOf(X509Certificate root) throws CertificateException {
-            byte[] wrapped = root.getExtensionValue(NAME_CONSTRAINTS_OID);
-            if (wrapped == null) {
-                return null;
-            }
-            if (wrapped.length < 2 || wrapped[0] != DER_OCTET_STRING_TAG) {
-                throw new CertificateException("root certificate has a malformed NameConstraints extension");
-            }
-            int lengthByte = wrapped[1] & 0xFF;
-            int contentStart;
-            int contentLength;
-            if (lengthByte < 0x80) {
-                contentStart = 2;
-                contentLength = lengthByte;
-            } else {
-                int lengthBytes = lengthByte & 0x7F;
-                if (lengthBytes == 0 || lengthBytes > 4 || wrapped.length < 2 + lengthBytes) {
-                    throw new CertificateException("root certificate has a malformed NameConstraints extension");
-                }
-                contentStart = 2 + lengthBytes;
-                contentLength = 0;
-                for (int i = 0; i < lengthBytes; i++) {
-                    contentLength = (contentLength << 8) | (wrapped[2 + i] & 0xFF);
-                }
-            }
-            if (contentLength < 0 || contentStart + contentLength > wrapped.length) {
-                throw new CertificateException("root certificate has a malformed NameConstraints extension");
-            }
-            return Arrays.copyOfRange(wrapped, contentStart, contentStart + contentLength);
         }
 
         private static void verifySignedBy(X509Certificate certificate, X509Certificate issuer)
