@@ -693,7 +693,7 @@ public class ApiGatewayExecuteController {
     }
 
     private static CachedResponse snapshotForCache(Response response, int ttlSeconds) {
-        Map<String, String> headers = new java.util.LinkedHashMap<>();
+        Map<String, String> headers = new LinkedHashMap<>();
         response.getStringHeaders().forEach((name, values) -> {
             if (!values.isEmpty()) headers.put(name, values.get(0));
         });
