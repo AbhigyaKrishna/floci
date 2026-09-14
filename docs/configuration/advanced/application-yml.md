@@ -115,7 +115,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30         # Seconds
-      max-message-size: 1048576              # Bytes (1 MB)
+      max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
 
     s3:
