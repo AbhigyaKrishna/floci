@@ -86,6 +86,8 @@ public class CognitoService implements ResourceProvider {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
     private static final String COGNITO_PASSWORD_SYMBOLS =
             "^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+-";
+    // JVM-local stripes bound lock memory without retaining one lock for every user key.
+    private static final int USER_LOCK_STRIPES = 512;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -132,9 +134,23 @@ public class CognitoService implements ResourceProvider {
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
     private final TlsCertificateManager certificateManager;
+    private final Object[] userLocks = newUserLockStripes();
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
+
+    private static Object[] newUserLockStripes() {
+        Object[] stripes = new Object[USER_LOCK_STRIPES];
+        for (int i = 0; i < stripes.length; i++) {
+            stripes[i] = new Object();
+        }
+        return stripes;
+    }
+
+    private Object userLock(String poolId, String username) {
+        String key = userKey(poolId, username);
+        return userLocks[Math.floorMod(key.hashCode(), USER_LOCK_STRIPES)];
+    }
 
     @Inject
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
@@ -579,7 +595,11 @@ public class CognitoService implements ResourceProvider {
         groupStore.scan(k -> k.startsWith(prefix))
                 .forEach(g -> groupStore.delete(groupKey(id, g.getGroupName())));
         userStore.scan(k -> k.startsWith(prefix))
-                .forEach(u -> userStore.delete(userKey(id, u.getUsername())));
+                .forEach(u -> {
+                    synchronized (userLock(id, u.getUsername())) {
+                        userStore.delete(userKey(id, u.getUsername()));
+                    }
+                });
         resourceServerStore.scan(k -> k.startsWith(prefix))
                 .forEach(r -> resourceServerStore.delete(resourceServerKey(id, r.getIdentifier())));
         // Clients are keyed by client id alone, so they are found by their userPoolId field.
@@ -1577,6 +1597,21 @@ public class CognitoService implements ResourceProvider {
                                        String temporaryPassword,
                                        String messageAction,
                                        boolean forceAliasCreation) {
+        // Locked on the requested username/alias (not yet resolved to a canonical id, since
+        // an alias pool doesn't have one until creation), so two concurrent requests for the
+        // same identifier can't both pass the existence/alias check and create duplicates.
+        synchronized (userLock(userPoolId, username)) {
+            return adminCreateUserUnderUserLock(userPoolId, username, attributes,
+                    temporaryPassword, messageAction, forceAliasCreation);
+        }
+    }
+
+    private CognitoUser adminCreateUserUnderUserLock(String userPoolId,
+                                       String username,
+                                       Map<String, String> attributes,
+                                       String temporaryPassword,
+                                       String messageAction,
+                                       boolean forceAliasCreation) {
         UserPool pool = describeUserPool(userPoolId);
         boolean resend = "RESEND".equalsIgnoreCase(messageAction);
         boolean aliasPool = usesAliasUsernames(pool);
@@ -1653,6 +1688,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     void adminCreateMigratedUser(String userPoolId, String username, String password,
+                                  Map<String, String> attributes, String finalUserStatus) {
+        synchronized (userLock(userPoolId, username)) {
+            adminCreateMigratedUserUnderUserLock(userPoolId, username, password, attributes, finalUserStatus);
+        }
+    }
+
+    private void adminCreateMigratedUserUnderUserLock(String userPoolId, String username, String password,
                                   Map<String, String> attributes, String finalUserStatus) {
         UserPool pool = describeUserPool(userPoolId);
         boolean aliasPool = usesAliasUsernames(pool);
@@ -1754,6 +1796,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminDeleteUser(String userPoolId, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminDeleteUserUnderUserLock(userPoolId, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminDeleteUserUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         for (String groupName : new ArrayList<>(user.getGroupNames())) {
             groupStore.get(groupKey(userPoolId, groupName)).ifPresent(group -> {
@@ -1766,6 +1815,14 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminSetUserPassword(String userPoolId, String username, String password, boolean permanent) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminSetUserPasswordUnderUserLock(userPoolId, resolvedUser.getUsername(), password, permanent);
+        }
+    }
+
+    private void adminSetUserPasswordUnderUserLock(String userPoolId, String username, String password,
+                                                    boolean permanent) {
         CognitoUser user = adminGetUser(userPoolId, username);
         updateUserPassword(user, password);
         user.setTemporaryPassword(!permanent);
@@ -1776,6 +1833,15 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminUpdateUserAttributesUnderUserLock(
+                    userPoolId, resolvedUser.getUsername(), attributes);
+        }
+    }
+
+    private void adminUpdateUserAttributesUnderUserLock(
+            String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
         if (usesAliasUsernames(pool)) {
@@ -1799,6 +1865,15 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminDeleteUserAttributes(String userPoolId, String username, List<String> attributeNames) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminDeleteUserAttributesUnderUserLock(
+                    userPoolId, resolvedUser.getUsername(), attributeNames);
+        }
+    }
+
+    private void adminDeleteUserAttributesUnderUserLock(
+            String userPoolId, String username, List<String> attributeNames) {
         CognitoUser user = adminGetUser(userPoolId, username);
         for (String attrName : attributeNames) {
             user.getAttributes().remove(attrName);
@@ -1810,6 +1885,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminEnableUser(String userPoolId, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminEnableUserUnderUserLock(userPoolId, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminEnableUserUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.setEnabled(true);
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -1818,6 +1900,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminDisableUser(String userPoolId, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminDisableUserUnderUserLock(userPoolId, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminDisableUserUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.setEnabled(false);
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -1826,6 +1915,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminResetUserPassword(String userPoolId, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminResetUserPasswordUnderUserLock(userPoolId, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminResetUserPasswordUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
         String outgoingPasswordHash = user.getPasswordHash();
@@ -1870,10 +1966,20 @@ public class CognitoService implements ResourceProvider {
                     "SourceUser.ProviderAttributeValue is required.", 400);
         }
 
+        CognitoUser resolvedUser = adminGetUser(userPoolId, destinationUsername);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminLinkProviderForUserUnderUserLock(userPoolId, resolvedUser.getUsername(),
+                    sourceProviderName, sourceUserId);
+        }
+    }
+
+    private void adminLinkProviderForUserUnderUserLock(String userPoolId, String destinationUsername,
+            String sourceProviderName, String sourceUserId) {
         // The uniqueness check and the write must not interleave with another
         // link of the same source identity. The UserPool object cannot serve as
         // the monitor — updateUserPool replaces the stored instance — so links
-        // serialize on a dedicated lock.
+        // serialize on a dedicated lock in addition to the per-user lock above,
+        // since the uniqueness check spans every user in the pool, not just this one.
         synchronized (identityLinkLock) {
             CognitoUser user = adminGetUser(userPoolId, destinationUsername);
             String prefix = userPoolId + "::";
@@ -2191,13 +2297,19 @@ public class CognitoService implements ResourceProvider {
     public void deleteGroup(String userPoolId, String groupName) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         long now = System.currentTimeMillis() / 1000L;
+        // Each member is locked individually, one at a time, rather than holding every
+        // member's lock for the duration of the loop: this method never needs more than one
+        // user's invariant held at once, and locking them one at a time avoids having to
+        // reason about lock ordering across members.
         for (String username : new ArrayList<>(group.getUserNames())) {
-            userStore.get(userKey(userPoolId, username)).ifPresent(user -> {
-                if (user.getGroupNames().remove(groupName)) {
-                    user.setLastModifiedDate(now);
-                    userStore.put(userKey(userPoolId, user.getUsername()), user);
-                }
-            });
+            synchronized (userLock(userPoolId, username)) {
+                userStore.get(userKey(userPoolId, username)).ifPresent(user -> {
+                    if (user.getGroupNames().remove(groupName)) {
+                        user.setLastModifiedDate(now);
+                        userStore.put(userKey(userPoolId, user.getUsername()), user);
+                    }
+                });
+            }
         }
         groupStore.delete(groupKey(userPoolId, groupName));
         LOG.infov("Deleted Cognito group: {0} from pool {1}", groupName, userPoolId);
@@ -2223,6 +2335,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminAddUserToGroup(String userPoolId, String groupName, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminAddUserToGroupUnderUserLock(userPoolId, groupName, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminAddUserToGroupUnderUserLock(String userPoolId, String groupName, String username) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);
         long now = System.currentTimeMillis() / 1000L;
@@ -2238,6 +2357,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminRemoveUserFromGroup(String userPoolId, String groupName, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminRemoveUserFromGroupUnderUserLock(userPoolId, groupName, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminRemoveUserFromGroupUnderUserLock(String userPoolId, String groupName, String username) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);
         long now = System.currentTimeMillis() / 1000L;
@@ -2266,6 +2392,15 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
+        // Locked on the requested username/alias, same reasoning as adminCreateUser: an alias
+        // pool has no canonical id to lock on until creation succeeds.
+        synchronized (userLock(userPoolId, username)) {
+            return signUpUnderUserLock(client, userPoolId, username, password, attributes);
+        }
+    }
+
+    private CognitoUser signUpUnderUserLock(UserPoolClient client, String userPoolId,
+            String username, String password, Map<String, String> attributes) {
         UserPool pool = describeUserPool(userPoolId);
 
         boolean aliasPool = usesAliasUsernames(pool);
@@ -2363,6 +2498,13 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
+        synchronized (userLock(userPoolId, username)) {
+            confirmSignUpUnderUserLock(client, userPoolId, username, confirmationCode);
+        }
+    }
+
+    private void confirmSignUpUnderUserLock(UserPoolClient client, String userPoolId, String username,
+            String confirmationCode) {
         UserPool pool = poolStore.get(userPoolId)
                 .orElseThrow(() -> userPoolNotFound(userPoolId));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
@@ -2375,7 +2517,7 @@ public class CognitoService implements ResourceProvider {
                 throw mapVerificationCodeException(e);
             }
 
-            var signupDeliveryTarget = resolveSignUpDeliveryTarget(pool, user);
+            DeliveryTarget signupDeliveryTarget = resolveSignUpDeliveryTarget(pool, user);
 
             if (signupDeliveryTarget != null) {
                 if ("email".equals(signupDeliveryTarget.attributeName())) {
@@ -2452,6 +2594,13 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void adminConfirmSignUp(String userPoolId, String username) {
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminConfirmSignUpUnderUserLock(userPoolId, resolvedUser.getUsername());
+        }
+    }
+
+    private void adminConfirmSignUpUnderUserLock(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -2510,6 +2659,13 @@ public class CognitoService implements ResourceProvider {
         String username = token.username();
         String poolId = token.poolId();
 
+        synchronized (userLock(poolId, username)) {
+            changePasswordUnderUserLock(poolId, username, previousPassword, proposedPassword);
+        }
+    }
+
+    private void changePasswordUnderUserLock(String poolId, String username, String previousPassword,
+            String proposedPassword) {
         CognitoUser user = adminGetUser(poolId, username);
         if (user.getPasswordHash() != null && !user.getPasswordHash().equals(hashPassword(previousPassword))) {
             throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
@@ -2590,6 +2746,13 @@ public class CognitoService implements ResourceProvider {
         String username = token.username();
         String poolId = token.poolId();
 
+        synchronized (userLock(poolId, username)) {
+            return getUserAttributeVerificationCodeUnderUserLock(poolId, username, attributeName);
+        }
+    }
+
+    private Map<String, Object> getUserAttributeVerificationCodeUnderUserLock(
+            String poolId, String username, String attributeName) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -2642,6 +2805,13 @@ public class CognitoService implements ResourceProvider {
         String username = token.username();
         String poolId = token.poolId();
 
+        synchronized (userLock(poolId, username)) {
+            verifyUserAttributeUnderUserLock(poolId, username, attributeName, code);
+        }
+    }
+
+    private void verifyUserAttributeUnderUserLock(
+            String poolId, String username, String attributeName, String code) {
         if (!"email".equals(attributeName) && !"phone_number".equals(attributeName)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid attribute name. Only phone_number and email can be verified.", 400);
@@ -2691,6 +2861,13 @@ public class CognitoService implements ResourceProvider {
                     400);
         }
 
+        synchronized (userLock(poolId, username)) {
+            return updateUserAttributesUnderUserLock(poolId, username, attributes);
+        }
+    }
+
+    private List<Map<String, Object>> updateUserAttributesUnderUserLock(
+            String poolId, String username, Map<String, String> attributes) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
 
@@ -4324,6 +4501,19 @@ public class CognitoService implements ResourceProvider {
             Boolean emailEnabled,
             Boolean emailPreferred) {
 
+        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
+            adminSetUserMFAPreferenceUnderUserLock(
+                    userPoolId, resolvedUser.getUsername(), emailEnabled, emailPreferred);
+        }
+    }
+
+    private void adminSetUserMFAPreferenceUnderUserLock(
+            String userPoolId,
+            String username,
+            Boolean emailEnabled,
+            Boolean emailPreferred) {
+
         CognitoUser user = adminGetUser(userPoolId, username);
 
         updateEmailMfaPreference(user, emailEnabled, emailPreferred);
@@ -4339,13 +4529,25 @@ public class CognitoService implements ResourceProvider {
             Boolean emailPreferred) {
 
         VerifiedAccessToken token = verifyAccessToken(accessToken);
-        CognitoUser user = adminGetUser(token.poolId(), token.username());
+        synchronized (userLock(token.poolId(), token.username())) {
+            setUserMFAPreferenceUnderUserLock(
+                    token.poolId(), token.username(), emailEnabled, emailPreferred);
+        }
+    }
+
+    private void setUserMFAPreferenceUnderUserLock(
+            String poolId,
+            String username,
+            Boolean emailEnabled,
+            Boolean emailPreferred) {
+
+        CognitoUser user = adminGetUser(poolId, username);
 
         updateEmailMfaPreference(user, emailEnabled, emailPreferred);
 
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
 
-        userStore.put(userKey(token.poolId(), user.getUsername()), user);
+        userStore.put(userKey(poolId, user.getUsername()), user);
     }
 
     private void updateEmailMfaPreference(
