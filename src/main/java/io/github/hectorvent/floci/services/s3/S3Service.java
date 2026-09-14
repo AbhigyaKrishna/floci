@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -898,11 +899,13 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            if (isKnownAccessKey(requestAuthorization)) {
-                return;
+            if (!isKnownAccessKey(requestAuthorization)) {
+                throw new AwsException("InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records.", 403);
             }
-            throw new AwsException("InvalidAccessKeyId",
-                    "The AWS Access Key Id you provided does not exist in our records.", 403);
+            authorizeSignedPrincipalPolicyDeny(
+                    bucketName, action, resourceArn, requestAuthorization);
+            return;
         }
 
         Bucket bucket = bucketStore.get(bucketName)
@@ -924,6 +927,52 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         throw new AwsException("AccessDenied", "Access Denied", 403);
+    }
+
+    private void authorizeSignedPrincipalPolicyDeny(
+            String bucketName,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization) {
+        if (signedPrincipalResourcePolicyDecision(
+                bucketName, action, resourceArn, authorization)
+                == ResourcePolicyDecision.EXPLICIT_DENY) {
+            throw new AwsException("AccessDenied", "Access Denied", 403);
+        }
+    }
+
+    ResourcePolicyDecision signedPrincipalResourcePolicyDecision(
+            String bucketName,
+            String action,
+            String resourceArn,
+            RequestAuthorization authorization) {
+        if (authorization == null || !authorization.signed()
+                || LEGACY_ACCESS_KEY_ID.equals(authorization.accessKeyId()) || iamService == null) {
+            return ResourcePolicyDecision.NEUTRAL;
+        }
+
+        Optional<String> principalArn = iamService.resolveCallerArn(authorization.accessKeyId());
+        if (principalArn.isEmpty()) {
+            return ResourcePolicyDecision.NEUTRAL;
+        }
+
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException(
+                        "NoSuchBucket", "The specified bucket does not exist.", 404));
+        S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
+                S3PublicAccessEvaluator.principalPolicyDecision(
+                        objectMapper,
+                        bucket.getPolicy(),
+                        "AWS",
+                        principalArn.get(),
+                        action,
+                        resourceArn,
+                        Map.of("aws:PrincipalArn", principalArn.get()));
+        return switch (policyDecision) {
+            case ALLOW -> ResourcePolicyDecision.ALLOW;
+            case DENY -> ResourcePolicyDecision.EXPLICIT_DENY;
+            case NEUTRAL -> ResourcePolicyDecision.NEUTRAL;
+        };
     }
 
     private boolean readableObjectExists(String bucketName, String key) {

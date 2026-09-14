@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
@@ -785,7 +786,8 @@ public class S3Controller {
             if (uploadId != null && partNumber != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 if (copySource != null && !copySource.isEmpty()) {
-                    return handleUploadPartCopy(copySource, bucket, key, uploadId, partNumber, httpHeaders);
+                    return handleUploadPartCopy(
+                            copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
                 }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
                 validateChecksumHeaders(httpHeaders, partData, getChecksumAlgorithm(httpHeaders));
@@ -807,7 +809,7 @@ public class S3Controller {
 
             if (copySource != null && !copySource.isEmpty()) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
-                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders);
+                return handleCopyObject(copySource, bucket, key, contentType, httpHeaders, authorization);
             }
 
             Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
@@ -2588,10 +2590,11 @@ public class S3Controller {
     // --- Helpers ---
 
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
-                                      String contentType, HttpHeaders httpHeaders) {
+                                      String contentType, HttpHeaders httpHeaders,
+                                      S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
+        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
@@ -2668,10 +2671,11 @@ public class S3Controller {
     }
 
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
-                                           String uploadId, int partNumber, HttpHeaders httpHeaders) {
+                                          String uploadId, int partNumber, HttpHeaders httpHeaders,
+                                          S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceBucket, sourceObject.objectKey());
+        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -3776,10 +3780,18 @@ public class S3Controller {
      * allowed to write to the destination bucket must not be able to exfiltrate an object it cannot read.
      * A no-op when IAM enforcement is disabled, matching {@link IamEnforcementFilter}'s own bypass rules.
      */
-    private void authorizeCopySourceRead(HttpHeaders httpHeaders, String sourceBucket, String sourceKey) {
-        String resource = S3PublicAccessEvaluator.objectArn(sourceBucket, sourceKey);
+    private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
+                                         S3Service.RequestAuthorization authorization) {
+        String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
+        String resource = S3PublicAccessEvaluator.objectArn(source.bucket(), source.objectKey());
+        ResourcePolicyDecision resourcePolicyDecision =
+                s3Service.signedPrincipalResourcePolicyDecision(
+                        source.bucket(), action, resource, authorization);
         iamEnforcementFilter.authorizeAdditionalResource(
-                httpHeaders.getHeaderString("Authorization"), "s3:GetObject", resource);
+                httpHeaders.getHeaderString("Authorization"), action, resource,
+                resourcePolicyDecision);
+        s3Service.authorizeGetObject(
+                source.bucket(), source.objectKey(), source.versionId(), authorization);
     }
 
     /**
