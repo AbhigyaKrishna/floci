@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ConfigCfn
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaMicrovmsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.OrganizationsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.StepFunctionsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SqsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.configservice.AwsConfigService;
@@ -229,6 +230,9 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
+            if (stepFunctionsService != null) {
+                discovered.add(new StepFunctionsCfnProvisioner(stepFunctionsService, s3Service, objectMapper));
+            }
             if (s3Service != null) {
                 discovered.add(new S3CfnProvisioner(s3Service));
             }
@@ -671,7 +675,6 @@ final class CfnProvisionerFixture {
                     objectMapper,
                     customResourceResponseStore,
                     reachableEndpoint,
-                    stepFunctionsService,
                     ec2Service,
                     eksService,
                     logsService,
