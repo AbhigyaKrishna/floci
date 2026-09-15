@@ -1523,6 +1523,8 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             instance.setMasterPassword(newPassword);
         }
+        boolean iamChanged = iamEnabled != null
+                && iamEnabled != instance.isIamDatabaseAuthenticationEnabled();
         if (iamEnabled != null) {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
@@ -1548,6 +1550,10 @@ public class RdsService implements Resettable, ResourceProvider {
         if (passwordRotated) {
             proxyManager.updateMasterPassword(
                     rdsResourceRelayKey(instance.getDbInstanceArn(), id), instance.getMasterPassword());
+        }
+        if (iamChanged) {
+            proxyManager.updateIamEnabled(
+                    rdsResourceRelayKey(instance.getDbInstanceArn(), id), iamEnabled);
         }
 
         LOG.infov("DB instance {0} modified", id);
