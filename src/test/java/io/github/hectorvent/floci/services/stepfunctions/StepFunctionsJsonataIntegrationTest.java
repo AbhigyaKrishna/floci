@@ -1228,6 +1228,296 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapToleratedFailureCount_absorbsFailuresUpToTheThreshold() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": -1}, {"n": 3}],
+                            "ToleratedFailureCount": 1,
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Check",
+                                "States": {
+                                    "Check": {
+                                        "Type": "Choice",
+                                        "Choices": [
+                                            {
+                                                "Condition": "{% $states.input.n < 0 %}",
+                                                "Next": "Boom"
+                                            }
+                                        ],
+                                        "Default": "Keep"
+                                    },
+                                    "Boom": {
+                                        "Type": "Fail",
+                                        "Error": "ItemFailed",
+                                        "Cause": "the item asked to fail"
+                                    },
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-tolerated-count-within", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode results = new ObjectMapper().readTree(output);
+
+        assertEquals(2, results.size(), "the failed item leaves no result: " + output);
+    }
+
+    @Test
+    void distributedMapToleratedFailureCount_failsWithExceedToleratedFailureThreshold() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": -1}, {"n": -2}],
+                            "ToleratedFailureCount": 1,
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Check",
+                                "States": {
+                                    "Check": {
+                                        "Type": "Choice",
+                                        "Choices": [
+                                            {
+                                                "Condition": "{% $states.input.n < 0 %}",
+                                                "Next": "Boom"
+                                            }
+                                        ],
+                                        "Default": "Keep"
+                                    },
+                                    "Boom": {
+                                        "Type": "Fail",
+                                        "Error": "ItemFailed",
+                                        "Cause": "the item asked to fail"
+                                    },
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-tolerated-count-exceeded", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ExceedToleratedFailureThreshold", failure.jsonPath().getString("error"));
+    }
+
+    @Test
+    void distributedMapToleratedFailurePercentage_absorbsFailuresUpToTheThreshold() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": 2}, {"n": 3}, {"n": -1}],
+                            "ToleratedFailurePercentage": 25,
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Check",
+                                "States": {
+                                    "Check": {
+                                        "Type": "Choice",
+                                        "Choices": [
+                                            {
+                                                "Condition": "{% $states.input.n < 0 %}",
+                                                "Next": "Boom"
+                                            }
+                                        ],
+                                        "Default": "Keep"
+                                    },
+                                    "Boom": {
+                                        "Type": "Fail",
+                                        "Error": "ItemFailed",
+                                        "Cause": "the item asked to fail"
+                                    },
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-tolerated-percentage-within", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode results = new ObjectMapper().readTree(output);
+
+        assertEquals(3, results.size(), "one of four items may fail at 25 percent: " + output);
+    }
+
+    @Test
+    void distributedMapWithoutAToleratedFailure_stillFailsWithTheItemsOwnError() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": -1}],
+                            
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Check",
+                                "States": {
+                                    "Check": {
+                                        "Type": "Choice",
+                                        "Choices": [
+                                            {
+                                                "Condition": "{% $states.input.n < 0 %}",
+                                                "Next": "Boom"
+                                            }
+                                        ],
+                                        "Default": "Keep"
+                                    },
+                                    "Boom": {
+                                        "Type": "Fail",
+                                        "Error": "ItemFailed",
+                                        "Cause": "the item asked to fail"
+                                    },
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-tolerated-absent", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("ItemFailed", failure.jsonPath().getString("error"));
+    }
+
+    @Test
+    void distributedMapToleratedFailure_exportsFailedChildrenAlongsideSucceededOnes() throws Exception {
+        createBucket("map-tolerated-export");
+
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": [{"n": 1}, {"n": -1}, {"n": 3}],
+                            "ToleratedFailureCount": 1,
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Check",
+                                "States": {
+                                    "Check": {
+                                        "Type": "Choice",
+                                        "Choices": [
+                                            {
+                                                "Condition": "{% $states.input.n < 0 %}",
+                                                "Next": "Boom"
+                                            }
+                                        ],
+                                        "Default": "Keep"
+                                    },
+                                    "Boom": {
+                                        "Type": "Fail",
+                                        "Error": "ItemFailed",
+                                        "Cause": "the item asked to fail"
+                                    },
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "ResultWriter": {
+                                "Resource": "arn:aws:states:::s3:putObject",
+                                "Arguments": {
+                                    "Bucket": "map-tolerated-export",
+                                    "Prefix": "out"
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-tolerated-export", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        ObjectMapper json = new ObjectMapper();
+        JsonNode details = json.readTree(output).path("ResultWriterDetails");
+        JsonNode manifest = json.readTree(getObject(details.path("Bucket").asText(),
+                details.path("Key").asText()));
+
+        assertEquals(1, manifest.path("ResultFiles").path("SUCCEEDED").size());
+        assertEquals(1, manifest.path("ResultFiles").path("FAILED").size(),
+                "the tolerated failure must still be exported: " + manifest);
+
+        JsonNode succeeded = json.readTree(getObject("map-tolerated-export",
+                manifest.path("ResultFiles").path("SUCCEEDED").get(0).path("Key").asText()));
+        assertEquals(2, succeeded.size());
+
+        JsonNode failed = json.readTree(getObject("map-tolerated-export",
+                manifest.path("ResultFiles").path("FAILED").get(0).path("Key").asText()));
+        assertEquals(1, failed.size());
+        assertEquals("FAILED", failed.get(0).path("Status").asText());
+        assertEquals("ItemFailed", failed.get(0).path("Error").asText());
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_objectIteratesKeyValuePairs() throws Exception {
         createBucket("map-inputs-object");
         putObject("map-inputs-object", "workers.json", """
@@ -2748,6 +3038,16 @@ class StepFunctionsJsonataIntegrationTest {
                 .put("/" + bucket)
                 .then()
                 .statusCode(200);
+    }
+
+    private String getObject(String bucket, String key) {
+        return given()
+                .when()
+                .get("/" + bucket + "/" + key)
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString();
     }
 
     private void putObject(String bucket, String key, String body) {
