@@ -355,19 +355,21 @@ public class SecretsManagerService implements ResourceProvider {
 
         validateKmsKey(kmsKeyId, region);
 
-        if (description != null) {
-            secret.setDescription(description);
-        }
-        if (kmsKeyId != null) {
-            // AWS: "If you set this to an empty string, Secrets Manager uses the AWS managed key
-            // aws/secretsmanager" - which DescribeSecret reports by omitting KmsKeyId entirely.
-            secret.setKmsKeyId(kmsKeyId.isEmpty() ? null : kmsKeyId);
-        }
-        secret.setLastChangedDate(Instant.now());
+        synchronized (lockFor(secret.getArn())) {
+            if (description != null) {
+                secret.setDescription(description);
+            }
+            if (kmsKeyId != null) {
+                // AWS: "If you set this to an empty string, Secrets Manager uses the AWS managed key
+                // aws/secretsmanager" - which DescribeSecret reports by omitting KmsKeyId entirely.
+                secret.setKmsKeyId(kmsKeyId.isEmpty() ? null : kmsKeyId);
+            }
+            secret.setLastChangedDate(Instant.now());
 
-        persist(secret, region);
-        LOG.infov("Updated secret metadata: {0}", secret.getName());
-        return secret;
+            persist(secret, region);
+            LOG.infov("Updated secret metadata: {0}", secret.getName());
+            return secret;
+        }
     }
 
     public Secret describeSecret(String secretId, String region) {
@@ -964,20 +966,21 @@ public class SecretsManagerService implements ResourceProvider {
         }
 
         String primaryRegionName = replica.getPrimaryRegion();
-        // Held for the same reason every other mutation in this file holds it: the promotion
-        // races the primary's replica sync, and losing that race would write the replica back
-        // over the copy this call just promoted.
-        synchronized (lockFor(replica.getArn())) {
+        Secret primary = store.get(regionKey(primaryRegionName, replica.getName())).orElse(null);
+
+        // The primary's monitor, not the replica's: persist() writes a primary's replica slots
+        // while holding only the primary's lock, so guarding the promotion with the replica's own
+        // ARN would leave the two paths writing the same slot under different monitors. Both
+        // halves of the promotion run inside one critical section for the same reason: a sync
+        // landing between them would write the replica back over the copy just promoted.
+        synchronized (lockFor(primary != null ? primary.getArn() : replica.getArn())) {
             replica.setPrimaryRegion(null);
             replica.setLastChangedDate(Instant.now());
             putSecret(region, replica);
-        }
 
-        // Detach from the old primary too, so it stops syncing over the promoted copy and can
-        // itself be deleted once no replicas remain.
-        Secret primary = store.get(regionKey(primaryRegionName, replica.getName())).orElse(null);
-        if (primary != null && primary.getReplicationStatus() != null) {
-            synchronized (lockFor(primary.getArn())) {
+            // Detach from the old primary too, so it stops syncing over the promoted copy and can
+            // itself be deleted once no replicas remain.
+            if (primary != null && primary.getReplicationStatus() != null) {
                 List<Secret.ReplicaStatus> statuses = new ArrayList<>(primary.getReplicationStatus());
                 statuses.removeIf(s -> s.region().equals(region));
                 primary.setReplicationStatus(statuses);
