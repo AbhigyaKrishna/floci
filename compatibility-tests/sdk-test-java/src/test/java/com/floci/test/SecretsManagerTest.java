@@ -32,6 +32,7 @@ import software.amazon.awssdk.services.secretsmanager.model.GetResourcePolicyReq
 import software.amazon.awssdk.services.secretsmanager.model.GetResourcePolicyResponse;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
+import software.amazon.awssdk.services.secretsmanager.model.InvalidParameterException;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretVersionIdsRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretVersionIdsResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsRequest;
@@ -321,8 +322,8 @@ class SecretsManagerTest {
                 .secretString("kms-value")
                 .kmsKeyId("arn:aws:kms:us-east-1:000000000000:key/does-not-exist")
                 .build()))
-                .isInstanceOf(SecretsManagerException.class)
-                .hasMessageContaining("InvalidParameterException");
+                .isInstanceOf(InvalidParameterException.class)
+                .hasMessageContaining("You can't access the KMS key");
     }
 
     @Test
