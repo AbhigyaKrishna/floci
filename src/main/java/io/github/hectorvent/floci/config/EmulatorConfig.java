@@ -1574,6 +1574,12 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         int defaultRecoveryWindowDays();
+
+        @WithDefault("true")
+        boolean scheduledRotationEnabled();
+
+        @WithDefault("60")
+        long rotationTickSeconds();
     }
 
     interface ApiGatewayV2ServiceConfig {
