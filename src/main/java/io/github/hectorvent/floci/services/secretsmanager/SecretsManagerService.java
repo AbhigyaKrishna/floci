@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.scheduler.SchedulerExpressionParser;
 import jakarta.annotation.PreDestroy;
@@ -23,6 +24,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.Collections;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -62,7 +64,7 @@ public class SecretsManagerService implements ResourceProvider {
     private final ObjectMapper objectMapper;
     private final KmsService kmsService;
     private final ExecutorService rotationExecutor = Executors.newCachedThreadPool();
-    private final java.util.concurrent.ConcurrentHashMap<String, Object> rotationLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> rotationLocks = new ConcurrentHashMap<>();
 
     private Object lockFor(String secretArn) {
         return rotationLocks.computeIfAbsent(secretArn, k -> new Object());
@@ -962,9 +964,14 @@ public class SecretsManagerService implements ResourceProvider {
         }
 
         String primaryRegionName = replica.getPrimaryRegion();
-        replica.setPrimaryRegion(null);
-        replica.setLastChangedDate(Instant.now());
-        putSecret(region, replica);
+        // Held for the same reason every other mutation in this file holds it: the promotion
+        // races the primary's replica sync, and losing that race would write the replica back
+        // over the copy this call just promoted.
+        synchronized (lockFor(replica.getArn())) {
+            replica.setPrimaryRegion(null);
+            replica.setLastChangedDate(Instant.now());
+            putSecret(region, replica);
+        }
 
         // Detach from the old primary too, so it stops syncing over the promoted copy and can
         // itself be deleted once no replicas remain.
@@ -1217,7 +1224,7 @@ public class SecretsManagerService implements ResourceProvider {
                         pendingVersion.setVersionStages(List.of("AWSPENDING"));
                         pendingVersion.setCreatedDate(Instant.now());
                         if (secret.getVersions() == null) {
-                            secret.setVersions(new java.util.HashMap<>());
+                            secret.setVersions(new HashMap<>());
                         }
                         secret.getVersions().put(clientRequestToken, pendingVersion);
                         persist(secret, region);
@@ -1530,7 +1537,7 @@ public class SecretsManagerService implements ResourceProvider {
             return;
         }
 
-        io.github.hectorvent.floci.services.kms.model.KmsKey key;
+        KmsKey key;
         try {
             key = kmsService.describeKey(kmsKeyId, region);
         } catch (AwsException e) {
