@@ -13,6 +13,8 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.DeleteFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.FunctionCode;
+import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.kms.model.CreateKeyRequest;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueRequest;
@@ -276,8 +278,16 @@ class SecretsManagerTest {
     @Test
     @Order(13)
     void kmsKeyIdPreservation() {
-        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/my-key";
+        // The key has to exist: Secrets Manager checks it before accepting the secret, so a
+        // made-up ARN is rejected here the same way AWS rejects one.
         String kmsSecretName = "sdk-test-kms-secret-" + System.currentTimeMillis();
+        String kmsKeyId;
+        try (KmsClient kms = TestFixtures.kmsClient()) {
+            kmsKeyId = kms.createKey(CreateKeyRequest.builder()
+                            .description("sdk-test secrets manager key")
+                            .build())
+                    .keyMetadata().arn();
+        }
 
         try {
             sm.createSecret(CreateSecretRequest.builder()
@@ -299,6 +309,20 @@ class SecretsManagerTest {
                         .build());
             } catch (Exception ignored) {}
         }
+    }
+
+    @Test
+    @Order(13)
+    void createSecretWithAnUnknownKmsKeyIsRejected() {
+        String kmsSecretName = "sdk-test-bad-kms-secret-" + System.currentTimeMillis();
+
+        assertThatThrownBy(() -> sm.createSecret(CreateSecretRequest.builder()
+                .name(kmsSecretName)
+                .secretString("kms-value")
+                .kmsKeyId("arn:aws:kms:us-east-1:000000000000:key/does-not-exist")
+                .build()))
+                .isInstanceOf(SecretsManagerException.class)
+                .hasMessageContaining("InvalidParameterException");
     }
 
     @Test
