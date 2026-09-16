@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.StreamSupport;
 
 @ApplicationScoped
@@ -248,7 +250,7 @@ public class SecretsManagerJsonHandler {
         // neither, because that is how a rotation stages an empty AWSPENDING placeholder
         // internally, so the wire API is where a valueless request has to be refused.
         if (secretString == null && secretBinary == null) {
-            throw new io.github.hectorvent.floci.core.common.AwsException("InvalidParameterException",
+            throw new AwsException("InvalidParameterException",
                     "You must specify either SecretString or SecretBinary.", 400);
         }
 
@@ -274,7 +276,7 @@ public class SecretsManagerJsonHandler {
         String secretString = request.has("SecretString") ? request.path("SecretString").asText() : null;
         String secretBinary = request.has("SecretBinary") ? request.path("SecretBinary").asText() : null;
         if (secretString != null && secretBinary != null) {
-            throw new io.github.hectorvent.floci.core.common.AwsException("InvalidParameterException",
+            throw new AwsException("InvalidParameterException",
                     "You can't specify both SecretString and SecretBinary in the same request.", 400);
         }
 
@@ -288,7 +290,7 @@ public class SecretsManagerJsonHandler {
                 ? request.path("ClientRequestToken").asText() : null;
         if (clientRequestToken != null && existing.getVersions() != null
                 && existing.getVersions().containsKey(clientRequestToken)) {
-            throw new io.github.hectorvent.floci.core.common.AwsException("ResourceExistsException",
+            throw new AwsException("ResourceExistsException",
                     "The ClientRequestToken " + clientRequestToken
                             + " already names a version of this secret. You can't modify an existing "
                             + "version, only create a new one.", 400);
@@ -299,7 +301,7 @@ public class SecretsManagerJsonHandler {
         String versionId = null;
         if (secretString != null || secretBinary != null) {
             SecretVersion version = service.putSecretValue(secretId, secretString, secretBinary,
-                    clientRequestToken != null ? clientRequestToken : java.util.UUID.randomUUID().toString(),
+                    clientRequestToken != null ? clientRequestToken : UUID.randomUUID().toString(),
                     region, null);
             versionId = version.getVersionId();
         }
@@ -613,7 +615,7 @@ public class SecretsManagerJsonHandler {
 
     private Response handleRotateSecret(JsonNode request, String region) {
         String secretId = request.path("SecretId").asText();
-        String clientRequestToken = request.has("ClientRequestToken") ? request.path("ClientRequestToken").asText() : java.util.UUID.randomUUID().toString();
+        String clientRequestToken = request.has("ClientRequestToken") ? request.path("ClientRequestToken").asText() : UUID.randomUUID().toString();
         
         String lambdaArn = request.has("RotationLambdaARN") ? request.path("RotationLambdaARN").asText() : null;
                           
