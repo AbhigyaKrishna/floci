@@ -33,6 +33,24 @@ public class Secret {
     private String owningService;
     /** Resource-based policy JSON attached via PutResourcePolicy, or null when none is attached. */
     private String resourcePolicy;
+    /** Replicas of this secret in other regions. Only a primary carries these. */
+    private List<ReplicaStatus> replicationStatus;
+    /**
+     * The region holding the primary this secret replicates, or null when this secret IS the
+     * primary. Doubles as the "am I a replica?" flag, so a replica can never be mistaken for a
+     * standalone secret and silently accept writes.
+     */
+    private String primaryRegion;
+
+    /** One replica's location and health, as reported in {@code ReplicationStatus}. */
+    @RegisterForReflection
+    public record ReplicaStatus(
+            @JsonProperty("Region") String region,
+            @JsonProperty("KmsKeyId") String kmsKeyId,
+            @JsonProperty("Status") String status,
+            @JsonProperty("StatusMessage") String statusMessage,
+            @JsonProperty("LastAccessedDate") Instant lastAccessedDate) {
+    }
 
     @RegisterForReflection
     public record RotationRules(
@@ -200,5 +218,25 @@ public class Secret {
 
     public void setResourcePolicy(String resourcePolicy) {
         this.resourcePolicy = resourcePolicy;
+    }
+
+    public List<ReplicaStatus> getReplicationStatus() {
+        return replicationStatus;
+    }
+
+    public void setReplicationStatus(List<ReplicaStatus> replicationStatus) {
+        this.replicationStatus = replicationStatus;
+    }
+
+    public String getPrimaryRegion() {
+        return primaryRegion;
+    }
+
+    public void setPrimaryRegion(String primaryRegion) {
+        this.primaryRegion = primaryRegion;
+    }
+
+    public boolean isReplica() {
+        return primaryRegion != null;
     }
 }
