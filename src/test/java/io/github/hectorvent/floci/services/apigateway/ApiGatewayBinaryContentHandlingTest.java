@@ -21,6 +21,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Covers {@code binaryMediaTypes} on the RestApi together with {@code contentHandling} on the
@@ -193,12 +194,32 @@ class ApiGatewayBinaryContentHandlingTest {
     }
 
     /**
-     * AWS documents the wildcard character for {@code binaryMediaTypes} generally: "You can use the
-     * wildcard character (*) to cover multiple media types", not only as the full catch-all entry.
-     * So an {@code image/*} entry has to cover {@code image/png}, which is never named explicitly.
+     * The catch-all entry AWS documents: "To support all binary media types, specify
+     * <code>*&#47;*</code>." It covers {@code image/png}, which is never named explicitly.
      */
     @Test
-    void aSubtypeWildcardBinaryMediaTypeCoversAnySubtype() {
+    void theCatchAllBinaryMediaTypeCoversAnyContentType() {
+        receivedBody.set(null);
+        String apiId = createApi("binary-catch-all", "\"*/*\"",
+                ",\"contentHandling\":\"CONVERT_TO_TEXT\","
+                        + "\"requestTemplates\":{\"image/png\":\"$input.body\"}", null);
+
+        given().contentType("image/png").body(BINARY_PAYLOAD)
+                .when().post("/execute-api/" + apiId + "/test/widget")
+                .then().statusCode(200);
+
+        // Treated as binary purely via the catch-all, so CONVERT_TO_TEXT base64-encoded it.
+        assertEquals(Base64.getEncoder().encodeToString(BINARY_PAYLOAD),
+                new String(receivedBody.get(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * A subtype wildcard is not a pattern. AWS documents only <code>*&#47;*</code> as a wildcard
+     * entry and names one exact media type at a time everywhere else, so {@code image/}<code>*</code>
+     * matches nothing but a request that literally declares that content type.
+     */
+    @Test
+    void aSubtypeWildcardIsNotExpanded() {
         receivedBody.set(null);
         String apiId = createApi("binary-subtype-wildcard", "\"image/*\"",
                 ",\"contentHandling\":\"CONVERT_TO_TEXT\","
@@ -208,8 +229,8 @@ class ApiGatewayBinaryContentHandlingTest {
                 .when().post("/execute-api/" + apiId + "/test/widget")
                 .then().statusCode(200);
 
-        // Treated as binary purely via the wildcard, so CONVERT_TO_TEXT base64-encoded it.
-        assertEquals(Base64.getEncoder().encodeToString(BINARY_PAYLOAD),
+        // Not binary, so no base64 conversion happened.
+        assertNotEquals(Base64.getEncoder().encodeToString(BINARY_PAYLOAD),
                 new String(receivedBody.get(), StandardCharsets.UTF_8));
     }
 

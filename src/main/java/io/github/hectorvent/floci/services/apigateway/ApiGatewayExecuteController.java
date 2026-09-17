@@ -749,13 +749,15 @@ public class ApiGatewayExecuteController {
      * True when {@code contentType} matches one of the API's configured {@code binaryMediaTypes}.
      * The charset parameter is ignored when comparing.
      *
-     * <p>Wildcards are matched rather than compared literally, because AWS documents the wildcard
-     * character generally and not just the catch-all entry: "Example binary media types include
-     * {@code image/png} or {@code application/octet-stream}. You can use the wildcard character
-     * (<code>*</code>) to cover multiple media types." So {@code image/*} covers any image subtype,
-     * and <code>*&#47;*</code> covers everything.
+     * <p>Entries are compared literally apart from the catch-all <code>*&#47;*</code>, which is the
+     * only wildcard AWS documents concretely: "To support all binary media types, specify
+     * <code>*&#47;*</code>." A subtype wildcard such as {@code image/*} is not expanded, because
+     * nothing in the AWS documentation says API Gateway treats it as a pattern: every example there
+     * names one exact media type at a time, and the browser walkthrough tells you to register the
+     * concrete {@code image/webp} even though the request's {@code Accept} header carries
+     * {@code image/*}.
      *
-     * @see <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-payload-encodings.html">Binary media types for REST APIs</a>
+     * @see <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-payload-encodings-configure-with-console.html">Enabling binary support using the console</a>
      */
     private boolean isBinaryMediaType(String region, String apiId, String contentType) {
         if (contentType == null || contentType.isBlank()) return false;
@@ -772,13 +774,10 @@ public class ApiGatewayExecuteController {
         return binaryTypes.stream().anyMatch(configured -> mediaTypeMatches(configured, base));
     }
 
-    private static boolean mediaTypeMatches(String pattern, String contentType) {
-        if (pattern == null) return false;
-        String candidate = pattern.trim();
-        if ("*/*".equals(candidate) || candidate.equalsIgnoreCase(contentType)) return true;
-        int slash = candidate.indexOf('/');
-        return slash > 0 && "*".equals(candidate.substring(slash + 1))
-                && contentType.regionMatches(true, 0, candidate, 0, slash + 1);
+    private static boolean mediaTypeMatches(String configured, String contentType) {
+        if (configured == null) return false;
+        String candidate = configured.trim();
+        return "*/*".equals(candidate) || candidate.equalsIgnoreCase(contentType);
     }
 
     /**

@@ -268,7 +268,7 @@ Integration responses additionally accept `contentHandling`, applied as an outpu
 
 ### Binary Payloads
 
-Set `binaryMediaTypes` on the RestApi (exact types or a subtype wildcard such as `image/*`) to mark content types as binary. A binary request body reaches an `AWS_PROXY` (Lambda) integration base64-encoded with `isBase64Encoded: true`; previously it was read as a UTF-8 string, which corrupted it. For non-proxy integrations, pair `binaryMediaTypes` with `contentHandling` as above.
+Set `binaryMediaTypes` on the RestApi to mark content types as binary. Entries are matched exactly, ignoring any charset parameter; `*/*` is the one wildcard entry, and it covers every content type. A subtype wildcard such as `image/*` is not expanded, matching AWS, which documents only `*/*` and otherwise names one exact media type at a time. A binary request body reaches an `AWS_PROXY` (Lambda) integration base64-encoded with `isBase64Encoded: true`; previously it was read as a UTF-8 string, which corrupted it. For non-proxy integrations, pair `binaryMediaTypes` with `contentHandling` as above.
 
 ### Caching
 
