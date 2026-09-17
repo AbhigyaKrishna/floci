@@ -3203,7 +3203,7 @@ public class Ec2QueryHandler {
                 .stream().findFirst()
                 .orElseGet(() -> firstFilterValue(filters, "owner-alias", AMAZON_OWNER_ID));
         return switch (requested) {
-            case "self" -> config.defaultAccountId();
+            case "self" -> service.callerAccountId();
             case "amazon" -> AMAZON_OWNER_ID;
             case "aws-marketplace" -> AWS_MARKETPLACE_OWNER_ID;
             default -> requested;
@@ -4477,7 +4477,7 @@ public class Ec2QueryHandler {
         if (name == null || name.isBlank()) {
             return null;
         }
-        return AwsArnUtils.Arn.of("iam", "", config.defaultAccountId(), "instance-profile/" + name).toString();
+        return AwsArnUtils.Arn.of("iam", "", service.callerAccountId(), "instance-profile/" + name).toString();
     }
 
     private String vpcXml(Vpc vpc) {

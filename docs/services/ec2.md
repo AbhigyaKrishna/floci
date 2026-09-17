@@ -249,6 +249,14 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
 
+Every resource EC2 creates is owned by the account the request resolves to, the same account
+[STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
+carry. So `DescribeImages` with `--owners <your account id>` matches the AMIs that account
+registered, and `--owners self` resolves to the same account. This is what lets a Terraform
+`aws_ami` data source pin `owners` to the account under test instead of the emulator's default
+`000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
+that publish those images.
+
 ### Tags
 
 | Action | Description |
