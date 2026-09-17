@@ -66,6 +66,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -75,6 +76,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class RdsServiceTest {
@@ -140,6 +142,7 @@ class RdsServiceTest {
         when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.empty());
         when(rdsConfig.defaultMysqlImage()).thenReturn(Optional.empty());
         when(rdsConfig.defaultMariadbImage()).thenReturn(Optional.empty());
+        when(rdsConfig.defaultSqlServerImage()).thenReturn("mcr.microsoft.com/mssql/server:2022-latest");
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -175,6 +178,30 @@ class RdsServiceTest {
         assertNotNull(instance.getDbiResourceId());
         assertTrue(instance.getDbiResourceId().startsWith("db-"));
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
+    }
+
+    @Test
+    void createDbInstanceSupportsSqlServerEngineIdentifiers() {
+        DbInstance instance = rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
+                "sa", "Password123!", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals(DatabaseEngine.SQLSERVER, instance.getEngine());
+        assertEquals("sqlserver-se", instance.getEngineIdentifier());
+        verify(containerManager).tryStart(any(), any(), any(), any(), eq(DatabaseEngine.SQLSERVER),
+                eq("mcr.microsoft.com/mssql/server:2022-latest"), eq("sa"), eq("Password123!"), isNull());
+    }
+
+    @Test
+    void createDbInstanceRejectsDbNameForSqlServer() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
+                        "sa", "Password123!", "app", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("DBName must be null for SQL Server.", exception.getMessage());
+        verifyNoInteractions(containerManager);
     }
 
     @Test
