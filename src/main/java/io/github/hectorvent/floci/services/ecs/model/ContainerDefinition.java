@@ -66,7 +66,6 @@ public class ContainerDefinition {
     public void setFirelensConfiguration(FirelensConfiguration firelensConfiguration) {
         this.firelensConfiguration = firelensConfiguration;
     }
-
     public HealthCheck getHealthCheck() { return healthCheck; }
     public void setHealthCheck(HealthCheck healthCheck) { this.healthCheck = healthCheck; }
 }
