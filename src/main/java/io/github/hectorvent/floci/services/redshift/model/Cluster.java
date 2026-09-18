@@ -12,6 +12,8 @@ public class Cluster {
     private String nodeType;
     private String masterUsername;
     private String masterPassword;
+    private String masterPasswordSecretArn;
+    private String masterPasswordSecretKmsKeyId;
     private String clusterStatus;
     private Endpoint endpoint;
     private String clusterSubnetGroupName;
@@ -27,6 +29,10 @@ public class Cluster {
     public void setMasterUsername(String masterUsername) { this.masterUsername = masterUsername; }
     public String getMasterPassword() { return masterPassword; }
     public void setMasterPassword(String masterPassword) { this.masterPassword = masterPassword; }
+    public String getMasterPasswordSecretArn() { return masterPasswordSecretArn; }
+    public void setMasterPasswordSecretArn(String masterPasswordSecretArn) { this.masterPasswordSecretArn = masterPasswordSecretArn; }
+    public String getMasterPasswordSecretKmsKeyId() { return masterPasswordSecretKmsKeyId; }
+    public void setMasterPasswordSecretKmsKeyId(String masterPasswordSecretKmsKeyId) { this.masterPasswordSecretKmsKeyId = masterPasswordSecretKmsKeyId; }
     public String getClusterStatus() { return clusterStatus; }
     public void setClusterStatus(String clusterStatus) { this.clusterStatus = clusterStatus; }
     public Endpoint getEndpoint() { return endpoint; }
