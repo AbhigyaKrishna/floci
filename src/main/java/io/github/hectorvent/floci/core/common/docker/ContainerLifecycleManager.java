@@ -954,6 +954,10 @@ public class ContainerLifecycleManager {
             hostConfig.withBinds(spec.binds().toArray(new Bind[0]));
         }
 
+        if (spec.volumesFrom() != null && !spec.volumesFrom().isEmpty()) {
+            hostConfig.withVolumesFrom(spec.volumesFrom());
+        }
+
         // Docker rejects extra_hosts together with container:<id> network mode. Containers
         // sharing another container's network namespace already inherit its network path.
         if (spec.extraHosts() != null && !spec.extraHosts().isEmpty()

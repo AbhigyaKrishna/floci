@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -150,6 +151,16 @@ public class EcsContainerManager {
         Map<String, String> containerIds = new LinkedHashMap<>();
         Map<String, Closeable> logStreamsByContainerId = new LinkedHashMap<>();
         List<Container> runtimeContainers = new ArrayList<>();
+        ContainerDefinition firelensRouter = findFirelensRouter(taskDef.getContainerDefinitions());
+        Map<String, Map<String, String>> firelensLogOptions =
+                awsFirelensLogOptions(taskDef.getContainerDefinitions());
+        if (!firelensLogOptions.isEmpty() && firelensRouter == null) {
+            throw new AwsException("ClientException",
+                    "awsfirelens log driver requires a firelensConfiguration container", 400);
+        }
+
+        List<ContainerDefinition> launchOrder = orderForDependencies(
+                launchOrder(taskDef.getContainerDefinitions(), firelensRouter), firelensRouter);
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
         // name -> absolute host source path; efsVolumeConfiguration volumes map their
@@ -173,17 +184,9 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
-        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+        for (ContainerDefinition def : launchOrder) {
             envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
-        }
-
-        ContainerDefinition firelensRouter = findFirelensRouter(taskDef.getContainerDefinitions());
-        Map<String, Map<String, String>> firelensLogOptions =
-                awsFirelensLogOptions(taskDef.getContainerDefinitions());
-        if (!firelensLogOptions.isEmpty() && firelensRouter == null) {
-            throw new AwsException("ClientException",
-                    "awsfirelens log driver requires a firelensConfiguration container", 400);
         }
 
         PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
@@ -200,8 +203,6 @@ public class EcsContainerManager {
             firelensSocketAddress = unixSocketAddress(firelensVolumeName);
         }
 
-        List<ContainerDefinition> launchOrder =
-                launchOrder(taskDef.getContainerDefinitions(), firelensRouter);
         String fluentHost = null;
         String networkModeName = taskDef.getNetworkMode() != null
                 ? taskDef.getNetworkMode().name()
@@ -323,6 +324,17 @@ public class EcsContainerManager {
                     }
                 }
 
+                if (def.getVolumesFrom() != null) {
+                    for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
+                        String sourceContainerId = containerIds.get(volumeFrom.sourceContainer());
+                        if (sourceContainerId == null) {
+                            throw new IllegalStateException("ECS volumesFrom source container "
+                                    + volumeFrom.sourceContainer() + " has not started");
+                        }
+                        specBuilder.withVolumesFrom(sourceContainerId, volumeFrom.readOnly());
+                    }
+                }
+
                 ContainerSpec spec = specBuilder.build();
 
                 String dockerId;
@@ -379,7 +391,18 @@ public class EcsContainerManager {
             throw e;
         }
 
-        task.setContainers(runtimeContainers);
+        Map<String, Container> runtimeContainersByName = new LinkedHashMap<>();
+        for (Container container : runtimeContainers) {
+            runtimeContainersByName.put(container.getName(), container);
+        }
+        List<Container> containersInDefinitionOrder = new ArrayList<>();
+        for (ContainerDefinition definition : taskDef.getContainerDefinitions()) {
+            Container container = runtimeContainersByName.get(definition.getName());
+            if (container != null) {
+                containersInDefinitionOrder.add(container);
+            }
+        }
+        task.setContainers(containersInDefinitionOrder);
         task.setLastStatus(TaskStatus.RUNNING.name());
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
@@ -387,6 +410,53 @@ public class EcsContainerManager {
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
                 protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region);
+    }
+
+    private List<ContainerDefinition> orderForDependencies(List<ContainerDefinition> definitions,
+                                                          ContainerDefinition firelensRouter) {
+        Map<String, ContainerDefinition> definitionsByName = new LinkedHashMap<>();
+        for (ContainerDefinition definition : definitions) {
+            definitionsByName.put(definition.getName(), definition);
+        }
+
+        List<ContainerDefinition> ordered = new ArrayList<>();
+        Set<ContainerDefinition> visiting = new HashSet<>();
+        Set<ContainerDefinition> visited = new HashSet<>();
+        for (ContainerDefinition definition : definitions) {
+            addAfterDependencies(definition, definitionsByName, firelensRouter, visiting, visited, ordered);
+        }
+        return ordered;
+    }
+
+    private void addAfterDependencies(ContainerDefinition definition,
+                                      Map<String, ContainerDefinition> definitionsByName,
+                                      ContainerDefinition firelensRouter,
+                                      Set<ContainerDefinition> visiting,
+                                      Set<ContainerDefinition> visited,
+                                      List<ContainerDefinition> ordered) {
+        if (visited.contains(definition)) {
+            return;
+        }
+        if (!visiting.add(definition)) {
+            throw new IllegalArgumentException("ECS container dependencies contain a cycle at container "
+                    + definition.getName());
+        }
+        if (isAwsFirelens(definition)) {
+            addAfterDependencies(firelensRouter, definitionsByName, firelensRouter, visiting, visited, ordered);
+        }
+        if (definition.getVolumesFrom() != null) {
+            for (VolumeFrom volumeFrom : definition.getVolumesFrom()) {
+                ContainerDefinition source = definitionsByName.get(volumeFrom.sourceContainer());
+                if (source == null) {
+                    throw new IllegalArgumentException("ECS volumesFrom references unknown source container "
+                            + volumeFrom.sourceContainer());
+                }
+                addAfterDependencies(source, definitionsByName, firelensRouter, visiting, visited, ordered);
+            }
+        }
+        visiting.remove(definition);
+        visited.add(definition);
+        ordered.add(definition);
     }
 
     private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {

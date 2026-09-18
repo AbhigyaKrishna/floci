@@ -90,6 +90,11 @@ the agent's reason, `Unable to download firelens s3 config file: unable to downl
 <key> from bucket <bucket>: <detail>`, instead of leaking a started router. Shared network
 namespaces (AppConfig agent on `127.0.0.1:2772`) are not implemented.
 
+Container `volumesFrom` entries are also stored and returned. In Docker mode, source containers
+are launched before their consumers and their declared volumes are inherited with the requested
+read-only or read-write access mode. Startup ordering also respects FireLens router dependencies;
+cycles involving both volume inheritance and log routing are rejected before containers start.
+
 ### Tasks
 
 | Operation | Description |
