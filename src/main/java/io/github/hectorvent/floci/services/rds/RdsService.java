@@ -617,6 +617,8 @@ public class RdsService implements Resettable, ResourceProvider {
         // resolved with the other validations, before a port is taken or a container started
         DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
                 .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
+        DbInstanceSettings.validateMonitoringPairOnCreate(
+                settings.monitoringInterval(), settings.monitoringRoleArn());
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -1971,8 +1973,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
             throw DbInstanceSettings.overlappingWindows();
         }
-        return new DbInstanceSettings(settings.storageEncrypted(), settings.kmsKeyId(),
-                settings.backupRetentionPeriod(), backup, maintenance, settings.copyTagsToSnapshot());
+        return settings.withWindows(backup, maintenance);
     }
 
     /**

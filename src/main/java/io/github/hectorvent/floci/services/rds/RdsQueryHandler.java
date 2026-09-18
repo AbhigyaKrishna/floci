@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
+import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -419,8 +420,44 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")));
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("MonitoringInterval")),
+                params.getFirst("MonitoringRoleArn"),
+                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
+                params.getFirst("EngineLifecycleSupport"),
+                includeEncryption ? cloudwatchLogsExports(params) : null,
+                includeEncryption ? null : cloudwatchLogsExportChanges(params),
+                optionalInt(params.getFirst("MaxAllocatedStorage")));
     }
+
+    /**
+     * CreateDBInstance names the log types once, as EnableCloudwatchLogsExports.member.N. The
+     * response member is EnabledCloudwatchLogsExports, so the two never line up on the wire.
+     * An absent list is null (leave it alone) rather than empty (clear it).
+     */
+    private static List<String> cloudwatchLogsExports(MultivaluedMap<String, String> params) {
+        List<String> types = memberList(params, "EnableCloudwatchLogsExports");
+        return types.isEmpty() ? null : types;
+    }
+
+    /**
+     * ModifyDBInstance has no EnableCloudwatchLogsExports at all. It carries
+     * CloudwatchLogsExportConfiguration with an EnableLogTypes list and a DisableLogTypes list,
+     * which are applied to the stored set as deltas rather than as a replacement. Reading the
+     * create-only key here is why an SDK request to change exports on a live instance did nothing.
+     */
+    private static LogExportChanges cloudwatchLogsExportChanges(MultivaluedMap<String, String> params) {
+        List<String> enable = memberList(params,
+                "CloudwatchLogsExportConfiguration.EnableLogTypes");
+        List<String> disable = memberList(params,
+                "CloudwatchLogsExportConfiguration.DisableLogTypes");
+        if (enable.isEmpty() && disable.isEmpty()) {
+            return null;
+        }
+        return new LogExportChanges(enable, disable);
+    }
+
 
     private static Boolean optionalBoolean(String value) {
         return value == null ? null : Boolean.parseBoolean(value);
@@ -1959,7 +1996,24 @@ public class RdsQueryHandler {
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
-           .elem("DBInstanceArn", i.getDbInstanceArn());
+           .elem("DBInstanceArn", i.getDbInstanceArn())
+           .elem("MonitoringInterval", i.getMonitoringInterval())
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
+           .elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
+        }
+        if (i.isPerformanceInsightsEnabled()) {
+            xml.elem("PerformanceInsightsRetentionPeriod", i.getPerformanceInsightsRetentionPeriod());
+        }
+        if (i.getMaxAllocatedStorage() != null) {
+            xml.elem("MaxAllocatedStorage", i.getMaxAllocatedStorage());
+        }
+        if (i.getEnabledCloudwatchLogsExports() != null && !i.getEnabledCloudwatchLogsExports().isEmpty()) {
+            xml.start("EnabledCloudwatchLogsExports");
+            i.getEnabledCloudwatchLogsExports().forEach(t -> xml.elem("member", t));
+            xml.end("EnabledCloudwatchLogsExports");
+        }
         if (i.getKmsKeyId() != null && !i.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", i.getKmsKeyId());
         }
