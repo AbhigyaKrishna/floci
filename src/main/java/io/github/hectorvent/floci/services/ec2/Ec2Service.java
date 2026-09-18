@@ -20,6 +20,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -4713,6 +4714,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // A deregistered AMI is retained only as a tombstone, so that ancestry and
                 // repeat-deregistration still resolve; DescribeImages must not report it.
                 .filter(img -> !DEREGISTERED_STATE.equals(img.getState()))
+                .map(this::withCurrentImageTags)
                 .filter(img -> matchesImageIds(img, imageIds))
                 .filter(img -> matchesImageOwners(img, owners))
                 .filter(img -> matchesRegisteredImageFilters(img, filters))
@@ -5684,6 +5686,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private boolean matchesImageFilter(Ec2ImageCatalog.CatalogImage catalogImage, String name, List<String> values) {
         Image image = catalogImage.toImage();
+        if (isImageTagFilter(name)) {
+            return matchesImageTagFilter(image, name, values);
+        }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
             case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
@@ -5752,6 +5757,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesRegisteredImageFilter(Image image, String name, List<String> values) {
+        if (isImageTagFilter(name)) {
+            return matchesImageTagFilter(image, name, values);
+        }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
             case "block-device-mapping.snapshot-id" -> image.getBlockDeviceMappings().stream()
@@ -5773,6 +5781,35 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
             default -> true;
         };
+    }
+
+    private Image withCurrentImageTags(Image image) {
+        List<Tag> currentTags = tags.get(image.getImageId())
+                .orElseGet(() -> image.getTags() == null ? List.of() : image.getTags());
+        image.setTags(new ArrayList<>(currentTags));
+        // Persistent backends may return detached values from scan(), so do not rely on
+        // in-place mutation to retain CreateTags/DeleteTags changes across reads or restarts.
+        registeredImages.put(key(image.getRegion(), image.getImageId()), image);
+        return image;
+    }
+
+    private boolean isImageTagFilter(String name) {
+        return name != null && (name.startsWith("tag:") || "tag-key".equals(name));
+    }
+
+    private boolean matchesImageTagFilter(Image image, String name, List<String> values) {
+        return matchesTagFilter(image.getTags(), name, values, this::matchesFilterValue);
+    }
+
+    private boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
+                                     BiPredicate<List<String>, String> valueMatcher) {
+        List<Tag> tags = resourceTags == null ? List.of() : resourceTags;
+        if (filterName.startsWith("tag:")) {
+            String key = filterName.substring("tag:".length());
+            return tags.stream().anyMatch(tag -> key.equals(tag.getKey())
+                    && valueMatcher.test(values, tag.getValue()));
+        }
+        return tags.stream().anyMatch(tag -> valueMatcher.test(values, tag.getKey()));
     }
 
     private Snapshot snapshotFrom(String region, String snapshotId, Image image, BlockDeviceMapping mapping) {
@@ -7264,15 +7301,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesFilter(Object resource, String filterName, List<String> values, String region) {
-        if (filterName.startsWith("tag:")) {
-            String tagKey = filterName.substring(4);
-            List<Tag> resourceTags = getResourceTags(resource);
-            return resourceTags.stream()
-                    .anyMatch(t -> t.getKey().equals(tagKey) && matchesValue(values, t.getValue()));
-        }
-        if ("tag-key".equals(filterName)) {
-            List<Tag> resourceTags = getResourceTags(resource);
-            return resourceTags.stream().anyMatch(t -> matchesValue(values, t.getKey()));
+        if (filterName.startsWith("tag:") || "tag-key".equals(filterName)) {
+            return matchesTagFilter(getResourceTags(resource), filterName, values, this::matchesValue);
         }
         if ("tag-value".equals(filterName)) {
             List<Tag> resourceTags = getResourceTags(resource);
