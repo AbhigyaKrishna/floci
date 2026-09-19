@@ -239,9 +239,31 @@ nothing here performs the TLS handshake they describe.
 
 | Action | Description |
 |--------|-------------|
-| CreateLoginProfile | Creates a password login profile for a user. |
+| CreateLoginProfile | Creates a console password login profile for a user. |
+| GetLoginProfile | Returns a user's login profile. |
+| UpdateLoginProfile | Updates a user's login profile password and/or reset-required flag. |
 | DeleteLoginProfile | Deletes a user's login profile. |
-| UpdateLoginProfile | Updates a user's login profile password settings. |
+
+`UserName` is optional on `CreateLoginProfile`, `GetLoginProfile` and `DeleteLoginProfile`: it
+defaults to the user resolved from the signing access key, the same fallback `GetUser` uses. It is
+required on `UpdateLoginProfile`, matching the AWS API.
+
+A user holds at most one login profile: `CreateLoginProfile` on a user that already has one
+returns `EntityAlreadyExists`; `Get`/`Update`/`DeleteLoginProfile` on a user with none return
+`NoSuchEntity`. `Password` is required on `CreateLoginProfile` and optional on
+`UpdateLoginProfile`; an omitted field on `UpdateLoginProfile` (`Password` or
+`PasswordResetRequired`) leaves that field unchanged, unlike `UpdateAccountPasswordPolicy`'s
+wholesale replace. A password must be 1–128 characters from AWS's documented password character
+class, and when the account has an [account password policy](#account-password-policy) set, it is
+also checked against that policy's length and character-class requirements, with
+`PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
+echoed back by any of these actions, matching AWS.
+
+`DeleteUser` on a user that still has a login profile returns `DeleteConflict`, as on AWS: delete
+the profile first. Renaming a user with `UpdateUser` carries its login profile to the new name.
+Floci still does not require access keys, inline policies, or other credentials to be removed
+before `DeleteUser`; only attached managed policies, group membership, and the login profile block
+it.
 
 ### Policy Simulation
 
