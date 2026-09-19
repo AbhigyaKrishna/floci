@@ -1690,6 +1690,42 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** A container reached through the task metadata endpoint, with the task it belongs to. */
+    public record MetadataTarget(EcsTask task, Container container, TaskDefinition taskDefinition) {}
+
+    /**
+     * Resolves the {@code ECS_CONTAINER_METADATA_URI_V4} id a container was given at launch. The id
+     * is minted per container and never reused, so it identifies both the container and its task.
+     */
+    public Optional<MetadataTarget> findByMetadataId(String metadataId) {
+        if (metadataId == null || metadataId.isBlank()) {
+            return Optional.empty();
+        }
+        for (EcsTask task : tasks.values()) {
+            if (task.getContainers() == null) {
+                continue;
+            }
+            for (Container container : task.getContainers()) {
+                if (metadataId.equals(container.getMetadataId())) {
+                    return Optional.of(new MetadataTarget(task, container,
+                            taskDefinitionOf(task)));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The task's definition, or null when it has since been deleted. */
+    private TaskDefinition taskDefinitionOf(EcsTask task) {
+        try {
+            return resolveTaskDefinitionOrThrow(task.getTaskDefinitionArn(), taskRegion(task));
+        } catch (AwsException e) {
+            LOG.debugv("Task {0} references a task definition that is gone: {1}",
+                    task.getTaskArn(), e.getMessage());
+            return null;
+        }
+    }
+
     public List<EcsTask> describeTasks(String clusterRef, List<String> taskRefs, String region) {
         return describeTasksDetailed(clusterRef, taskRefs, region).tasks();
     }

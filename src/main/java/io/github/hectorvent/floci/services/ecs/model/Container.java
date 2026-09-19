@@ -19,6 +19,12 @@ public class Container {
     private List<ManagedAgent> managedAgents;
     private String healthStatus;
     private String runtimeId;
+    /**
+     * The opaque id in this container's {@code ECS_CONTAINER_METADATA_URI_V4}. Minted before the
+     * container is created, the way the ECS agent mints one, so the URI can be injected into the
+     * container's own environment.
+     */
+    private String metadataId;
     private String imageDigest;
     private String cpu;
     private String memory;
@@ -64,6 +70,9 @@ public class Container {
 
     public String getRuntimeId() { return runtimeId; }
     public void setRuntimeId(String runtimeId) { this.runtimeId = runtimeId; }
+
+    public String getMetadataId() { return metadataId; }
+    public void setMetadataId(String metadataId) { this.metadataId = metadataId; }
 
     public String getImageDigest() { return imageDigest; }
     public void setImageDigest(String imageDigest) { this.imageDigest = imageDigest; }

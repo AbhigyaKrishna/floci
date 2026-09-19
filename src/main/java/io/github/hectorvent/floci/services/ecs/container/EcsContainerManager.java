@@ -70,6 +70,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -199,8 +200,14 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
+        // The task metadata id has to exist before the container does: its own environment carries
+        // the URI, so it cannot be derived from the Docker id the daemon hands back afterwards.
+        Map<String, String> metadataIdsByContainer = new LinkedHashMap<>();
         for (ContainerDefinition def : launchOrder) {
-            envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
+            String metadataId = UUID.randomUUID().toString().replace("-", "");
+            metadataIdsByContainer.put(def.getName(), metadataId);
+            envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
+                    metadataId));
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
@@ -401,7 +408,8 @@ public class EcsContainerManager {
                         protectedNetwork == null ? dockerId : protectedNetwork.namespace().helperId(), def);
 
                 // Build ECS container model
-                Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
+                Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region,
+                        metadataIdsByContainer.get(def.getName()));
                 runtimeContainers.add(container);
                 containerIds.put(def.getName(), dockerId);
 
@@ -1198,7 +1206,8 @@ public class EcsContainerManager {
         }
     }
 
-    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region) {
+    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region,
+                                      String metadataId) {
         // AWS SDK baseline (endpoint + region + credentials) first so the task can reach the
         // emulator, then the task-def environment, then task-def secrets, then the override
         // environment. Later entries win on key conflict, so an explicit task-def value or
@@ -1209,6 +1218,12 @@ public class EcsContainerManager {
             if (eq > 0) {
                 envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
             }
+        }
+        // The task metadata endpoint, which an application, the ECS SDK integrations and the
+        // aws-for-fluent-bit init process all read from this variable.
+        String flociEndpoint = awsEnv.flociEndpoint();
+        if (metadataId != null && flociEndpoint != null) {
+            envMap.put("ECS_CONTAINER_METADATA_URI_V4", flociEndpoint + "/v4/" + metadataId);
         }
         if (def.getEnvironment() != null) {
             for (var kv : def.getEnvironment()) {
@@ -1407,7 +1422,8 @@ public class EcsContainerManager {
     }
 
     private Container buildContainer(String taskArn, ContainerDefinition def, String dockerId,
-                                     List<NetworkBinding> networkBindings, String region) {
+                                     List<NetworkBinding> networkBindings, String region,
+                                     String metadataId) {
         Container container = new Container();
         container.setTaskArn(taskArn);
         container.setName(def.getName());
@@ -1416,6 +1432,7 @@ public class EcsContainerManager {
         container.setNetworkBindings(networkBindings);
         container.setDockerId(dockerId);
         container.setRuntimeId(dockerId);
+        container.setMetadataId(metadataId);
         container.setHealthStatus(def.getHealthCheck() != null ? "UNKNOWN" : null);
         if (def.getCpu() != null) {
             container.setCpu(String.valueOf(def.getCpu()));

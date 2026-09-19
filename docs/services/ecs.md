@@ -166,7 +166,7 @@ object ARN with `Invalid arn syntax`. A Fargate task can still take its config f
 documents, by giving the aws-for-fluent-bit init process its `aws_fluent_bit_init_s3_*`
 environment variables. ECS never inspects those and Floci passes them through, so that
 registration is accepted here too; the init process reads the task metadata endpoint before
-downloading.
+downloading, and Floci serves one (see [Task metadata endpoint](#task-metadata-endpoint)).
 Floci does not validate a task definition's `compatibilities` /
 `requiresCompatibilities` against `RunTask` `launchType`; a Fargate-compatible
 definition can still be run with `launchType=EC2` (and the reverse).
@@ -286,6 +286,30 @@ launch type, which is what AWS documents for the `Service` shape.
 
 With no launch type, no strategy and no cluster default, a task keeps Floci's `FARGATE` default: a
 local cluster has no container instances, so an EC2 default would have nowhere to place it.
+
+#### Task metadata endpoint
+
+Floci serves the [task metadata endpoint version
+4](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-metadata-endpoint-v4-fargate.html)
+and injects `ECS_CONTAINER_METADATA_URI_V4` into every container it launches. AWS serves it on the
+link-local address `169.254.170.2`, which a local container cannot be given, so Floci serves the
+same paths on its own port; applications and the AWS SDKs read the environment variable rather than
+the address, so they work unchanged.
+
+| Path | Returns |
+|---|---|
+| `/v4/{id}` | The container's metadata |
+| `/v4/{id}/task` | The task's metadata, including every container |
+| `/v4/{id}/stats` | An empty document |
+| `/v4/{id}/task/stats` | One null entry per container |
+
+The `{id}` is minted per container at launch, as the ECS agent mints it. The task document carries
+`Cluster`, `TaskARN`, `Family`, `Revision`, the statuses, `Limits` (CPU in vCPUs), the pull
+timestamps, `AvailabilityZone`, `LaunchType`, `ServiceName` for a service's task, and, for Fargate,
+`ClockDrift` and `EphemeralStorageMetrics`. Floci has no clock drift to report and does not meter
+the disk, so those two report a synchronized clock and zero usage. Stats are not sampled from
+Docker: AWS documents a null response when stats are unavailable, so a client that asks gets a
+valid answer rather than an error.
 
 ### Services
 
