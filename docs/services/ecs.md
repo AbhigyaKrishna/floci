@@ -194,6 +194,7 @@ cycles involving both volume inheritance and log routing are rejected before con
 | `ListTasks` | List task ARNs (filterable by cluster, family, service, status) |
 | `UpdateTaskProtection` | Set scale-in protection for tasks |
 | `GetTaskProtection` | Get current task protection state |
+| `ExecuteCommand` | Open an ECS Exec session into a container (see [ECS Exec](#ecs-exec)) |
 
 ### Fargate
 
@@ -310,6 +311,32 @@ timestamps, `AvailabilityZone`, `LaunchType`, `ServiceName` for a service's task
 the disk, so those two report a synchronized clock and zero usage. Stats are not sampled from
 Docker: AWS documents a null response when stats are unavailable, so a client that asks gets a
 valid answer rather than an error.
+
+#### ECS Exec
+
+`ExecuteCommand` opens a real shell in a task's container. The session must be `interactive`, which
+is the only mode ECS supports. The task must be `RUNNING`, must have been run with
+`enableExecuteCommand`, and must have a container behind it, which means Docker mode:
+a mock-mode task reports the `ExecuteCommandAgent` as running but has no runtime to exec into, and
+`ExecuteCommand` answers `TargetNotConnectedException`.
+
+The response carries a `session` with a `streamUrl` pointing at Floci's own data channel and a
+single-use `tokenValue`, so the AWS CLI works as documented:
+
+```bash
+aws ecs execute-command --cluster my-cluster --task <task-arn> \
+  --container app --interactive --command "/bin/sh" \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Floci plays the SSM agent's half of the Session Manager protocol on that channel (the binary
+`AgentMessage` framing, the handshake, sequenced acknowledgements and terminal resizes) and bridges
+it to a `docker exec` in the container. Deliberate limits:
+
+- The command runs through `/bin/sh -c`, so an image without a shell cannot be exec'd into.
+- Sessions are in memory, single use, and expire after five minutes if nobody connects.
+- `ExecuteCommand` logging (the `executeCommandConfiguration` on a cluster, which sends session
+  transcripts to S3 or CloudWatch) is not implemented.
 
 ### Services
 
@@ -632,7 +659,7 @@ A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volu
 
 ### Mock mode
 
-Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
+Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers `TargetNotConnectedException` and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
 
 ```yaml
 # docker-compose.yml — CI / test environment
