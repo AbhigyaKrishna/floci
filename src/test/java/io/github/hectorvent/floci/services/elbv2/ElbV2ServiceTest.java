@@ -252,6 +252,28 @@ class ElbV2ServiceTest {
     }
 
     @Test
+    void deleteListenerIsIgnoredForRegionWithNoListeners() {
+        String emptyRegion = "eu-central-1";
+
+        service.deleteListener(emptyRegion, "arn:aws:elasticloadbalancing:" + emptyRegion
+                + ":000000000000:listener/app/sample-lb/1111111111111111/2222222222222222");
+
+        assertTrue(service.describeListeners(emptyRegion, null, null).isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @Test
+    void deleteLoadBalancerIsIgnoredForRegionWithNoLoadBalancers() {
+        String emptyRegion = "eu-central-1";
+
+        service.deleteLoadBalancer(emptyRegion, "arn:aws:elasticloadbalancing:" + emptyRegion
+                + ":000000000000:loadbalancer/app/sample-lb/1111111111111111");
+
+        assertTrue(service.describeLoadBalancers(emptyRegion, null, null, null, null).isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @Test
     void describeTargetHealthReturnsUnusedForExplicitUnregisteredTarget() {
         String tgArn = createTargetGroup("sample-tg");
         TargetDescription target = new TargetDescription();

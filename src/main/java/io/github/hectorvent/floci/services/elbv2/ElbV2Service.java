@@ -101,6 +101,18 @@ public class ElbV2Service implements ResourceProvider {
         }
     }
 
+    /**
+     * Drops one entry from an ARN index. The list has to be looked up rather than defaulted:
+     * {@code getOrDefault(key, List.of())} hands back an immutable list whose {@code remove}
+     * throws, which the Query path reports as an {@code InternalFailure}.
+     */
+    private static void removeFromIndex(Map<String, List<String>> index, String key, String value) {
+        List<String> entries = index.get(key);
+        if (entries != null) {
+            entries.remove(value);
+        }
+    }
+
     private <V> void persistRegion(Map<String, Map<String, V>> resources, String region) {
         Map<String, V> regionResources = resources.get(region);
         if (regionResources != null) {
@@ -248,16 +260,19 @@ public class ElbV2Service implements ResourceProvider {
     }
 
     public void deleteLoadBalancer(String region, String arn) {
-        Map<String, LoadBalancer> regionLbs = loadBalancers.getOrDefault(region, Map.of());
+        Map<String, LoadBalancer> regionLbs = loadBalancers.get(region);
+        if (regionLbs == null) {
+            return; // AWS silently ignores non-existent LBs on delete
+        }
         LoadBalancer lb = regionLbs.remove(arn);
         if (lb == null) {
-            return; // AWS silently ignores non-existent LBs on delete
+            return;
         }
         // cascade: listeners → rules
         List<String> listenerArns = lbToListeners.remove(arn);
         if (listenerArns != null) {
-            Map<String, Listener> regionListeners = listeners.getOrDefault(region, Map.of());
-            Map<String, Rule> regionRules = rules.getOrDefault(region, Map.of());
+            Map<String, Listener> regionListeners = listeners.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
+            Map<String, Rule> regionRules = rules.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
             for (String listenerArn : listenerArns) {
                 dataPlane.stopListener(listenerArn);
                 regionListeners.remove(listenerArn);
@@ -540,15 +555,18 @@ public class ElbV2Service implements ResourceProvider {
     }
 
     public void deleteListener(String region, String listenerArn) {
-        Map<String, Listener> regionListeners = listeners.getOrDefault(region, Map.of());
+        Map<String, Listener> regionListeners = listeners.get(region);
+        if (regionListeners == null) {
+            return;
+        }
         Listener listener = regionListeners.remove(listenerArn);
         if (listener == null) {
             return;
         }
         dataPlane.stopListener(listenerArn);
-        lbToListeners.getOrDefault(listener.getLoadBalancerArn(), List.of()).remove(listenerArn);
+        removeFromIndex(lbToListeners, listener.getLoadBalancerArn(), listenerArn);
 
-        Map<String, Rule> regionRules = rules.getOrDefault(region, Map.of());
+        Map<String, Rule> regionRules = rules.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         List<String> ruleArns = listenerToRules.remove(listenerArn);
         if (ruleArns != null) {
             ruleArns.forEach(regionRules::remove);
@@ -692,7 +710,7 @@ public class ElbV2Service implements ResourceProvider {
         String listenerArn = rule.getListenerArn();
         regionRules.remove(ruleArn);
         rules.put(region, regionRules);
-        listenerToRules.getOrDefault(listenerArn, List.of()).remove(ruleArn);
+        removeFromIndex(listenerToRules, listenerArn, ruleArn);
         tags.remove(ruleArn);
         Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
         if (listener != null) {
