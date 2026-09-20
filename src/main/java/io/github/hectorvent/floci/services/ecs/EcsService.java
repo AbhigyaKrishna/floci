@@ -18,6 +18,9 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.ecs.model.CreateServiceRequest;
+import io.github.hectorvent.floci.services.ecs.model.CreateTaskSetRequest;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -27,14 +30,18 @@ import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.ListTasksRequest;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
+import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
+import io.github.hectorvent.floci.services.ecs.model.RunTaskRequest;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
+import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -273,7 +280,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public EcsCluster createCluster(String clusterName, Map<String, String> tags,
                                     List<ClusterSetting> settings, String region) {
-        String name = (clusterName == null || clusterName.isBlank()) ? DEFAULT_CLUSTER : clusterName;
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName(clusterName);
+        request.setTags(tags);
+        request.setSettings(settings);
+        return createCluster(request, region);
+    }
+
+    public EcsCluster createCluster(CreateClusterRequest request, String region) {
+        String name = (request.getClusterName() == null || request.getClusterName().isBlank())
+                ? DEFAULT_CLUSTER : request.getClusterName();
         String key = clusterKey(region, name);
         if (clusters.containsKey(key)) {
             return clusters.get(key);
@@ -282,11 +298,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         cluster.setClusterName(name);
         cluster.setClusterArn(regionResolver.buildArn("ecs", region, "cluster/" + name));
         cluster.setStatus("ACTIVE");
-        if (tags != null && !tags.isEmpty()) {
-            cluster.setTags(new LinkedHashMap<>(tags));
+        if (request.getTags() != null && !request.getTags().isEmpty()) {
+            cluster.setTags(new LinkedHashMap<>(request.getTags()));
         }
-        if (settings != null && !settings.isEmpty()) {
-            cluster.setSettings(new ArrayList<>(settings));
+        if (request.getSettings() != null && !request.getSettings().isEmpty()) {
+            cluster.setSettings(new ArrayList<>(request.getSettings()));
         }
         clusters.put(key, cluster);
         LOG.infov("Created ECS cluster: {0} in {1}", name, region);
@@ -371,46 +387,65 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                                   String taskRoleArn, String executionRoleArn,
                                                   List<String> requiresCompatibilities,
                                                   Map<String, String> tags, String region) {
-        boolean fargate = requiresCompatibilities != null && requiresCompatibilities.contains("FARGATE");
+        RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
+        request.setFamily(family);
+        request.setContainerDefinitions(containerDefs);
+        request.setNetworkMode(networkMode);
+        request.setCpu(cpu);
+        request.setMemory(memory);
+        request.setTaskRoleArn(taskRoleArn);
+        request.setExecutionRoleArn(executionRoleArn);
+        request.setRequiresCompatibilities(requiresCompatibilities);
+        request.setTags(tags);
+        return registerTaskDefinition(request, region);
+    }
+
+    public TaskDefinition registerTaskDefinition(RegisterTaskDefinitionRequest request, String region) {
+        List<ContainerDefinition> containerDefs = request.getContainerDefinitions();
+        List<String> requiresCompatibilities = request.getRequiresCompatibilities();
+        boolean fargate = request.isFargate();
         if (fargate) {
-            if (networkMode != NetworkMode.awsvpc) {
+            if (request.getNetworkMode() != NetworkMode.awsvpc) {
                 throw new AwsException("ClientException", "Fargate only supports network mode 'awsvpc'.", 400);
             }
-            if (cpu == null) {
+            if (request.getCpu() == null) {
                 throw new AwsException("ClientException", "Fargate requires that 'cpu' be defined at the task level.", 400);
             }
-            if (memory == null) {
+            if (request.getMemory() == null) {
                 throw new AwsException("ClientException", "Fargate requires that 'memory' be defined at the task level.", 400);
             }
-            if (!isValidFargateCpuMemory(cpu, memory)) {
+            if (!isValidFargateCpuMemory(request.getCpu(), request.getMemory())) {
                 throw new AwsException("ClientException", "No Fargate configuration exists for given values.", 400);
             }
         }
         validateFirelensS3Config(containerDefs, fargate);
+        String family = request.getFamily();
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
         TaskDefinition td = new TaskDefinition();
         td.setFamily(family);
         td.setRevision(revision);
         td.setStatus("ACTIVE");
-        td.setNetworkMode(networkMode != null ? networkMode : NetworkMode.bridge);
-        td.setCpu(cpu);
-        td.setMemory(memory);
-        td.setTaskRoleArn(taskRoleArn);
-        td.setExecutionRoleArn(executionRoleArn);
+        td.setNetworkMode(request.getNetworkMode() != null ? request.getNetworkMode() : NetworkMode.bridge);
+        td.setCpu(request.getCpu());
+        td.setMemory(request.getMemory());
+        td.setTaskRoleArn(request.getTaskRoleArn());
+        td.setExecutionRoleArn(request.getExecutionRoleArn());
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
         td.setRequiresCompatibilities(requiresCompatibilities);
+        td.setVolumes(request.getVolumes());
+        td.setRuntimePlatform(request.getRuntimePlatform());
 
         if (requiresCompatibilities != null && !requiresCompatibilities.isEmpty()) {
-            td.setCompatibilities(new java.util.ArrayList<>(requiresCompatibilities));
+            td.setCompatibilities(new ArrayList<>(requiresCompatibilities));
         } else {
-            td.setCompatibilities(java.util.List.of("EC2"));
+            td.setCompatibilities(List.of("EC2"));
         }
 
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
-        if (tags != null && !tags.isEmpty()) {
-            td.setTags(new LinkedHashMap<>(tags));
+        if (request.getTags() != null && !request.getTags().isEmpty()) {
+            td.setTags(new LinkedHashMap<>(request.getTags()));
         }
 
         taskDefinitions.put(family + ":" + revision, td);
@@ -565,22 +600,50 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                   LaunchType launchType, String group, String startedBy,
                                   List<ContainerOverride> containerOverrides,
                                   NetworkConfiguration networkConfiguration, String region) {
-        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
-        TaskDefinition taskDef = resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
-        return launchTasks(cluster, taskDef, count, launchType, group, startedBy, null,
-                containerOverrides, networkConfiguration, null, region);
+        RunTaskRequest request = new RunTaskRequest();
+        request.setCluster(clusterRef);
+        request.setTaskDefinition(taskDefinitionRef);
+        request.setCount(count);
+        request.setLaunchType(launchType);
+        request.setGroup(group);
+        request.setStartedBy(startedBy);
+        request.setContainerOverrides(containerOverrides);
+        request.setNetworkConfiguration(networkConfiguration);
+        return runTask(request, region);
+    }
+
+    public List<EcsTask> runTask(RunTaskRequest request, String region) {
+        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
+        TaskDefinition taskDef = resolveTaskDefinitionOrThrow(request.getTaskDefinition(), region);
+        return launchTasks(cluster, taskDef, request, null, null, region);
     }
 
     public List<EcsTask> startTask(String clusterRef, List<String> containerInstanceRefs,
                                     String taskDefinitionRef, String group, String startedBy, String region) {
-        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
-        TaskDefinition taskDef = resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
+        RunTaskRequest request = new RunTaskRequest();
+        request.setCluster(clusterRef);
+        request.setTaskDefinition(taskDefinitionRef);
+        request.setGroup(group);
+        request.setStartedBy(startedBy);
+        request.setContainerInstances(containerInstanceRefs);
+        return startTask(request, region);
+    }
+
+    public List<EcsTask> startTask(RunTaskRequest request, String region) {
+        List<String> instanceRefs = request.getContainerInstances() != null
+                ? request.getContainerInstances() : List.of();
+        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
+        TaskDefinition taskDef = resolveTaskDefinitionOrThrow(request.getTaskDefinition(), region);
         List<EcsTask> result = new ArrayList<>();
-        for (String instanceRef : containerInstanceRefs) {
+        // StartTask places one task onto each named container instance, which is EC2 by definition.
+        request.setCount(1);
+        request.setLaunchType(LaunchType.EC2);
+        request.setContainerOverrides(null);
+        request.setNetworkConfiguration(null);
+        for (String instanceRef : instanceRefs) {
             ContainerInstance instance = resolveContainerInstanceOrThrow(cluster.getClusterArn(), instanceRef);
-            List<EcsTask> launched = launchTasks(cluster, taskDef, 1, LaunchType.EC2,
-                    group, startedBy, instance.getContainerInstanceArn(), null, null, null, region);
-            result.addAll(launched);
+            result.addAll(launchTasks(cluster, taskDef, request,
+                    instance.getContainerInstanceArn(), null, region));
         }
         return result;
     }
@@ -592,11 +655,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      *                         task as service-owned, since the caller-supplied {@code group}
      *                         cannot be trusted for that.
      */
-    private List<EcsTask> launchTasks(EcsCluster cluster, TaskDefinition taskDef, int count,
-                                       LaunchType launchType, String group, String startedBy,
+    private List<EcsTask> launchTasks(EcsCluster cluster, TaskDefinition taskDef, RunTaskRequest request,
                                        String containerInstanceArn,
-                                       List<ContainerOverride> containerOverrides,
-                                       NetworkConfiguration networkConfiguration,
                                        String owningServiceArn, String region) {
         // Fail loudly instead of silently launching zero containers and leaving
         // a task that looks RUNNING with nothing behind it.
@@ -606,6 +666,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("ClientException",
                     "Task definition " + taskDef.getTaskDefinitionArn() + " has no container definitions.", 400);
         }
+        int count = request.getCount();
+        LaunchType launchType = request.getLaunchType();
+        String group = request.getGroup();
+        String startedBy = request.getStartedBy();
+        List<ContainerOverride> containerOverrides = request.getContainerOverrides();
+        NetworkConfiguration networkConfiguration = request.getNetworkConfiguration();
         List<EcsTask> launched = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             String taskId = UUID.randomUUID().toString().replace("-", "");
@@ -682,8 +748,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private EcsTask launchServiceTask(EcsCluster cluster, EcsServiceModel svc, LaunchType launchType,
                                        String containerInstanceArn, String region) {
         TaskDefinition taskDef = resolveTaskDefinitionOrThrow(svc.getTaskDefinition(), region);
-        EcsTask task = launchTasks(cluster, taskDef, 1, launchType, svc.getServiceName(), "ecs-svc",
-                containerInstanceArn, null, svc.getNetworkConfiguration(),
+        RunTaskRequest request = new RunTaskRequest();
+        request.setCount(1);
+        request.setLaunchType(launchType);
+        request.setGroup(svc.getServiceName());
+        request.setStartedBy("ecs-svc");
+        request.setNetworkConfiguration(svc.getNetworkConfiguration());
+        EcsTask task = launchTasks(cluster, taskDef, request, containerInstanceArn,
                 svc.getServiceArn(), region).getFirst();
         task.setDeploymentId(deploymentId(svc));
         return task;
@@ -790,6 +861,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     public List<String> listTasks(String clusterRef, String family, String desiredStatus,
                                    String serviceName, String region) {
+        ListTasksRequest request = new ListTasksRequest();
+        request.setCluster(clusterRef);
+        request.setFamily(family);
+        request.setDesiredStatus(desiredStatus);
+        request.setServiceName(serviceName);
+        return listTasks(request, region);
+    }
+
+    public List<String> listTasks(ListTasksRequest request, String region) {
+        String clusterRef = request.getCluster();
+        String family = request.getFamily();
+        String desiredStatus = request.getDesiredStatus();
+        String serviceName = request.getServiceName();
         // Resolving the default cluster also creates and persists it, and ListTasks is a read:
         // when no cluster is named, look the default up without materializing it. A service
         // filter then simply matches nothing if that cluster does not exist yet.
@@ -892,10 +976,30 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                           String deploymentControllerType, String availabilityZoneRebalancing,
                                           Map<String, Object> serviceConnectConfiguration,
                                           String region) {
-        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+        CreateServiceRequest request = new CreateServiceRequest();
+        request.setCluster(clusterRef);
+        request.setServiceName(serviceName);
+        request.setTaskDefinition(taskDefinition);
+        request.setDesiredCount(desiredCount);
+        request.setLaunchType(launchType);
+        request.setLoadBalancers(loadBalancers);
+        request.setNetworkConfiguration(networkConfiguration);
+        request.setTags(tags);
+        request.setSchedulingStrategy(schedulingStrategy);
+        request.setDeploymentControllerType(deploymentControllerType);
+        request.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
+        request.setServiceConnectConfiguration(serviceConnectConfiguration);
+        return createService(request, region);
+    }
+
+    public EcsServiceModel createService(CreateServiceRequest request, String region) {
+        String serviceName = request.getServiceName();
+        int desiredCount = request.getDesiredCount();
+        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
         // AWS resolves family / family:revision at create time and stores the ARN; the
         // reconciler compares it with each task's taskDefinitionArn, so pin it here.
-        taskDefinition = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
+        String taskDefinition =
+                resolveTaskDefinitionOrThrow(request.getTaskDefinition(), region).getTaskDefinitionArn();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         if (services.containsKey(key)) {
@@ -913,19 +1017,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setServiceName(serviceName);
         svc.setClusterArn(cluster.getClusterArn());
         svc.setTaskDefinition(taskDefinition);
-        svc.setLaunchType(launchType != null ? launchType : LaunchType.FARGATE);
+        svc.setLaunchType(request.getLaunchType() != null ? request.getLaunchType() : LaunchType.FARGATE);
         if (desiredCount < 0) {
             throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
         }
         svc.setDesiredCount(desiredCount);
-        svc.setLoadBalancers(loadBalancers);
-        svc.setNetworkConfiguration(networkConfiguration);
+        svc.setLoadBalancers(request.getLoadBalancers());
+        svc.setNetworkConfiguration(request.getNetworkConfiguration());
         // AWS echoes these on every DescribeServices; clients that persist them (Terraform's
         // aws_ecs_service reads all three, and schedulingStrategy is ForceNew) treat a missing
         // value as drift and replace the service on every apply.
-        String strategy = schedulingStrategy != null ? schedulingStrategy : DEFAULT_SCHEDULING_STRATEGY;
-        String controller = deploymentControllerType != null
-                ? deploymentControllerType : DEFAULT_DEPLOYMENT_CONTROLLER;
+        String strategy = request.getSchedulingStrategy() != null
+                ? request.getSchedulingStrategy() : DEFAULT_SCHEDULING_STRATEGY;
+        String controller = request.getDeploymentControllerType() != null
+                ? request.getDeploymentControllerType() : DEFAULT_DEPLOYMENT_CONTROLLER;
         if (SCHEDULING_DAEMON.equals(strategy)
                 && (svc.getLaunchType() == LaunchType.FARGATE || !DEFAULT_DEPLOYMENT_CONTROLLER.equals(controller))) {
             throw new AwsException("InvalidParameterException",
@@ -934,15 +1039,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         svc.setSchedulingStrategy(strategy);
         svc.setDeploymentController(controller);
-        svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing != null
-                ? availabilityZoneRebalancing : DEFAULT_AZ_REBALANCING_ON_CREATE);
-        svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+        svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
+                ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
+        svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
         svc.setLastDeploymentAt(svc.getCreatedAt());
         svc.setDeploymentId(newDeploymentId());
-        if (tags != null && !tags.isEmpty()) {
-            svc.setTags(new LinkedHashMap<>(tags));
+        if (request.getTags() != null && !request.getTags().isEmpty()) {
+            svc.setTags(new LinkedHashMap<>(request.getTags()));
         }
 
         services.put(key, svc);
@@ -984,9 +1089,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                           String availabilityZoneRebalancing, boolean forceNewDeployment,
                                           Map<String, Object> serviceConnectConfiguration,
                                           String region) {
-        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+        UpdateServiceRequest request = new UpdateServiceRequest();
+        request.setCluster(clusterRef);
+        request.setService(serviceName);
+        request.setTaskDefinition(taskDefinition);
+        request.setDesiredCount(desiredCount);
+        request.setNetworkConfiguration(networkConfiguration);
+        request.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
+        request.setForceNewDeployment(forceNewDeployment);
+        request.setServiceConnectConfiguration(serviceConnectConfiguration);
+        return updateService(request, region);
+    }
 
-        serviceName = extractServiceName(serviceName);
+    public EcsServiceModel updateService(UpdateServiceRequest request, String region) {
+        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
+
+        String serviceName = extractServiceName(request.getService());
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
@@ -997,33 +1115,36 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("ServiceNotActiveException",
                     "Service " + serviceName + " is not active.", 400);
         }
+        Integer desiredCount = request.getDesiredCount();
         if (desiredCount != null) {
             if (desiredCount < 0) {
                 throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
             }
             svc.setDesiredCount(desiredCount);
         }
-        if (networkConfiguration != null) {
-            svc.setNetworkConfiguration(networkConfiguration);
+        if (request.getNetworkConfiguration() != null) {
+            svc.setNetworkConfiguration(request.getNetworkConfiguration());
         }
-        if (availabilityZoneRebalancing != null) {
-            svc.setAvailabilityZoneRebalancing(availabilityZoneRebalancing);
+        if (request.getAvailabilityZoneRebalancing() != null) {
+            svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing());
         }
         // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
         // triggers a new service deployment", so a real change rolls the deployment the way a
         // task-definition change does. An omitted parameter is not a change and rolls nothing.
+        Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
         boolean serviceConnectChanged = serviceConnectConfiguration != null
                 && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
         if (serviceConnectConfiguration != null) {
             svc.setServiceConnectConfiguration(serviceConnectConfiguration);
         }
         boolean taskDefChanged = false;
-        if (taskDefinition != null) {
-            String resolvedArn = resolveTaskDefinitionOrThrow(taskDefinition, region).getTaskDefinitionArn();
+        if (request.getTaskDefinition() != null) {
+            String resolvedArn =
+                    resolveTaskDefinitionOrThrow(request.getTaskDefinition(), region).getTaskDefinitionArn();
             taskDefChanged = !resolvedArn.equals(svc.getTaskDefinition());
             svc.setTaskDefinition(resolvedArn);
         }
-        if (taskDefChanged || forceNewDeployment || serviceConnectChanged) {
+        if (taskDefChanged || request.isForceNewDeployment() || serviceConnectChanged) {
             svc.setDeploymentId(newDeploymentId());
             svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, svc.getTaskDefinition(), region);
@@ -1460,9 +1581,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public TaskSet createTaskSet(String clusterRef, String serviceRef, String taskDefinitionRef,
                                   LaunchType launchType, double scaleValue, String scaleUnit,
                                   String externalId, String region) {
-        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
-        EcsServiceModel svc = resolveServiceOrThrow(cluster.getClusterName(), serviceRef, region);
-        TaskDefinition taskDef = resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
+        CreateTaskSetRequest request = new CreateTaskSetRequest();
+        request.setCluster(clusterRef);
+        request.setService(serviceRef);
+        request.setTaskDefinition(taskDefinitionRef);
+        request.setLaunchType(launchType);
+        request.setScaleValue(scaleValue);
+        request.setScaleUnit(scaleUnit);
+        request.setExternalId(externalId);
+        return createTaskSet(request, region);
+    }
+
+    public TaskSet createTaskSet(CreateTaskSetRequest request, String region) {
+        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
+        EcsServiceModel svc = resolveServiceOrThrow(cluster.getClusterName(), request.getService(), region);
+        TaskDefinition taskDef = resolveTaskDefinitionOrThrow(request.getTaskDefinition(), region);
 
         String setId = "ecs-svc/" + UUID.randomUUID().toString().replace("-", "");
         String taskSetArn = regionResolver.buildArn("ecs", region, "task-set/"
@@ -1475,10 +1608,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         ts.setClusterArn(cluster.getClusterArn());
         ts.setTaskDefinition(taskDef.getTaskDefinitionArn());
         ts.setStatus("ACTIVE");
-        ts.setScaleValue(scaleValue);
-        ts.setScaleUnit(scaleUnit != null ? scaleUnit : "PERCENT");
-        ts.setLaunchType(launchType != null ? launchType : LaunchType.FARGATE);
-        ts.setExternalId(externalId);
+        ts.setScaleValue(request.getScaleValue() != null ? request.getScaleValue() : 100.0);
+        ts.setScaleUnit(request.getScaleUnit() != null ? request.getScaleUnit() : "PERCENT");
+        ts.setLaunchType(request.getLaunchType() != null ? request.getLaunchType() : LaunchType.FARGATE);
+        ts.setExternalId(request.getExternalId());
         ts.setStabilityStatus("STEADY_STATE");
         ts.setCreatedAt(Instant.now());
         ts.setUpdatedAt(Instant.now());
