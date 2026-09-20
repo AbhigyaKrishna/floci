@@ -10,30 +10,33 @@ import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
-import io.github.hectorvent.floci.services.ecs.model.Deployment;
-import io.github.hectorvent.floci.services.ecs.model.Failure;
+import io.github.hectorvent.floci.services.ecs.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.ecs.model.CreateServiceRequest;
+import io.github.hectorvent.floci.services.ecs.model.CreateTaskSetRequest;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
-import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.ListTasksRequest;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
-import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
+import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
+import io.github.hectorvent.floci.services.ecs.model.RunTaskRequest;
 import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
+import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
@@ -56,14 +59,22 @@ import java.util.Set;
 public class EcsJsonHandler {
 
     private final EcsService service;
+    private final EcsResponseWriter writer;
     private final ObjectMapper objectMapper;
     private final HostVolumePolicy hostVolumePolicy;
 
     @Inject
-    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper, HostVolumePolicy hostVolumePolicy) {
+    public EcsJsonHandler(EcsService service, EcsResponseWriter writer, ObjectMapper objectMapper,
+                          HostVolumePolicy hostVolumePolicy) {
         this.service = service;
+        this.writer = writer;
         this.objectMapper = objectMapper;
         this.hostVolumePolicy = hostVolumePolicy;
+    }
+
+    /** Builds its own response writer, for callers that assemble the handler without CDI. */
+    public EcsJsonHandler(EcsService service, ObjectMapper objectMapper, HostVolumePolicy hostVolumePolicy) {
+        this(service, new EcsResponseWriter(service, objectMapper), objectMapper, hostVolumePolicy);
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -148,12 +159,13 @@ public class EcsJsonHandler {
     // ── Clusters ──────────────────────────────────────────────────────────────
 
     private Response handleCreateCluster(JsonNode req, String region) {
-        String name = req.path("clusterName").asText(null);
-        Map<String, String> tags = parseTagMap(req.path("tags"));
-        List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
-        EcsCluster cluster = service.createCluster(name, tags, settings, region);
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName(req.path("clusterName").asText(null));
+        request.setTags(parseTagMap(req.path("tags")));
+        request.setSettings(parseClusterSettings(req.path("settings")));
+        EcsCluster cluster = service.createCluster(request, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("cluster", clusterNode(cluster));
+        resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
@@ -162,7 +174,7 @@ public class EcsJsonHandler {
         List<EcsCluster> found = service.describeClusters(ids, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(c -> arr.add(clusterNode(c)));
+        found.forEach(c -> arr.add(writer.clusterNode(c)));
         resp.set("clusters", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -181,7 +193,7 @@ public class EcsJsonHandler {
         String clusterId = req.path("cluster").asText();
         EcsCluster cluster = service.deleteCluster(clusterId, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("cluster", clusterNode(cluster));
+        resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
@@ -190,7 +202,7 @@ public class EcsJsonHandler {
         List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
         EcsCluster cluster = service.updateCluster(clusterRef, settings, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("cluster", clusterNode(cluster));
+        resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
@@ -199,7 +211,7 @@ public class EcsJsonHandler {
         List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
         EcsCluster cluster = service.updateClusterSettings(clusterRef, settings, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("cluster", clusterNode(cluster));
+        resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
@@ -209,34 +221,31 @@ public class EcsJsonHandler {
         List<Map<String, Object>> defaultStrategy = parseRawObjectList(req.path("defaultCapacityProviderStrategy"));
         EcsCluster cluster = service.putClusterCapacityProviders(clusterRef, providers, defaultStrategy, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("cluster", clusterNode(cluster));
+        resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
     // ── Task Definitions ──────────────────────────────────────────────────────
 
     private Response handleRegisterTaskDefinition(JsonNode req, String region) {
-        String family = req.path("family").asText();
-        List<ContainerDefinition> containerDefs = parseContainerDefinitions(req.path("containerDefinitions"));
-        NetworkMode networkMode = parseEnum(req, "networkMode", NetworkMode.class);
-        String cpu = req.has("cpu") ? req.path("cpu").asText() : null;
-        String memory = req.has("memory") ? req.path("memory").asText() : null;
-        String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
-        String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
-        List<String> requiresCompatibilities = jsonArrayToList(req.path("requiresCompatibilities"));
-        Map<String, String> tags = parseTagMap(req.path("tags"));
+        RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
+        request.setFamily(req.path("family").asText());
+        request.setContainerDefinitions(parseContainerDefinitions(req.path("containerDefinitions")));
+        request.setNetworkMode(parseEnum(req, "networkMode", NetworkMode.class));
+        request.setCpu(req.has("cpu") ? req.path("cpu").asText() : null);
+        request.setMemory(req.has("memory") ? req.path("memory").asText() : null);
+        request.setTaskRoleArn(req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null);
+        request.setExecutionRoleArn(
+                req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null);
+        request.setRequiresCompatibilities(jsonArrayToList(req.path("requiresCompatibilities")));
+        request.setVolumes(parseVolumes(req.path("volumes")));
+        request.setRuntimePlatform(parseRuntimePlatform(req.path("runtimePlatform")));
+        request.setTags(parseTagMap(req.path("tags")));
 
-        TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, requiresCompatibilities, tags, region);
-        // Task-level volumes and runtimePlatform are not part of registerTaskDefinition's signature;
-        // set them on the returned (and stored) task definition so they round-trip and reach RunTask
-        // launches, then write the mutated definition back so it also survives a restart.
-        td.setVolumes(parseVolumes(req.path("volumes")));
-        td.setRuntimePlatform(parseRuntimePlatform(req.path("runtimePlatform")));
-        service.persistTaskDefinition(td);
+        TaskDefinition td = service.registerTaskDefinition(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskDefinition", taskDefinitionNode(td));
+        resp.set("taskDefinition", writer.taskDefinitionNode(td));
         return Response.ok(resp).build();
     }
 
@@ -244,7 +253,7 @@ public class EcsJsonHandler {
         String tdRef = req.path("taskDefinition").asText();
         TaskDefinition td = service.describeTaskDefinition(tdRef, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskDefinition", taskDefinitionNode(td));
+        resp.set("taskDefinition", writer.taskDefinitionNode(td));
         return Response.ok(resp).build();
     }
 
@@ -273,7 +282,7 @@ public class EcsJsonHandler {
         String tdRef = req.path("taskDefinition").asText();
         TaskDefinition td = service.deregisterTaskDefinition(tdRef, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskDefinition", taskDefinitionNode(td));
+        resp.set("taskDefinition", writer.taskDefinitionNode(td));
         return Response.ok(resp).build();
     }
 
@@ -282,7 +291,7 @@ public class EcsJsonHandler {
         List<TaskDefinition> deleted = service.deleteTaskDefinitions(refs, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        deleted.forEach(td -> arr.add(taskDefinitionNode(td)));
+        deleted.forEach(td -> arr.add(writer.taskDefinitionNode(td)));
         resp.set("taskDefinitions", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -291,40 +300,40 @@ public class EcsJsonHandler {
     // ── Tasks ─────────────────────────────────────────────────────────────────
 
     private Response handleRunTask(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String taskDefinition = req.path("taskDefinition").asText();
-        int count = req.path("count").asInt(1);
-        LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
-        String group = req.has("group") ? req.path("group").asText() : null;
-        String startedBy = req.has("startedBy") ? req.path("startedBy").asText() : null;
-        List<ContainerOverride> containerOverrides =
-                parseContainerOverrides(req.path("overrides").path("containerOverrides"));
-        NetworkConfiguration networkConfiguration =
-                parseNetworkConfiguration(req.path("networkConfiguration"));
+        RunTaskRequest request = new RunTaskRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setTaskDefinition(req.path("taskDefinition").asText());
+        request.setCount(req.path("count").asInt(1));
+        request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
+        request.setGroup(req.has("group") ? req.path("group").asText() : null);
+        request.setStartedBy(req.has("startedBy") ? req.path("startedBy").asText() : null);
+        request.setContainerOverrides(
+                parseContainerOverrides(req.path("overrides").path("containerOverrides")));
+        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
 
-        List<EcsTask> launched = service.runTask(cluster, taskDefinition, count,
-                launchType, group, startedBy, containerOverrides, networkConfiguration, region);
+        List<EcsTask> launched = service.runTask(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        launched.forEach(t -> arr.add(taskNode(t)));
+        launched.forEach(t -> arr.add(writer.taskNode(t)));
         resp.set("tasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
     }
 
     private Response handleStartTask(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        List<String> instances = jsonArrayToList(req.path("containerInstances"));
-        String taskDefinition = req.path("taskDefinition").asText();
-        String group = req.has("group") ? req.path("group").asText() : null;
-        String startedBy = req.has("startedBy") ? req.path("startedBy").asText() : null;
+        RunTaskRequest request = new RunTaskRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setContainerInstances(jsonArrayToList(req.path("containerInstances")));
+        request.setTaskDefinition(req.path("taskDefinition").asText());
+        request.setGroup(req.has("group") ? req.path("group").asText() : null);
+        request.setStartedBy(req.has("startedBy") ? req.path("startedBy").asText() : null);
 
-        List<EcsTask> launched = service.startTask(cluster, instances, taskDefinition, group, startedBy, region);
+        List<EcsTask> launched = service.startTask(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        launched.forEach(t -> arr.add(taskNode(t)));
+        launched.forEach(t -> arr.add(writer.taskNode(t)));
         resp.set("tasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -338,7 +347,7 @@ public class EcsJsonHandler {
         EcsTask stopped = service.stopTask(cluster, task, reason, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("task", taskNode(stopped));
+        resp.set("task", writer.taskNode(stopped));
         return Response.ok(resp).build();
     }
 
@@ -349,19 +358,20 @@ public class EcsJsonHandler {
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(t -> arr.add(taskNode(t)));
+        found.forEach(t -> arr.add(writer.taskNode(t)));
         resp.set("tasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
     }
 
     private Response handleListTasks(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String family = req.has("family") ? req.path("family").asText() : null;
-        String desiredStatus = req.has("desiredStatus") ? req.path("desiredStatus").asText() : null;
-        String serviceName = req.has("serviceName") ? req.path("serviceName").asText() : null;
+        ListTasksRequest request = new ListTasksRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setFamily(req.has("family") ? req.path("family").asText() : null);
+        request.setDesiredStatus(req.has("desiredStatus") ? req.path("desiredStatus").asText() : null);
+        request.setServiceName(req.has("serviceName") ? req.path("serviceName").asText() : null);
 
-        List<String> arns = service.listTasks(cluster, family, desiredStatus, serviceName, region);
+        List<String> arns = service.listTasks(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
@@ -381,7 +391,7 @@ public class EcsJsonHandler {
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        result.forEach(pt -> arr.add(protectedTaskNode(pt)));
+        result.forEach(pt -> arr.add(writer.protectedTaskNode(pt)));
         resp.set("protectedTasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -395,7 +405,7 @@ public class EcsJsonHandler {
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        result.forEach(pt -> arr.add(protectedTaskNode(pt)));
+        result.forEach(pt -> arr.add(writer.protectedTaskNode(pt)));
         resp.set("protectedTasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -404,28 +414,27 @@ public class EcsJsonHandler {
     // ── Services ──────────────────────────────────────────────────────────────
 
     private Response handleCreateService(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String serviceName = req.path("serviceName").asText();
-        String taskDefinition = req.path("taskDefinition").asText();
-        int desiredCount = req.path("desiredCount").asInt(1);
-        LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
-        List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
-        NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
-        Map<String, String> tags = parseTagMap(req.path("tags"));
-        String schedulingStrategy = parseChoice(req, "schedulingStrategy", SCHEDULING_STRATEGIES);
-        String deploymentControllerType = parseChoice(req.path("deploymentController"), "type",
-                "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES);
-        String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
-        Map<String, Object> serviceConnectConfiguration =
-                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration"));
+        CreateServiceRequest request = new CreateServiceRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setServiceName(req.path("serviceName").asText());
+        request.setTaskDefinition(req.path("taskDefinition").asText());
+        request.setDesiredCount(req.path("desiredCount").asInt(1));
+        request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
+        request.setLoadBalancers(parseLoadBalancers(req.path("loadBalancers")));
+        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
+        request.setTags(parseTagMap(req.path("tags")));
+        request.setSchedulingStrategy(parseChoice(req, "schedulingStrategy", SCHEDULING_STRATEGIES));
+        request.setDeploymentControllerType(parseChoice(req.path("deploymentController"), "type",
+                "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES));
+        request.setAvailabilityZoneRebalancing(
+                parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
+        request.setServiceConnectConfiguration(
+                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration")));
 
-        EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, networkConfiguration, tags,
-                schedulingStrategy, deploymentControllerType, availabilityZoneRebalancing,
-                serviceConnectConfiguration, region);
+        EcsServiceModel svc = service.createService(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("service", serviceNode(svc));
+        resp.set("service", writer.serviceNode(svc));
         return Response.ok(resp).build();
     }
 
@@ -492,22 +501,22 @@ public class EcsJsonHandler {
     }
 
     private Response handleUpdateService(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String serviceName = req.path("service").asText();
-        String taskDefinition = req.has("taskDefinition") ? req.path("taskDefinition").asText() : null;
-        Integer desiredCount = req.has("desiredCount") ? req.path("desiredCount").asInt() : null;
-        NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
-        String availabilityZoneRebalancing = parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING);
-        boolean forceNewDeployment = req.path("forceNewDeployment").asBoolean(false);
-        Map<String, Object> serviceConnectConfiguration =
-                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration"));
+        UpdateServiceRequest request = new UpdateServiceRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setService(req.path("service").asText());
+        request.setTaskDefinition(req.has("taskDefinition") ? req.path("taskDefinition").asText() : null);
+        request.setDesiredCount(req.has("desiredCount") ? req.path("desiredCount").asInt() : null);
+        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
+        request.setAvailabilityZoneRebalancing(
+                parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
+        request.setForceNewDeployment(req.path("forceNewDeployment").asBoolean(false));
+        request.setServiceConnectConfiguration(
+                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration")));
 
-        EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
-                networkConfiguration, availabilityZoneRebalancing, forceNewDeployment,
-                serviceConnectConfiguration, region);
+        EcsServiceModel svc = service.updateService(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("service", serviceNode(svc));
+        resp.set("service", writer.serviceNode(svc));
         return Response.ok(resp).build();
     }
 
@@ -519,7 +528,7 @@ public class EcsJsonHandler {
         EcsServiceModel svc = service.deleteService(cluster, serviceName, force, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("service", serviceNode(svc));
+        resp.set("service", writer.serviceNode(svc));
         return Response.ok(resp).build();
     }
 
@@ -532,10 +541,10 @@ public class EcsJsonHandler {
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.services().forEach(s -> arr.add(serviceNode(s)));
+        found.services().forEach(s -> arr.add(writer.serviceNode(s)));
         resp.set("services", arr);
         ArrayNode failures = objectMapper.createArrayNode();
-        found.failures().forEach(f -> failures.add(failureNode(f)));
+        found.failures().forEach(f -> failures.add(writer.failureNode(f)));
         resp.set("failures", failures);
         return Response.ok(resp).build();
     }
@@ -582,7 +591,7 @@ public class EcsJsonHandler {
         String resourceArn = req.path("resourceArn").asText();
         Map<String, String> tags = service.listTagsForResource(resourceArn);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("tags", tagsNode(tags));
+        resp.set("tags", writer.tagsNode(tags));
         return Response.ok(resp).build();
     }
 
@@ -593,7 +602,7 @@ public class EcsJsonHandler {
         String value = req.path("value").asText();
         var entry = service.putAccountSetting(name, value);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("setting", settingNode(entry.getKey(), entry.getValue()));
+        resp.set("setting", writer.settingNode(entry.getKey(), entry.getValue()));
         return Response.ok(resp).build();
     }
 
@@ -602,7 +611,7 @@ public class EcsJsonHandler {
         String value = req.path("value").asText();
         var entry = service.putAccountSettingDefault(name, value);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("setting", settingNode(entry.getKey(), entry.getValue()));
+        resp.set("setting", writer.settingNode(entry.getKey(), entry.getValue()));
         return Response.ok(resp).build();
     }
 
@@ -610,7 +619,7 @@ public class EcsJsonHandler {
         String name = req.path("name").asText();
         var entry = service.deleteAccountSetting(name);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("setting", settingNode(entry.getKey(), entry.getValue()));
+        resp.set("setting", writer.settingNode(entry.getKey(), entry.getValue()));
         return Response.ok(resp).build();
     }
 
@@ -620,7 +629,7 @@ public class EcsJsonHandler {
         var settings = service.listAccountSettings(filterName, filterValue);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        settings.forEach(e -> arr.add(settingNode(e.getKey(), e.getValue())));
+        settings.forEach(e -> arr.add(writer.settingNode(e.getKey(), e.getValue())));
         resp.set("settings", arr);
         return Response.ok(resp).build();
     }
@@ -633,7 +642,7 @@ public class EcsJsonHandler {
         List<Attribute> stored = service.putAttributes(cluster, attrs, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        stored.forEach(a -> arr.add(attributeNode(a)));
+        stored.forEach(a -> arr.add(writer.attributeNode(a)));
         resp.set("attributes", arr);
         return Response.ok(resp).build();
     }
@@ -644,7 +653,7 @@ public class EcsJsonHandler {
         List<Attribute> deleted = service.deleteAttributes(cluster, attrs, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        deleted.forEach(a -> arr.add(attributeNode(a)));
+        deleted.forEach(a -> arr.add(writer.attributeNode(a)));
         resp.set("attributes", arr);
         return Response.ok(resp).build();
     }
@@ -657,7 +666,7 @@ public class EcsJsonHandler {
         List<Attribute> result = service.listAttributes(cluster, targetType, attributeName, attributeValue, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        result.forEach(a -> arr.add(attributeNode(a)));
+        result.forEach(a -> arr.add(writer.attributeNode(a)));
         resp.set("attributes", arr);
         return Response.ok(resp).build();
     }
@@ -671,7 +680,7 @@ public class EcsJsonHandler {
         List<Attribute> attrs = parseAttributes(req.path("attributes"));
         ContainerInstance instance = service.registerContainerInstance(cluster, instanceIdentityDocument, attrs, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("containerInstance", containerInstanceNode(instance));
+        resp.set("containerInstance", writer.containerInstanceNode(instance));
         return Response.ok(resp).build();
     }
 
@@ -681,7 +690,7 @@ public class EcsJsonHandler {
         boolean force = req.path("force").asBoolean(false);
         ContainerInstance instance = service.deregisterContainerInstance(cluster, containerInstance, force, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("containerInstance", containerInstanceNode(instance));
+        resp.set("containerInstance", writer.containerInstanceNode(instance));
         return Response.ok(resp).build();
     }
 
@@ -691,7 +700,7 @@ public class EcsJsonHandler {
         List<ContainerInstance> found = service.describeContainerInstances(cluster, instanceRefs, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(ci -> arr.add(containerInstanceNode(ci)));
+        found.forEach(ci -> arr.add(writer.containerInstanceNode(ci)));
         resp.set("containerInstances", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -713,7 +722,7 @@ public class EcsJsonHandler {
         String containerInstance = req.path("containerInstance").asText();
         ContainerInstance instance = service.updateContainerAgent(cluster, containerInstance, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("containerInstance", containerInstanceNode(instance));
+        resp.set("containerInstance", writer.containerInstanceNode(instance));
         return Response.ok(resp).build();
     }
 
@@ -724,7 +733,7 @@ public class EcsJsonHandler {
         List<ContainerInstance> updated = service.updateContainerInstancesState(cluster, instanceRefs, status, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        updated.forEach(ci -> arr.add(containerInstanceNode(ci)));
+        updated.forEach(ci -> arr.add(writer.containerInstanceNode(ci)));
         resp.set("containerInstances", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
@@ -738,7 +747,7 @@ public class EcsJsonHandler {
         Map<String, String> tags = parseTagMap(req.path("tags"));
         CapacityProvider cp = service.createCapacityProvider(name, asgProvider, tags, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("capacityProvider", capacityProviderNode(cp));
+        resp.set("capacityProvider", writer.capacityProviderNode(cp));
         return Response.ok(resp).build();
     }
 
@@ -747,7 +756,7 @@ public class EcsJsonHandler {
         Map<String, Object> asgProvider = parseRawObject(req.path("autoScalingGroupProvider"));
         CapacityProvider cp = service.updateCapacityProvider(name, asgProvider);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("capacityProvider", capacityProviderNode(cp));
+        resp.set("capacityProvider", writer.capacityProviderNode(cp));
         return Response.ok(resp).build();
     }
 
@@ -755,7 +764,7 @@ public class EcsJsonHandler {
         String nameOrArn = req.path("capacityProvider").asText();
         CapacityProvider cp = service.deleteCapacityProvider(nameOrArn);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("capacityProvider", capacityProviderNode(cp));
+        resp.set("capacityProvider", writer.capacityProviderNode(cp));
         return Response.ok(resp).build();
     }
 
@@ -764,7 +773,7 @@ public class EcsJsonHandler {
         List<CapacityProvider> found = service.describeCapacityProviders(providers);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(cp -> arr.add(capacityProviderNode(cp)));
+        found.forEach(cp -> arr.add(writer.capacityProviderNode(cp)));
         resp.set("capacityProviders", arr);
         return Response.ok(resp).build();
     }
@@ -772,19 +781,19 @@ public class EcsJsonHandler {
     // ── Task Sets ─────────────────────────────────────────────────────────────
 
     private Response handleCreateTaskSet(JsonNode req, String region) {
-        String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
-        String service = req.path("service").asText();
-        String taskDefinition = req.path("taskDefinition").asText();
-        LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
-        double scaleValue = req.path("scale").path("value").asDouble(100.0);
-        String scaleUnit = req.path("scale").path("unit").asText("PERCENT");
-        String externalId = req.has("externalId") ? req.path("externalId").asText() : null;
+        CreateTaskSetRequest request = new CreateTaskSetRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setService(req.path("service").asText());
+        request.setTaskDefinition(req.path("taskDefinition").asText());
+        request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
+        request.setScaleValue(req.path("scale").path("value").asDouble(100.0));
+        request.setScaleUnit(req.path("scale").path("unit").asText("PERCENT"));
+        request.setExternalId(req.has("externalId") ? req.path("externalId").asText() : null);
 
-        TaskSet ts = this.service.createTaskSet(cluster, service, taskDefinition, launchType,
-                scaleValue, scaleUnit, externalId, region);
+        TaskSet ts = service.createTaskSet(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskSet", taskSetNode(ts));
+        resp.set("taskSet", writer.taskSetNode(ts));
         return Response.ok(resp).build();
     }
 
@@ -798,7 +807,7 @@ public class EcsJsonHandler {
         TaskSet ts = service.updateTaskSet(cluster, svc, taskSet, scaleValue, scaleUnit, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskSet", taskSetNode(ts));
+        resp.set("taskSet", writer.taskSetNode(ts));
         return Response.ok(resp).build();
     }
 
@@ -811,7 +820,7 @@ public class EcsJsonHandler {
         TaskSet ts = service.deleteTaskSet(cluster, svc, taskSet, force, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskSet", taskSetNode(ts));
+        resp.set("taskSet", writer.taskSetNode(ts));
         return Response.ok(resp).build();
     }
 
@@ -824,7 +833,7 @@ public class EcsJsonHandler {
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(ts -> arr.add(taskSetNode(ts)));
+        found.forEach(ts -> arr.add(writer.taskSetNode(ts)));
         resp.set("taskSets", arr);
         return Response.ok(resp).build();
     }
@@ -837,7 +846,7 @@ public class EcsJsonHandler {
         TaskSet ts = service.updateServicePrimaryTaskSet(cluster, svc, primaryTaskSet, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("taskSet", taskSetNode(ts));
+        resp.set("taskSet", writer.taskSetNode(ts));
         return Response.ok(resp).build();
     }
 
@@ -848,7 +857,7 @@ public class EcsJsonHandler {
         List<ServiceDeployment> found = service.describeServiceDeployments(arns);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(d -> arr.add(serviceDeploymentNode(d)));
+        found.forEach(d -> arr.add(writer.serviceDeploymentNode(d)));
         resp.set("serviceDeployments", arr);
         return Response.ok(resp).build();
     }
@@ -881,7 +890,7 @@ public class EcsJsonHandler {
         List<ServiceRevision> found = service.describeServiceRevisions(arns);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(r -> arr.add(serviceRevisionNode(r)));
+        found.forEach(r -> arr.add(writer.serviceRevisionNode(r)));
         resp.set("serviceRevisions", arr);
         return Response.ok(resp).build();
     }
@@ -918,334 +927,10 @@ public class EcsJsonHandler {
         return Response.ok(resp).build();
     }
 
-    // ── JSON serialization ────────────────────────────────────────────────────
-
-    private ObjectNode clusterNode(EcsCluster c) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("clusterArn", c.getClusterArn());
-        n.put("clusterName", c.getClusterName());
-        n.put("status", c.getStatus());
-        n.put("registeredContainerInstancesCount", c.getRegisteredContainerInstancesCount());
-        n.put("runningTasksCount", c.getRunningTasksCount());
-        n.put("pendingTasksCount", c.getPendingTasksCount());
-        n.put("activeServicesCount", c.getActiveServicesCount());
-        if (c.getSettings() != null && !c.getSettings().isEmpty()) {
-            ArrayNode settings = objectMapper.createArrayNode();
-            c.getSettings().forEach(s -> {
-                ObjectNode sn = objectMapper.createObjectNode();
-                sn.put("name", s.name());
-                sn.put("value", s.value());
-                settings.add(sn);
-            });
-            n.set("settings", settings);
-        }
-        if (c.getCapacityProviders() != null) {
-            ArrayNode cp = objectMapper.createArrayNode();
-            c.getCapacityProviders().forEach(cp::add);
-            n.set("capacityProviders", cp);
-        }
-        if (c.getTags() != null && !c.getTags().isEmpty()) {
-            n.set("tags", tagsNode(c.getTags()));
-        }
-        return n;
-    }
-
-    private ObjectNode taskDefinitionNode(TaskDefinition td) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("taskDefinitionArn", td.getTaskDefinitionArn());
-        n.put("family", td.getFamily());
-        n.put("revision", td.getRevision());
-        n.put("status", td.getStatus());
-        if (td.getNetworkMode() != null) {
-            n.put("networkMode", td.getNetworkMode().name());
-        }
-        if (td.getCpu() != null) { n.put("cpu", td.getCpu()); }
-        if (td.getMemory() != null) { n.put("memory", td.getMemory()); }
-        if (td.getTaskRoleArn() != null) { n.put("taskRoleArn", td.getTaskRoleArn()); }
-        if (td.getExecutionRoleArn() != null) { n.put("executionRoleArn", td.getExecutionRoleArn()); }
-        if (td.getRuntimePlatform() != null) {
-            RuntimePlatform platform = td.getRuntimePlatform();
-            ObjectNode platformNode = objectMapper.createObjectNode();
-            if (platform.cpuArchitecture() != null) {
-                platformNode.put("cpuArchitecture", platform.cpuArchitecture());
-            }
-            if (platform.operatingSystemFamily() != null) {
-                platformNode.put("operatingSystemFamily", platform.operatingSystemFamily());
-            }
-            n.set("runtimePlatform", platformNode);
-        }
-        if (td.getRequiresCompatibilities() != null && !td.getRequiresCompatibilities().isEmpty()) {
-            ArrayNode arr = objectMapper.createArrayNode();
-            td.getRequiresCompatibilities().forEach(arr::add);
-            n.set("requiresCompatibilities", arr);
-        }
-        if (td.getCompatibilities() != null && !td.getCompatibilities().isEmpty()) {
-            ArrayNode arr = objectMapper.createArrayNode();
-            td.getCompatibilities().forEach(arr::add);
-            n.set("compatibilities", arr);
-        }
-
-        ArrayNode containers = objectMapper.createArrayNode();
-        if (td.getContainerDefinitions() != null) {
-            for (var def : td.getContainerDefinitions()) {
-                containers.add(containerDefinitionNode(def));
-            }
-        }
-        n.set("containerDefinitions", containers);
-        if (td.getVolumes() != null && !td.getVolumes().isEmpty()) {
-            ArrayNode vols = objectMapper.createArrayNode();
-            for (Volume v : td.getVolumes()) {
-                ObjectNode vNode = objectMapper.createObjectNode();
-                vNode.put("name", v.name());
-                if (v.hostSourcePath() != null) {
-                    ObjectNode host = objectMapper.createObjectNode();
-                    host.put("sourcePath", v.hostSourcePath());
-                    vNode.set("host", host);
-                }
-                if (v.efs() != null) {
-                    EfsVolumeConfiguration e = v.efs();
-                    ObjectNode efs = objectMapper.createObjectNode();
-                    efs.put("fileSystemId", e.fileSystemId());
-                    if (e.rootDirectory() != null) {
-                        efs.put("rootDirectory", e.rootDirectory());
-                    }
-                    if (e.transitEncryption() != null) {
-                        efs.put("transitEncryption", e.transitEncryption());
-                    }
-                    if (e.transitEncryptionPort() != null) {
-                        efs.put("transitEncryptionPort", e.transitEncryptionPort());
-                    }
-                    if (e.accessPointId() != null || e.iam() != null) {
-                        ObjectNode auth = objectMapper.createObjectNode();
-                        if (e.accessPointId() != null) {
-                            auth.put("accessPointId", e.accessPointId());
-                        }
-                        if (e.iam() != null) {
-                            auth.put("iam", e.iam());
-                        }
-                        efs.set("authorizationConfig", auth);
-                    }
-                    vNode.set("efsVolumeConfiguration", efs);
-                }
-                vols.add(vNode);
-            }
-            n.set("volumes", vols);
-        }
-        if (td.getTags() != null && !td.getTags().isEmpty()) {
-            n.set("tags", tagsNode(td.getTags()));
-        }
-        return n;
-    }
-
-    private ObjectNode containerDefinitionNode(ContainerDefinition def) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("name", def.getName());
-        n.put("image", def.getImage());
-        n.put("essential", def.isEssential());
-        if (def.getCpu() != null) { n.put("cpu", def.getCpu()); }
-        if (def.getMemory() != null) { n.put("memory", def.getMemory()); }
-
-        if (def.getPortMappings() != null && !def.getPortMappings().isEmpty()) {
-            ArrayNode pms = objectMapper.createArrayNode();
-            for (PortMapping pm : def.getPortMappings()) {
-                ObjectNode pmNode = objectMapper.createObjectNode();
-                pmNode.put("containerPort", pm.containerPort());
-                pmNode.put("hostPort", pm.hostPort());
-                pmNode.put("protocol", pm.protocol());
-                pms.add(pmNode);
-            }
-            n.set("portMappings", pms);
-        }
-
-        if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
-            ArrayNode entryPoint = objectMapper.createArrayNode();
-            def.getEntryPoint().forEach(entryPoint::add);
-            n.set("entryPoint", entryPoint);
-        }
-
-        if (def.getCommand() != null && !def.getCommand().isEmpty()) {
-            ArrayNode command = objectMapper.createArrayNode();
-            def.getCommand().forEach(command::add);
-            n.set("command", command);
-        }
-
-        if (def.getEnvironment() != null && !def.getEnvironment().isEmpty()) {
-            ArrayNode envArr = objectMapper.createArrayNode();
-            for (KeyValuePair kv : def.getEnvironment()) {
-                ObjectNode kvNode = objectMapper.createObjectNode();
-                kvNode.put("name", kv.name());
-                kvNode.put("value", kv.value());
-                envArr.add(kvNode);
-            }
-            n.set("environment", envArr);
-        }
-
-        if (def.getSecrets() != null && !def.getSecrets().isEmpty()) {
-            ArrayNode secretsArr = objectMapper.createArrayNode();
-            for (Secret secret : def.getSecrets()) {
-                ObjectNode secretNode = objectMapper.createObjectNode();
-                secretNode.put("name", secret.name());
-                secretNode.put("valueFrom", secret.valueFrom());
-                secretsArr.add(secretNode);
-            }
-            n.set("secrets", secretsArr);
-        }
-
-        if (def.getMountPoints() != null && !def.getMountPoints().isEmpty()) {
-            ArrayNode mps = objectMapper.createArrayNode();
-            for (MountPoint mp : def.getMountPoints()) {
-                ObjectNode mpNode = objectMapper.createObjectNode();
-                mpNode.put("sourceVolume", mp.sourceVolume());
-                mpNode.put("containerPath", mp.containerPath());
-                mpNode.put("readOnly", mp.readOnly());
-                mps.add(mpNode);
-            }
-            n.set("mountPoints", mps);
-        }
-
-        if (def.getVolumesFrom() != null && !def.getVolumesFrom().isEmpty()) {
-            ArrayNode volumesFrom = objectMapper.createArrayNode();
-            for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
-                ObjectNode volumeFromNode = objectMapper.createObjectNode();
-                volumeFromNode.put("sourceContainer", volumeFrom.sourceContainer());
-                volumeFromNode.put("readOnly", volumeFrom.readOnly());
-                volumesFrom.add(volumeFromNode);
-            }
-            n.set("volumesFrom", volumesFrom);
-        }
-
-        if (def.getLogConfiguration() != null) {
-            LogConfiguration logConfig = def.getLogConfiguration();
-            ObjectNode logNode = objectMapper.createObjectNode();
-            if (logConfig.logDriver() != null) {
-                logNode.put("logDriver", logConfig.logDriver());
-            }
-            if (logConfig.options() != null) {
-                ObjectNode options = objectMapper.createObjectNode();
-                logConfig.options().forEach(options::put);
-                logNode.set("options", options);
-            }
-            if (logConfig.secretOptions() != null) {
-                ArrayNode secretOptions = objectMapper.createArrayNode();
-                for (Secret secret : logConfig.secretOptions()) {
-                    ObjectNode secretNode = objectMapper.createObjectNode();
-                    secretNode.put("name", secret.name());
-                    secretNode.put("valueFrom", secret.valueFrom());
-                    secretOptions.add(secretNode);
-                }
-                logNode.set("secretOptions", secretOptions);
-            }
-            n.set("logConfiguration", logNode);
-        }
-
-        if (def.getFirelensConfiguration() != null) {
-            FirelensConfiguration firelens = def.getFirelensConfiguration();
-            ObjectNode firelensNode = objectMapper.createObjectNode();
-            if (firelens.type() != null) {
-                firelensNode.put("type", firelens.type());
-            }
-            if (firelens.options() != null) {
-                ObjectNode options = objectMapper.createObjectNode();
-                firelens.options().forEach(options::put);
-                firelensNode.set("options", options);
-            }
-            n.set("firelensConfiguration", firelensNode);
-        }
-        if (def.getHealthCheck() != null) {
-            HealthCheck hc = def.getHealthCheck();
-            ObjectNode hcNode = objectMapper.createObjectNode();
-            if (hc.command() != null) {
-                ArrayNode cmd = objectMapper.createArrayNode();
-                hc.command().forEach(cmd::add);
-                hcNode.set("command", cmd);
-            }
-            if (hc.interval() != null) {
-                hcNode.put("interval", hc.interval());
-            }
-            if (hc.timeout() != null) {
-                hcNode.put("timeout", hc.timeout());
-            }
-            if (hc.retries() != null) {
-                hcNode.put("retries", hc.retries());
-            }
-            if (hc.startPeriod() != null) {
-                hcNode.put("startPeriod", hc.startPeriod());
-            }
-            n.set("healthCheck", hcNode);
-        }
-
-        return n;
-    }
-
-    /** Renders an ECS task to its data-plane JSON shape. Reused by the Step Functions
-     *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
-    public ObjectNode taskNode(EcsTask t) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("taskArn", t.getTaskArn());
-        n.put("clusterArn", t.getClusterArn());
-        n.put("taskDefinitionArn", t.getTaskDefinitionArn());
-        n.put("lastStatus", t.getLastStatus());
-        n.put("desiredStatus", t.getDesiredStatus());
-        if (t.getLaunchType() != null) { n.put("launchType", t.getLaunchType().name()); }
-        if (t.getCpu() != null) { n.put("cpu", t.getCpu()); }
-        if (t.getMemory() != null) { n.put("memory", t.getMemory()); }
-        if (t.getGroup() != null) { n.put("group", t.getGroup()); }
-        if (t.getStartedBy() != null) { n.put("startedBy", t.getStartedBy()); }
-        if (t.getContainerInstanceArn() != null) { n.put("containerInstanceArn", t.getContainerInstanceArn()); }
-        if (t.getCreatedAt() != null) { n.put("createdAt", t.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (t.getStartedAt() != null) { n.put("startedAt", t.getStartedAt().toEpochMilli() / 1000.0); }
-        if (t.getStoppedAt() != null) { n.put("stoppedAt", t.getStoppedAt().toEpochMilli() / 1000.0); }
-        if (t.getStoppedReason() != null) { n.put("stoppedReason", t.getStoppedReason()); }
-        if (t.getNetworkInterfaceId() != null) {
-            ObjectNode attachment = objectMapper.createObjectNode();
-            attachment.put("id", "eni-attach-" + t.getNetworkInterfaceId());
-            attachment.put("type", "ElasticNetworkInterface");
-            attachment.put("status", "ATTACHED");
-            ArrayNode details = objectMapper.createArrayNode();
-            if (t.getNetworkConfiguration() != null
-                    && t.getNetworkConfiguration().getAwsvpcConfiguration() != null
-                    && !t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().isEmpty()) {
-                details.addObject().put("name", "subnetId").put("value",
-                        t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst());
-            }
-            details.addObject().put("name", "networkInterfaceId").put("value", t.getNetworkInterfaceId());
-            details.addObject().put("name", "privateIPv4Address").put("value", t.getPrivateIpAddress());
-            attachment.set("details", details);
-            n.putArray("attachments").add(attachment);
-        }
-
-        ArrayNode containers = objectMapper.createArrayNode();
-        if (t.getContainers() != null) {
-            for (var c : t.getContainers()) {
-                ObjectNode cn = objectMapper.createObjectNode();
-                cn.put("containerArn", c.getContainerArn());
-                cn.put("taskArn", c.getTaskArn());
-                cn.put("name", c.getName());
-                cn.put("image", c.getImage());
-                cn.put("lastStatus", c.getLastStatus());
-                if (c.getExitCode() != null) { cn.put("exitCode", c.getExitCode()); }
-                if (c.getReason() != null) { cn.put("reason", c.getReason()); }
-
-                ArrayNode bindings = objectMapper.createArrayNode();
-                if (c.getNetworkBindings() != null) {
-                    for (NetworkBinding nb : c.getNetworkBindings()) {
-                        ObjectNode bn = objectMapper.createObjectNode();
-                        bn.put("bindIP", nb.bindIP());
-                        bn.put("containerPort", nb.containerPort());
-                        bn.put("hostPort", nb.hostPort());
-                        bn.put("protocol", nb.protocol());
-                        bindings.add(bn);
-                    }
-                }
-                cn.set("networkBindings", bindings);
-                containers.add(cn);
-            }
-        }
-        n.set("containers", containers);
-        if (t.getTags() != null && !t.getTags().isEmpty()) {
-            n.set("tags", tagsNode(t.getTags()));
-        }
-        return n;
+    /** Renders an ECS task to its data-plane JSON shape, for the Step Functions ecs:runTask
+     *  integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
+    public ObjectNode taskNode(EcsTask task) {
+        return writer.taskNode(task);
     }
 
     private static final Set<String> SCHEDULING_STRATEGIES = Set.of("REPLICA", "DAEMON");
@@ -1270,92 +955,6 @@ public class EcsJsonHandler {
         return value;
     }
 
-    private ObjectNode serviceNode(EcsServiceModel s) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("serviceArn", s.getServiceArn());
-        n.put("serviceName", s.getServiceName());
-        n.put("clusterArn", s.getClusterArn());
-        n.put("taskDefinition", s.getTaskDefinition());
-        n.put("desiredCount", s.getDesiredCount());
-        n.put("runningCount", s.getRunningCount());
-        n.put("pendingCount", s.getPendingCount());
-        n.put("status", s.getStatus());
-        if (s.getLaunchType() != null) { n.put("launchType", s.getLaunchType().name()); }
-        if (s.getCreatedAt() != null) { n.put("createdAt", s.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (s.getNamespace() != null) { n.put("namespace", s.getNamespace()); }
-        // Services persisted before these fields existed read back with the AWS defaults.
-        n.put("schedulingStrategy", s.getSchedulingStrategy() != null
-                ? s.getSchedulingStrategy() : EcsService.DEFAULT_SCHEDULING_STRATEGY);
-        n.putObject("deploymentController").put("type", s.getDeploymentController() != null
-                ? s.getDeploymentController() : EcsService.DEFAULT_DEPLOYMENT_CONTROLLER);
-        n.put("availabilityZoneRebalancing", s.getAvailabilityZoneRebalancing() != null
-                ? s.getAvailabilityZoneRebalancing() : EcsService.DEFAULT_AZ_REBALANCING_UNSET);
-        if (s.getTags() != null && !s.getTags().isEmpty()) {
-            n.set("tags", tagsNode(s.getTags()));
-        }
-        if (s.getLoadBalancers() != null && !s.getLoadBalancers().isEmpty()) {
-            ArrayNode lbs = objectMapper.createArrayNode();
-            for (EcsLoadBalancer lb : s.getLoadBalancers()) {
-                ObjectNode ln = objectMapper.createObjectNode();
-                if (lb.getTargetGroupArn() != null) { ln.put("targetGroupArn", lb.getTargetGroupArn()); }
-                if (lb.getLoadBalancerName() != null) { ln.put("loadBalancerName", lb.getLoadBalancerName()); }
-                if (lb.getContainerName() != null) { ln.put("containerName", lb.getContainerName()); }
-                if (lb.getContainerPort() != null) { ln.put("containerPort", lb.getContainerPort()); }
-                lbs.add(ln);
-            }
-            n.set("loadBalancers", lbs);
-        }
-        if (s.getNetworkConfiguration() != null
-                && s.getNetworkConfiguration().getAwsvpcConfiguration() != null) {
-            AwsVpcConfiguration awsvpc = s.getNetworkConfiguration().getAwsvpcConfiguration();
-            ObjectNode awsvpcNode = objectMapper.createObjectNode();
-            ArrayNode subnets = objectMapper.createArrayNode();
-            awsvpc.getSubnets().forEach(subnets::add);
-            awsvpcNode.set("subnets", subnets);
-            ArrayNode securityGroups = objectMapper.createArrayNode();
-            awsvpc.getSecurityGroups().forEach(securityGroups::add);
-            awsvpcNode.set("securityGroups", securityGroups);
-            if (awsvpc.getAssignPublicIp() != null) {
-                awsvpcNode.put("assignPublicIp", awsvpc.getAssignPublicIp());
-            }
-            ObjectNode networkConfig = objectMapper.createObjectNode();
-            networkConfig.set("awsvpcConfiguration", awsvpcNode);
-            n.set("networkConfiguration", networkConfig);
-        }
-        ArrayNode deployments = objectMapper.createArrayNode();
-        service.deploymentsFor(s).forEach(d -> deployments.add(deploymentNode(d)));
-        n.set("deployments", deployments);
-        return n;
-    }
-
-    private ObjectNode failureNode(Failure f) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("arn", f.arn());
-        n.put("reason", f.reason());
-        if (f.detail() != null) { n.put("detail", f.detail()); }
-        return n;
-    }
-
-    private ObjectNode deploymentNode(Deployment d) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("id", d.getId());
-        n.put("status", d.getStatus());
-        n.put("taskDefinition", d.getTaskDefinition());
-        n.put("desiredCount", d.getDesiredCount());
-        n.put("pendingCount", d.getPendingCount());
-        n.put("runningCount", d.getRunningCount());
-        n.put("failedTasks", d.getFailedTasks());
-        n.put("rolloutState", d.getRolloutState());
-        n.put("rolloutStateReason", d.getRolloutStateReason());
-        if (d.getLaunchType() != null) { n.put("launchType", d.getLaunchType().name()); }
-        if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
-        if (d.getServiceConnectConfiguration() != null) {
-            n.set("serviceConnectConfiguration", objectMapper.valueToTree(d.getServiceConnectConfiguration()));
-        }
-        return n;
-    }
-
     /**
      * Keeps the caller's Service Connect configuration as given. AWS's {@code Service} shape has
      * no member for it, so DescribeServices reports it on each deployment rather than on the
@@ -1367,123 +966,6 @@ public class EcsJsonHandler {
             return null;
         }
         return objectMapper.convertValue(node, Map.class);
-    }
-
-    private ObjectNode containerInstanceNode(ContainerInstance ci) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("containerInstanceArn", ci.getContainerInstanceArn());
-        n.put("ec2InstanceId", ci.getEc2InstanceId());
-        n.put("status", ci.getStatus());
-        n.put("runningTasksCount", ci.getRunningTasksCount());
-        n.put("pendingTasksCount", ci.getPendingTasksCount());
-        n.put("agentVersion", ci.getAgentVersion());
-        n.put("agentConnected", ci.isAgentConnected());
-        if (ci.getAttributes() != null && !ci.getAttributes().isEmpty()) {
-            ArrayNode attrs = objectMapper.createArrayNode();
-            ci.getAttributes().forEach(a -> attrs.add(attributeNode(a)));
-            n.set("attributes", attrs);
-        }
-        if (ci.getTags() != null && !ci.getTags().isEmpty()) {
-            n.set("tags", tagsNode(ci.getTags()));
-        }
-        return n;
-    }
-
-    private ObjectNode capacityProviderNode(CapacityProvider cp) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("name", cp.getName());
-        n.put("status", cp.getStatus());
-        if (cp.getCapacityProviderArn() != null) { n.put("capacityProviderArn", cp.getCapacityProviderArn()); }
-        if (cp.getTags() != null && !cp.getTags().isEmpty()) {
-            n.set("tags", tagsNode(cp.getTags()));
-        }
-        return n;
-    }
-
-    private ObjectNode taskSetNode(TaskSet ts) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("id", ts.getId());
-        n.put("taskSetArn", ts.getTaskSetArn());
-        n.put("serviceArn", ts.getServiceArn());
-        n.put("clusterArn", ts.getClusterArn());
-        n.put("taskDefinition", ts.getTaskDefinition());
-        n.put("status", ts.getStatus());
-        n.put("computedDesiredCount", ts.getComputedDesiredCount());
-        n.put("pendingCount", ts.getPendingCount());
-        n.put("runningCount", ts.getRunningCount());
-        n.put("stabilityStatus", ts.getStabilityStatus());
-        if (ts.getLaunchType() != null) { n.put("launchType", ts.getLaunchType().name()); }
-        if (ts.getExternalId() != null) { n.put("externalId", ts.getExternalId()); }
-        ObjectNode scale = objectMapper.createObjectNode();
-        scale.put("value", ts.getScaleValue());
-        scale.put("unit", ts.getScaleUnit());
-        n.set("scale", scale);
-        if (ts.getCreatedAt() != null) { n.put("createdAt", ts.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (ts.getUpdatedAt() != null) { n.put("updatedAt", ts.getUpdatedAt().toEpochMilli() / 1000.0); }
-        if (ts.getTags() != null && !ts.getTags().isEmpty()) {
-            n.set("tags", tagsNode(ts.getTags()));
-        }
-        return n;
-    }
-
-    private ObjectNode serviceDeploymentNode(ServiceDeployment d) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("serviceDeploymentArn", d.getServiceDeploymentArn());
-        n.put("serviceArn", d.getServiceArn());
-        n.put("clusterArn", d.getClusterArn());
-        n.put("taskDefinition", d.getTaskDefinition());
-        n.put("status", d.getStatus());
-        if (d.getCreatedAt() != null) { n.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (d.getUpdatedAt() != null) { n.put("updatedAt", d.getUpdatedAt().toEpochMilli() / 1000.0); }
-        return n;
-    }
-
-    private ObjectNode serviceRevisionNode(ServiceRevision r) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("serviceRevisionArn", r.getServiceRevisionArn());
-        n.put("serviceArn", r.getServiceArn());
-        n.put("clusterArn", r.getClusterArn());
-        n.put("taskDefinition", r.getTaskDefinition());
-        if (r.getLaunchType() != null) { n.put("launchType", r.getLaunchType().name()); }
-        if (r.getCreatedAt() != null) { n.put("createdAt", r.getCreatedAt().toEpochMilli() / 1000.0); }
-        return n;
-    }
-
-    private ObjectNode protectedTaskNode(ProtectedTask pt) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("taskArn", pt.taskArn());
-        n.put("protectionEnabled", pt.protectionEnabled());
-        if (pt.expirationDate() != null) {
-            n.put("expirationDate", pt.expirationDate().toEpochMilli() / 1000.0);
-        }
-        return n;
-    }
-
-    private ObjectNode attributeNode(Attribute a) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("name", a.name());
-        if (a.value() != null) { n.put("value", a.value()); }
-        if (a.targetType() != null) { n.put("targetType", a.targetType()); }
-        if (a.targetId() != null) { n.put("targetId", a.targetId()); }
-        return n;
-    }
-
-    private ObjectNode settingNode(String name, String value) {
-        ObjectNode n = objectMapper.createObjectNode();
-        n.put("name", name);
-        n.put("value", value);
-        return n;
-    }
-
-    private ArrayNode tagsNode(Map<String, String> tags) {
-        ArrayNode arr = objectMapper.createArrayNode();
-        tags.forEach((k, v) -> {
-            ObjectNode tag = objectMapper.createObjectNode();
-            tag.put("key", k);
-            tag.put("value", v);
-            arr.add(tag);
-        });
-        return arr;
     }
 
     // ── Parsing helpers ───────────────────────────────────────────────────────
