@@ -7,7 +7,6 @@ import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.crypto.Mac;
@@ -16,9 +15,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -114,7 +115,8 @@ class KmsKeyTypesTest {
             "ECC_NIST_EDWARDS25519, ED25519_SHA_512",
             "ML_DSA_44, ML_DSA_SHAKE_256",
     })
-    void rawSignatureVerifiesOnlyForTheSignedMessage(KmsKeySpec spec, String algorithm) throws Exception {
+    void rawSignatureVerifiesOnlyForTheSignedMessage(KmsKeySpec spec, KmsKeySpec.Algorithm algorithm)
+            throws Exception {
         KmsKey key = generatedKey(spec, REGION);
         KmsKeyType keyType = keyTypes.of(spec);
 
@@ -127,13 +129,42 @@ class KmsKeyTypesTest {
 
     @ParameterizedTest
     @CsvSource({
+            "RSA_2048, RSASSA_PKCS1_V1_5_SHA_256",
+            "RSA_2048, RSASSA_PSS_SHA_256",
+            "ECC_NIST_P256, ECDSA_SHA_256",
+            "ECC_SECG_P256K1, ECDSA_SHA_256",
+            "ECC_NIST_EDWARDS25519, ED25519_SHA_512",
+            "ML_DSA_44, ML_DSA_SHAKE_256",
+    })
+    void malformedSignatureDoesNotVerify(KmsKeySpec spec, KmsKeySpec.Algorithm algorithm) throws Exception {
+        KmsKey key = generatedKey(spec, REGION);
+        KmsKeyType keyType = keyTypes.of(spec);
+        byte[] oversized = new byte[6144];
+        Arrays.fill(oversized, (byte) 'a');
+
+        for (byte[] signature : List.of(new byte[]{1}, new byte[64], oversized)) {
+            assertFalse(keyType.verify(key, MESSAGE, signature, algorithm, KmsMessageType.RAW));
+        }
+    }
+
+    @Test
+    void corruptPublicKeyThrowsInsteadOfFailingVerification() throws GeneralSecurityException {
+        KmsKey key = generatedKey(KmsKeySpec.ECC_NIST_P256, REGION);
+        key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(new byte[16]));
+
+        assertThrows(GeneralSecurityException.class, () -> keyTypes.of(KmsKeySpec.ECC_NIST_P256)
+                .verify(key, MESSAGE, new byte[64], KmsKeySpec.Algorithm.ECDSA_SHA_256, KmsMessageType.RAW));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
             "RSA_2048, RSASSA_PKCS1_V1_5_SHA_256, SHA-256",
             "RSA_2048, RSASSA_PSS_SHA_384, SHA-384",
             "ECC_NIST_P256, ECDSA_SHA_256, SHA-256",
             "ECC_SECG_P256K1, ECDSA_SHA_256, SHA-256",
     })
-    void digestSignatureVerifiesAsARawSignature(KmsKeySpec spec, String algorithm, String digestAlgorithm)
-            throws Exception {
+    void digestSignatureVerifiesAsARawSignature(KmsKeySpec spec, KmsKeySpec.Algorithm algorithm,
+                                                String digestAlgorithm) throws Exception {
         KmsKey key = generatedKey(spec, REGION);
         KmsKeyType keyType = keyTypes.of(spec);
         byte[] digest = MessageDigest.getInstance(digestAlgorithm).digest(MESSAGE);
@@ -150,22 +181,10 @@ class KmsKeyTypesTest {
         KmsKeyType keyType = keyTypes.of(KmsKeySpec.ECC_NIST_EDWARDS25519);
         byte[] digest = MessageDigest.getInstance("SHA-512").digest(MESSAGE);
 
-        byte[] signature = keyType.sign(key, digest, "ED25519_PH_SHA_512", KmsMessageType.DIGEST);
+        byte[] signature = keyType.sign(key, digest, KmsKeySpec.Algorithm.ED25519_PH_SHA_512, KmsMessageType.DIGEST);
 
-        assertTrue(keyType.verify(key, digest, signature, "ED25519_PH_SHA_512", KmsMessageType.DIGEST));
-    }
-
-    @ParameterizedTest
-    @EnumSource(value = KmsKeySpec.class, names = {"ECC_NIST_EDWARDS25519", "ML_DSA_65", "SM2"})
-    void keyTypesWithOneSigningAlgorithmRejectAnyOther(KmsKeySpec spec) throws GeneralSecurityException {
-        KmsKey key = generatedKey(spec, "cn-north-1");
-
-        AwsException exception = assertThrows(AwsException.class,
-                () -> keyTypes.of(spec).sign(key, MESSAGE, "ECDSA_SHA_256", KmsMessageType.RAW));
-
-        assertEquals("InvalidKeyUsageException", exception.getErrorCode());
-        assertEquals("Algorithm ECDSA_SHA_256 is incompatible with key spec " + spec.name() + ".",
-                exception.getMessage());
+        assertTrue(keyType.verify(key, digest, signature, KmsKeySpec.Algorithm.ED25519_PH_SHA_512,
+                KmsMessageType.DIGEST));
     }
 
     @ParameterizedTest
@@ -214,9 +233,9 @@ class KmsKeyTypesTest {
         KmsKey key = generatedKey(KmsKeySpec.SM2, region);
         KmsKeyType keyType = keyTypes.of(KmsKeySpec.SM2);
 
-        byte[] signature = keyType.sign(key, MESSAGE, "SM2DSA", KmsMessageType.RAW);
+        byte[] signature = keyType.sign(key, MESSAGE, KmsKeySpec.Algorithm.SM2DSA, KmsMessageType.RAW);
 
-        assertTrue(keyType.verify(key, MESSAGE, signature, "SM2DSA", KmsMessageType.RAW));
+        assertTrue(keyType.verify(key, MESSAGE, signature, KmsKeySpec.Algorithm.SM2DSA, KmsMessageType.RAW));
     }
 
     @Test
@@ -228,19 +247,6 @@ class KmsKeyTypesTest {
 
         assertEquals("UnsupportedOperationException", exception.getErrorCode());
         assertNull(key.getPrivateKeyEncoded());
-    }
-
-    @ParameterizedTest
-    @EnumSource(value = KmsKeySpec.class, names = {"SYMMETRIC_DEFAULT", "HMAC_256"})
-    void keyTypesWithoutSigningRefuseToSignAndNeverVerify(KmsKeySpec spec) throws Exception {
-        KmsKey key = generatedKey(spec, REGION);
-        KmsKeyType keyType = keyTypes.of(spec);
-
-        AwsException exception = assertThrows(AwsException.class,
-                () -> keyType.sign(key, MESSAGE, "RSASSA_PSS_SHA_256", KmsMessageType.RAW));
-
-        assertEquals("UnsupportedOperationException", exception.getErrorCode());
-        assertFalse(keyType.verify(key, MESSAGE, new byte[64], "RSASSA_PSS_SHA_256", KmsMessageType.RAW));
     }
 
     private KmsKey generatedKey(KmsKeySpec spec, String region) throws GeneralSecurityException {
