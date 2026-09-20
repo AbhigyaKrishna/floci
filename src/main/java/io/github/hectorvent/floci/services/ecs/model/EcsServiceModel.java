@@ -50,7 +50,10 @@ public class EcsServiceModel {
     private String roleArn;
     /** {@code deploymentConfiguration}, kept raw: Floci reports it but runs no rollout against it. */
     private Map<String, Object> deploymentConfiguration;
-    /** {@code serviceRegistries}, kept raw: Cloud Map registration is not emulated. */
+    /**
+     * {@code serviceRegistries}, kept raw. {@link io.github.hectorvent.floci.services.ecs.EcsServiceDiscoveryRegistrar}
+     * reads the three members AWS uses to place the instance; nothing else in ECS acts on it.
+     */
     private List<Map<String, Object>> serviceRegistries;
     /** Members Floci does not act on, kept verbatim so DescribeServices round-trips. */
     private Map<String, Object> unparsed;
