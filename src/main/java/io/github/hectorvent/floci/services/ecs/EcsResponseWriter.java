@@ -586,6 +586,14 @@ public class EcsResponseWriter {
     // ── Services ──────────────────────────────────────────────────────────────
 
     /** Renders a service for a describe, gating its tags on {@code include: ["TAGS"]}. */
+    public ObjectNode serviceNode(EcsServiceModel s, boolean includeTags) {
+        ObjectNode n = serviceNode(s);
+        if (!includeTags) {
+            n.remove("tags");
+        }
+        return n;
+    }
+
     public ObjectNode serviceNode(EcsServiceModel s) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("serviceArn", s.getServiceArn());
@@ -602,8 +610,11 @@ public class EcsResponseWriter {
         } else if (s.getLaunchType() != null) {
             n.put("launchType", s.getLaunchType().name());
         }
+        if (s.getPlatformVersion() != null) { n.put("platformVersion", s.getPlatformVersion()); }
+        if (s.getPlatformFamily() != null) { n.put("platformFamily", s.getPlatformFamily()); }
         putInstant(n, "createdAt", s.getCreatedAt());
         if (s.getNamespace() != null) { n.put("namespace", s.getNamespace()); }
+        if (s.getRoleArn() != null) { n.put("roleArn", s.getRoleArn()); }
         // Services persisted before these fields existed read back with the AWS defaults.
         n.put("schedulingStrategy", s.getSchedulingStrategy() != null
                 ? s.getSchedulingStrategy() : EcsService.DEFAULT_SCHEDULING_STRATEGY);
@@ -611,6 +622,18 @@ public class EcsResponseWriter {
                 ? s.getDeploymentController() : EcsService.DEFAULT_DEPLOYMENT_CONTROLLER);
         n.put("availabilityZoneRebalancing", s.getAvailabilityZoneRebalancing() != null
                 ? s.getAvailabilityZoneRebalancing() : EcsService.DEFAULT_AZ_REBALANCING_UNSET);
+        n.put("enableExecuteCommand", s.isEnableExecuteCommand());
+        n.put("enableECSManagedTags", s.isEnableECSManagedTags());
+        if (s.getPropagateTags() != null) { n.put("propagateTags", s.getPropagateTags()); }
+        if (s.getHealthCheckGracePeriodSeconds() != null) {
+            n.put("healthCheckGracePeriodSeconds", s.getHealthCheckGracePeriodSeconds());
+        }
+        if (s.getDeploymentConfiguration() != null) {
+            n.set("deploymentConfiguration", objectMapper.valueToTree(s.getDeploymentConfiguration()));
+        }
+        if (s.getServiceRegistries() != null && !s.getServiceRegistries().isEmpty()) {
+            n.set("serviceRegistries", objectMapper.valueToTree(s.getServiceRegistries()));
+        }
         if (s.getTags() != null && !s.getTags().isEmpty()) {
             n.set("tags", tagsNode(s.getTags()));
         }
@@ -629,6 +652,7 @@ public class EcsResponseWriter {
         ArrayNode deployments = objectMapper.createArrayNode();
         service.deploymentsFor(s).forEach(d -> deployments.add(deploymentNode(d)));
         n.set("deployments", deployments);
+        EcsJsonPassthrough.write(n, s.getUnparsed(), objectMapper);
         return n;
     }
 
@@ -705,15 +729,26 @@ public class EcsResponseWriter {
     }
 
     /** @param includeTags DescribeCapacityProviders returns tags only for {@code include: ["TAGS"]}. */
-    public ObjectNode capacityProviderNode(CapacityProvider cp) {
+    public ObjectNode capacityProviderNode(CapacityProvider cp, boolean includeTags) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("name", cp.getName());
         n.put("status", cp.getStatus());
         if (cp.getCapacityProviderArn() != null) { n.put("capacityProviderArn", cp.getCapacityProviderArn()); }
-        if (cp.getTags() != null && !cp.getTags().isEmpty()) {
+        if (cp.getUpdateStatus() != null) { n.put("updateStatus", cp.getUpdateStatus()); }
+        if (cp.getType() != null) { n.put("type", cp.getType()); }
+        // The provider's own configuration, which a client that created it reads back to confirm
+        // what it registered. Dropping it reads as drift in Terraform's aws_ecs_capacity_provider.
+        if (cp.getAutoScalingGroupProvider() != null) {
+            n.set("autoScalingGroupProvider", objectMapper.valueToTree(cp.getAutoScalingGroupProvider()));
+        }
+        if (includeTags && cp.getTags() != null && !cp.getTags().isEmpty()) {
             n.set("tags", tagsNode(cp.getTags()));
         }
         return n;
+    }
+
+    public ObjectNode capacityProviderNode(CapacityProvider cp) {
+        return capacityProviderNode(cp, true);
     }
 
     public ObjectNode taskSetNode(TaskSet ts) {

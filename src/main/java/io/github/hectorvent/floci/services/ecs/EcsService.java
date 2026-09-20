@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProviderStrategyItem;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
@@ -65,7 +66,9 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.Set;
 import java.util.Comparator;
@@ -77,6 +80,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -135,6 +139,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String STOP_CODE_SERVICE_SCHEDULER_INITIATED = "ServiceSchedulerInitiated";
     public static final String PROPAGATE_TAGS_SERVICE = "SERVICE";
     public static final String PROPAGATE_TAGS_TASK_DEFINITION = "TASK_DEFINITION";
+    public static final String PROPAGATE_TAGS_NONE = "NONE";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
     public static final String STATUS_ACTIVE = "ACTIVE";
@@ -1210,10 +1215,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         request.setGroup("service:" + svc.getServiceName());
         request.setStartedBy(deploymentId(svc));
         request.setNetworkConfiguration(svc.getNetworkConfiguration());
+        request.setPlatformVersion(svc.getPlatformVersion());
+        request.setEnableExecuteCommand(svc.isEnableExecuteCommand());
         // A service pinned to a capacity provider places its tasks through it, unless the
         // reconciler is placing a DAEMON task on a named container instance.
         if (containerInstanceArn == null) {
             request.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
+        }
+        if (EcsService.PROPAGATE_TAGS_SERVICE.equals(svc.getPropagateTags())) {
+            request.setTags(svc.getTags());
+        }
+        if (PROPAGATE_TAGS_TASK_DEFINITION.equals(svc.getPropagateTags())) {
+            request.setPropagateTags(PROPAGATE_TAGS_TASK_DEFINITION);
         }
         EcsTask task = launchTasks(cluster, taskDef, request, containerInstanceArn,
                 svc.getServiceArn(), region).getFirst();
@@ -1758,6 +1771,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         svc.setDesiredCount(desiredCount);
         svc.setLoadBalancers(request.getLoadBalancers());
+        svc.setServiceRegistries(request.getServiceRegistries());
         svc.setNetworkConfiguration(request.getNetworkConfiguration());
         // AWS echoes these on every DescribeServices; clients that persist them (Terraform's
         // aws_ecs_service reads all three, and schedulingStrategy is ForceNew) treat a missing
@@ -1777,6 +1791,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
                 ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
         svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
+        svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
+        svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
+        svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
+        // Both have documented defaults a created service reports back.
+        svc.setPropagateTags(request.getPropagateTags() != null
+                ? request.getPropagateTags() : PROPAGATE_TAGS_NONE);
+        svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds() != null
+                ? request.getHealthCheckGracePeriodSeconds() : 0);
+        validateServiceRole(request, taskDef);
+        svc.setRoleArn(request.getRoleArn());
+        svc.setUnparsed(request.getUnparsed());
+        applyServicePlatform(svc, taskDef, request.getPlatformVersion());
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
         svc.setLastDeploymentAt(svc.getCreatedAt());
@@ -1857,7 +1883,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             }
             svc.setDesiredCount(request.getDesiredCount());
         }
+        // The members whose change starts new tasks, as UpdateService documents them: the network
+        // configuration, the load balancers, the service registries, the Service Connect
+        // configuration, the task definition and the platform version. The rest (desired count,
+        // deployment configuration, the exec and managed-tag switches, placement, propagateTags,
+        // the capacity provider strategy) are applied without rolling anything.
+        boolean rollingChange = false;
         if (request.getNetworkConfiguration() != null) {
+            rollingChange |= networkConfigurationChanged(svc.getNetworkConfiguration(),
+                    request.getNetworkConfiguration());
             svc.setNetworkConfiguration(request.getNetworkConfiguration());
         }
         if (request.getAvailabilityZoneRebalancing() != null) {
@@ -1869,6 +1903,32 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     ? svc.getLaunchType()
                     : placementFor(request.getCapacityProviderStrategy().getFirst().capacityProvider()).launchType());
         }
+        if (request.getEnableExecuteCommand() != null) {
+            svc.setEnableExecuteCommand(request.getEnableExecuteCommand());
+        }
+        if (request.getEnableECSManagedTags() != null) {
+            svc.setEnableECSManagedTags(request.getEnableECSManagedTags());
+        }
+        if (request.getPropagateTags() != null) {
+            svc.setPropagateTags(request.getPropagateTags());
+        }
+        if (request.getHealthCheckGracePeriodSeconds() != null) {
+            svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds());
+        }
+        if (request.getDeploymentConfiguration() != null) {
+            svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
+        }
+        if (request.getLoadBalancers() != null) {
+            rollingChange |= loadBalancersChanged(svc.getLoadBalancers(), request.getLoadBalancers());
+            svc.setLoadBalancers(request.getLoadBalancers());
+        }
+        if (request.getServiceRegistries() != null) {
+            rollingChange |= !request.getServiceRegistries().equals(svc.getServiceRegistries());
+            svc.setServiceRegistries(request.getServiceRegistries());
+        }
+        if (request.getUnparsed() != null) {
+            svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
+        }
         // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
         // triggers a new service deployment", so a real change rolls the deployment the way a
         // task-definition change does. An omitted parameter is not a change and rolls nothing.
@@ -1879,12 +1939,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setServiceConnectConfiguration(serviceConnectConfiguration);
         }
         boolean taskDefChanged = false;
+        String platformVersionBefore = svc.getPlatformVersion();
         if (request.getTaskDefinition() != null) {
             TaskDefinition resolved = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
             taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
             svc.setTaskDefinition(resolved.getTaskDefinitionArn());
+            applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
+                    ? request.getPlatformVersion() : svc.getPlatformVersion());
+        } else if (request.getPlatformVersion() != null) {
+            svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
+                    ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
         }
-        if (taskDefChanged || forceNewDeployment || serviceConnectChanged) {
+        // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
+        // service deployment". Compared after resolution, so a request that asks for LATEST on a
+        // service already running the version LATEST resolves to is not a change.
+        rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
+        if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
             svc.setDeploymentId(newDeploymentId());
             svc.setLastDeploymentAt(Instant.now());
             recordServiceDeployment(svc, svc.getTaskDefinition(), region);
@@ -1895,6 +1965,71 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         services.put(key, svc);
         return svc;
+    }
+
+    /**
+     * Folds an update's passthrough members into the ones the service already carries. UpdateService
+     * replaces only the members a request names, so a service created with {@code
+     * placementConstraints} and updated with only {@code placementStrategy} keeps its constraints.
+     * A member the update does name is replaced outright, which is how an empty array clears one.
+     */
+    private static Map<String, Object> mergedUnparsed(Map<String, Object> current,
+                                                       Map<String, Object> update) {
+        if (current == null || current.isEmpty()) {
+            return update;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>(current);
+        merged.putAll(update);
+        return merged;
+    }
+
+    /** Whether an update's awsvpc configuration differs from the one the service already had. */
+    private static boolean networkConfigurationChanged(NetworkConfiguration current,
+                                                       NetworkConfiguration updated) {
+        AwsVpcConfiguration before = current == null ? null : current.getAwsvpcConfiguration();
+        AwsVpcConfiguration after = updated == null ? null : updated.getAwsvpcConfiguration();
+        if (before == null || after == null) {
+            return before != after;
+        }
+        return !Objects.equals(before.getSubnets(), after.getSubnets())
+                || !Objects.equals(before.getSecurityGroups(), after.getSecurityGroups())
+                || !Objects.equals(before.getAssignPublicIp(), after.getAssignPublicIp());
+    }
+
+    /** Whether an update's load balancers differ from the ones the service already had. */
+    private static boolean loadBalancersChanged(List<EcsLoadBalancer> current,
+                                                 List<EcsLoadBalancer> updated) {
+        return !loadBalancerKeys(current).equals(loadBalancerKeys(updated));
+    }
+
+    private static List<String> loadBalancerKeys(List<EcsLoadBalancer> loadBalancers) {
+        if (loadBalancers == null) {
+            return List.of();
+        }
+        return loadBalancers.stream()
+                .map(lb -> lb.getTargetGroupArn() + "|" + lb.getLoadBalancerName() + "|"
+                        + lb.getContainerName() + "|" + lb.getContainerPort())
+                .toList();
+    }
+
+    /**
+     * A {@code role} is only permitted on a load-balanced service whose task definition does not
+     * use {@code awsvpc}: with awsvpc, or without a load balancer, ECS uses the service-linked
+     * role instead and rejects one given here.
+     */
+    private static void validateServiceRole(CreateServiceRequest request, TaskDefinition taskDef) {
+        if (request.getRoleArn() == null || request.getRoleArn().isBlank()) {
+            return;
+        }
+        if (request.getLoadBalancers() == null || request.getLoadBalancers().isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "The role parameter is only permitted when the service uses a load balancer.", 400);
+        }
+        if (taskDef.getNetworkMode() == NetworkMode.awsvpc) {
+            throw new AwsException("InvalidParameterException",
+                    "The role parameter is not permitted for a task definition that uses the "
+                            + "awsvpc network mode.", 400);
+        }
     }
 
     /**
@@ -1915,6 +2050,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         validateCapacityProviderStrategy(strategy);
         return placementFor(strategy.getFirst().capacityProvider()).launchType();
+    }
+
+    /** A Fargate service reports the platform its tasks run on; an EC2 service reports neither. */
+    private static void applyServicePlatform(EcsServiceModel svc, TaskDefinition taskDef, String platformVersion) {
+        if (svc.getLaunchType() != LaunchType.FARGATE) {
+            svc.setPlatformVersion(null);
+            svc.setPlatformFamily(null);
+            return;
+        }
+        svc.setPlatformVersion(platformVersion == null || platformVersion.isBlank()
+                || PLATFORM_VERSION_LATEST.equals(platformVersion)
+                ? DEFAULT_PLATFORM_VERSION : platformVersion);
+        svc.setPlatformFamily(platformFamilyOf(taskDef));
     }
 
     /**
@@ -2291,8 +2439,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     // ── Capacity Providers ────────────────────────────────────────────────────
 
+    /** The two providers Fargate predefines, which exist in every account and cannot be deleted. */
+    private static final Set<String> RESERVED_CAPACITY_PROVIDERS = Set.of("FARGATE", "FARGATE_SPOT");
+    private static final List<String> RESERVED_CAPACITY_PROVIDER_PREFIXES =
+            List.of("aws", "ecs", "fargate");
+    private static final int MAX_CAPACITY_PROVIDER_NAME_LENGTH = 255;
+    private static final Pattern CAPACITY_PROVIDER_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
+    /** The only provider type Floci mints: a created provider always wraps an Auto Scaling group. */
+    private static final String CAPACITY_PROVIDER_TYPE_EC2 = "EC2_AUTOSCALING";
+
     public CapacityProvider createCapacityProvider(String name, Map<String, Object> asgProvider,
                                                     Map<String, String> tags, String region) {
+        validateCapacityProviderName(name);
         if (capacityProviders.containsKey(name)) {
             throw new AwsException("InvalidParameterException",
                     "A capacity provider with name " + name + " already exists.", 400);
@@ -2301,6 +2459,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         cp.setName(name);
         cp.setCapacityProviderArn(regionResolver.buildArn("ecs", region, "capacity-provider/" + name));
         cp.setStatus("ACTIVE");
+        cp.setUpdateStatus("CREATE_COMPLETE");
+        cp.setType(CAPACITY_PROVIDER_TYPE_EC2);
         cp.setAutoScalingGroupProvider(asgProvider);
         if (tags != null) {
             cp.setTags(tags);
@@ -2312,47 +2472,154 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public CapacityProvider updateCapacityProvider(String name, Map<String, Object> asgProvider) {
         CapacityProvider cp = resolveCapacityProviderOrThrow(name);
         cp.setAutoScalingGroupProvider(asgProvider);
+        cp.setUpdateStatus("UPDATE_COMPLETE");
         capacityProviders.put(cp.getName(), cp);
         return cp;
     }
 
+    /**
+     * Deletes a capacity provider. "The FARGATE and FARGATE_SPOT capacity providers are reserved
+     * and can't be deleted", and "only capacity providers that aren't associated with a cluster
+     * can be deleted": both come back as InvalidParameterException rather than removing anything.
+     *
+     * <p>The deleted provider is reported with {@code updateStatus: DELETE_IN_PROGRESS} and an
+     * unchanged {@code status}: DELETE_IN_PROGRESS is not one of the four values
+     * {@code CapacityProviderStatus} takes, so reporting it there hands the SDK an enum it
+     * cannot map.
+     */
     public CapacityProvider deleteCapacityProvider(String nameOrArn) {
+        if (RESERVED_CAPACITY_PROVIDERS.contains(nameOrArn)) {
+            throw new AwsException("InvalidParameterException",
+                    "The " + nameOrArn + " capacity provider is reserved and can't be deleted.", 400);
+        }
         CapacityProvider cp = resolveCapacityProviderOrThrow(nameOrArn);
-        cp.setStatus("DELETE_IN_PROGRESS");
+        String attachedTo = clusterUsingCapacityProvider(cp.getName());
+        if (attachedTo != null) {
+            throw new AwsException("InvalidParameterException",
+                    "The capacity provider " + cp.getName() + " is associated with cluster "
+                            + attachedTo + " and can't be deleted. Remove it with "
+                            + "PutClusterCapacityProviders or delete the cluster first.", 400);
+        }
+        String usedBy = serviceUsingCapacityProvider(cp);
+        if (usedBy != null) {
+            throw new AwsException("InvalidParameterException",
+                    "The capacity provider " + cp.getName() + " is in the capacity provider "
+                            + "strategy of service " + usedBy + " and can't be deleted. Remove it "
+                            + "from the service's capacity provider strategy with UpdateService "
+                            + "first.", 400);
+        }
+        cp.setUpdateStatus("DELETE_IN_PROGRESS");
         capacityProviders.remove(cp.getName());
         return cp;
     }
 
+    public record DescribeCapacityProvidersResult(List<CapacityProvider> capacityProviders,
+                                                   List<Failure> failures) {}
+
     public List<CapacityProvider> describeCapacityProviders(List<String> providers) {
+        return describeCapacityProvidersDetailed(providers, regionResolver.getDefaultRegion())
+                .capacityProviders();
+    }
+
+    /**
+     * Describes capacity providers, reporting a name that matches none as a {@code MISSING}
+     * failure rather than dropping it from the answer.
+     */
+    public DescribeCapacityProvidersResult describeCapacityProvidersDetailed(List<String> providers,
+                                                                              String region) {
         if (providers == null || providers.isEmpty()) {
-            List<CapacityProvider> result = new ArrayList<>(List.of(builtInFargate(), builtInFargateSpot()));
+            List<CapacityProvider> result =
+                    new ArrayList<>(List.of(builtInFargate(region), builtInFargateSpot(region)));
             result.addAll(capacityProviders.values());
-            return result;
+            return new DescribeCapacityProvidersResult(result, List.of());
         }
-        return providers.stream()
-                .map(p -> {
-                    if ("FARGATE".equals(p)) { return builtInFargate(); }
-                    if ("FARGATE_SPOT".equals(p)) { return builtInFargateSpot(); }
-                    return capacityProviders.getOrDefault(p,
-                            capacityProviders.values().stream()
-                                    .filter(cp -> cp.getCapacityProviderArn().equals(p))
-                                    .findFirst().orElse(null));
-                })
-                .filter(cp -> cp != null)
-                .toList();
+        List<CapacityProvider> found = new ArrayList<>();
+        List<Failure> failures = new ArrayList<>();
+        for (String ref : providers) {
+            CapacityProvider cp = switch (ref) {
+                case "FARGATE" -> builtInFargate(region);
+                case "FARGATE_SPOT" -> builtInFargateSpot(region);
+                default -> capacityProviders.getOrDefault(ref,
+                        capacityProviders.values().stream()
+                                .filter(p -> ref.equals(p.getCapacityProviderArn()))
+                                .findFirst().orElse(null));
+            };
+            if (cp == null) {
+                failures.add(Failure.missing(ref.startsWith("arn:") ? ref
+                        : regionResolver.buildArn("ecs", region, "capacity-provider/" + ref)));
+                continue;
+            }
+            found.add(cp);
+        }
+        return new DescribeCapacityProvidersResult(found, failures);
     }
 
-    private CapacityProvider builtInFargate() {
-        CapacityProvider cp = new CapacityProvider();
-        cp.setName("FARGATE");
-        cp.setStatus("ACTIVE");
-        return cp;
+    /** The cluster a capacity provider is attached to, or {@code null} when none is. */
+    private String clusterUsingCapacityProvider(String name) {
+        return clusters.values().stream()
+                .filter(c -> c.getCapacityProviders() != null && c.getCapacityProviders().contains(name))
+                .map(EcsCluster::getClusterName)
+                .findFirst().orElse(null);
     }
 
-    private CapacityProvider builtInFargateSpot() {
+    /**
+     * The first active service whose capacity provider strategy still names {@code cp}, by name or
+     * by ARN, or {@code null}. DeleteCapacityProvider requires the provider to be out of every
+     * service's strategy, not only out of every cluster. A deleted service is INACTIVE and holds
+     * nothing back.
+     */
+    private String serviceUsingCapacityProvider(CapacityProvider cp) {
+        return services.values().stream()
+                .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
+                .filter(svc -> svc.getCapacityProviderStrategy() != null
+                        && svc.getCapacityProviderStrategy().stream()
+                                .anyMatch(item -> cp.getName().equals(item.capacityProvider())
+                                        || cp.getCapacityProviderArn().equals(item.capacityProvider())))
+                .map(EcsServiceModel::getServiceName)
+                .findFirst().orElse(null);
+    }
+
+    /**
+     * "Up to 255 characters are allowed. They include letters (both upper and lowercase letters),
+     * numbers, underscores (_), and hyphens (-). The name can't be prefixed with aws, ecs, or
+     * fargate."
+     */
+    private static void validateCapacityProviderName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "Capacity provider name is required.", 400);
+        }
+        if (name.length() > MAX_CAPACITY_PROVIDER_NAME_LENGTH
+                || !CAPACITY_PROVIDER_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterException",
+                    "Capacity provider names can be up to " + MAX_CAPACITY_PROVIDER_NAME_LENGTH
+                            + " characters long and contain letters, numbers, underscores and "
+                            + "hyphens only.", 400);
+        }
+        String lower = name.toLowerCase(Locale.ROOT);
+        for (String reserved : RESERVED_CAPACITY_PROVIDER_PREFIXES) {
+            if (lower.startsWith(reserved)) {
+                throw new AwsException("InvalidParameterException",
+                        "Capacity provider names can't be prefixed with \"aws\", \"ecs\" or "
+                                + "\"fargate\".", 400);
+            }
+        }
+    }
+
+    private CapacityProvider builtInFargate(String region) {
+        return builtInCapacityProvider("FARGATE", region);
+    }
+
+    private CapacityProvider builtInFargateSpot(String region) {
+        return builtInCapacityProvider("FARGATE_SPOT", region);
+    }
+
+    private CapacityProvider builtInCapacityProvider(String name, String region) {
         CapacityProvider cp = new CapacityProvider();
-        cp.setName("FARGATE_SPOT");
+        cp.setName(name);
         cp.setStatus("ACTIVE");
+        cp.setType(name);
+        cp.setCapacityProviderArn(regionResolver.buildArn("ecs", region, "capacity-provider/" + name));
         return cp;
     }
 
