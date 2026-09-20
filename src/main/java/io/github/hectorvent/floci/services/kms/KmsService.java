@@ -31,7 +31,6 @@ import java.security.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
@@ -404,7 +403,7 @@ public class KmsService implements ResourceProvider {
         requireNotPendingDeletion(key);
         String grantId = UUID.randomUUID().toString();
         byte[] tokenBytes = new byte[32];
-        ThreadLocalRandom.current().nextBytes(tokenBytes);
+        secureRandom.nextBytes(tokenBytes);
 
         KmsGrant grant = new KmsGrant();
         grant.setGrantId(grantId);
@@ -1762,7 +1761,7 @@ public class KmsService implements ResourceProvider {
         int len = keySpec == null ? numberOfBytes : "AES_128".equals(keySpec) ? 16 : 32;
 
         byte[] plaintext = new byte[len];
-        ThreadLocalRandom.current().nextBytes(plaintext);
+        secureRandom.nextBytes(plaintext);
 
         EncryptResult encrypted = encrypt(keyId, plaintext, encryptionContext, null, region, operation);
 

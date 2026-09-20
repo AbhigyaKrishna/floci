@@ -916,6 +916,18 @@ class IamServiceTest {
     }
 
     @Test
+    void accessKeySecretsAreFortyCharsAndUnique() {
+        iamService.createUser("alice", "/");
+        iamService.createUser("bob", "/");
+        AccessKey first = iamService.createAccessKey("alice");
+        AccessKey second = iamService.createAccessKey("bob");
+
+        assertEquals(40, first.getSecretAccessKey().length());
+        assertEquals(40, second.getSecretAccessKey().length());
+        assertNotEquals(first.getSecretAccessKey(), second.getSecretAccessKey());
+    }
+
+    @Test
     void createThirdAccessKeyFails() {
         iamService.createUser("alice", "/");
         iamService.createAccessKey("alice");

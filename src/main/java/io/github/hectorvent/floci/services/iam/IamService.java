@@ -34,6 +34,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
@@ -89,6 +90,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     /** Guards the read-modify-write in the OIDC provider mutators. */
     private final Object oidcProviderLock = new Object();
+
+    /** CSPRNG for long-term secret access keys; ordinary resource IDs keep using {@link ThreadLocalRandom}. */
+    private final SecureRandom secureRandom = new SecureRandom();
 
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
@@ -2590,11 +2594,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return sb.toString();
     }
 
-    private static String randomSecret(int length) {
+    private String randomSecret(int length) {
         String secretChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         StringBuilder sb = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            sb.append(secretChars.charAt(ThreadLocalRandom.current().nextInt(secretChars.length())));
+            sb.append(secretChars.charAt(secureRandom.nextInt(secretChars.length())));
         }
         return sb.toString();
     }

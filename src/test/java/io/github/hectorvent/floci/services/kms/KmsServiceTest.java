@@ -196,6 +196,30 @@ class KmsServiceTest {
     }
 
     @Test
+    void grantTokensAreUniqueUrlSafeBase64Of32Bytes() {
+        KmsKey key = kmsService.createKey("csprng grant key", REGION);
+
+        KmsGrant first = kmsService.createGrant(key.getKeyId(),
+                "arn:aws:iam::000000000000:user/grantee", List.of("Encrypt"), REGION);
+        KmsGrant second = kmsService.createGrant(key.getKeyId(),
+                "arn:aws:iam::000000000000:user/grantee", List.of("Encrypt"), REGION);
+
+        assertEquals(43, first.getGrantToken().length());
+        assertNotEquals(first.getGrantToken(), second.getGrantToken());
+    }
+
+    @Test
+    void generatedDataKeyPlaintextsAreUniqueAndRequestedLength() {
+        KmsKey key = kmsService.createKey("csprng data key", REGION);
+
+        byte[] first = (byte[]) kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION).get("Plaintext");
+        byte[] second = (byte[]) kmsService.generateDataKey(key.getKeyId(), "AES_256", null, REGION).get("Plaintext");
+
+        assertEquals(32, first.length);
+        assertFalse(Arrays.equals(first, second));
+    }
+
+    @Test
     void createGrantMissingKeyIdThrowsValidation() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.createGrant(null, "arn:aws:iam::000000000000:user/grantee", List.of("Encrypt"), REGION));
