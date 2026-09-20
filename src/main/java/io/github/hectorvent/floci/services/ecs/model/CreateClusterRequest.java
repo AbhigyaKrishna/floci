@@ -12,6 +12,8 @@ public class CreateClusterRequest {
     private String clusterName;
     private Map<String, String> tags;
     private List<ClusterSetting> settings;
+    private List<String> capacityProviders;
+    private List<Map<String, Object>> defaultCapacityProviderStrategy;
 
     public String getClusterName() { return clusterName; }
     public void setClusterName(String clusterName) { this.clusterName = clusterName; }
@@ -21,4 +23,15 @@ public class CreateClusterRequest {
 
     public List<ClusterSetting> getSettings() { return settings; }
     public void setSettings(List<ClusterSetting> settings) { this.settings = settings; }
+
+    public List<String> getCapacityProviders() { return capacityProviders; }
+    public void setCapacityProviders(List<String> capacityProviders) { this.capacityProviders = capacityProviders; }
+
+    public List<Map<String, Object>> getDefaultCapacityProviderStrategy() {
+        return defaultCapacityProviderStrategy;
+    }
+
+    public void setDefaultCapacityProviderStrategy(List<Map<String, Object>> strategy) {
+        this.defaultCapacityProviderStrategy = strategy;
+    }
 }

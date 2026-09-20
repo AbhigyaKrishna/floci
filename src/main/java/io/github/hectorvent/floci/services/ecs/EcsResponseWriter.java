@@ -3,20 +3,26 @@ package io.github.hectorvent.floci.services.ecs;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
+import io.github.hectorvent.floci.services.ecs.model.CapacityProviderStrategyItem;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.Deployment;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.EnvironmentFile;
+import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
 import io.github.hectorvent.floci.services.ecs.model.Failure;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
@@ -26,6 +32,8 @@ import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
+import io.github.hectorvent.floci.services.ecs.model.TaskOverride;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
@@ -35,6 +43,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -104,6 +114,11 @@ public class EcsResponseWriter {
         if (td.getMemory() != null) { n.put("memory", td.getMemory()); }
         if (td.getTaskRoleArn() != null) { n.put("taskRoleArn", td.getTaskRoleArn()); }
         if (td.getExecutionRoleArn() != null) { n.put("executionRoleArn", td.getExecutionRoleArn()); }
+        if (td.getPidMode() != null) { n.put("pidMode", td.getPidMode()); }
+        if (td.getIpcMode() != null) { n.put("ipcMode", td.getIpcMode()); }
+        if (td.getEphemeralStorage() != null) {
+            n.set("ephemeralStorage", ephemeralStorageNode(td.getEphemeralStorage()));
+        }
         if (td.getRuntimePlatform() != null) {
             RuntimePlatform platform = td.getRuntimePlatform();
             ObjectNode platformNode = objectMapper.createObjectNode();
@@ -125,6 +140,11 @@ public class EcsResponseWriter {
             td.getCompatibilities().forEach(arr::add);
             n.set("compatibilities", arr);
         }
+        if (td.getRequiresAttributes() != null && !td.getRequiresAttributes().isEmpty()) {
+            ArrayNode arr = objectMapper.createArrayNode();
+            td.getRequiresAttributes().forEach(a -> arr.add(attributeNode(a)));
+            n.set("requiresAttributes", arr);
+        }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (td.getContainerDefinitions() != null) {
@@ -136,9 +156,14 @@ public class EcsResponseWriter {
         if (td.getVolumes() != null && !td.getVolumes().isEmpty()) {
             n.set("volumes", volumesNode(td.getVolumes()));
         }
+        putInstant(n, "registeredAt", td.getRegisteredAt());
+        putInstant(n, "deregisteredAt", td.getDeregisteredAt());
+        putInstant(n, "deleteRequestedAt", td.getDeleteRequestedAt());
+        if (td.getRegisteredBy() != null) { n.put("registeredBy", td.getRegisteredBy()); }
         if (td.getTags() != null && !td.getTags().isEmpty()) {
             n.set("tags", tagsNode(td.getTags()));
         }
+        EcsJsonPassthrough.write(n, td.getUnparsed(), objectMapper);
         return n;
     }
 
@@ -177,6 +202,7 @@ public class EcsResponseWriter {
                 }
                 vNode.set("efsVolumeConfiguration", efs);
             }
+            EcsJsonPassthrough.write(vNode, v.unparsed(), objectMapper);
             vols.add(vNode);
         }
         return vols;
@@ -189,6 +215,7 @@ public class EcsResponseWriter {
         n.put("essential", def.isEssential());
         if (def.getCpu() != null) { n.put("cpu", def.getCpu()); }
         if (def.getMemory() != null) { n.put("memory", def.getMemory()); }
+        if (def.getMemoryReservation() != null) { n.put("memoryReservation", def.getMemoryReservation()); }
 
         if (def.getPortMappings() != null && !def.getPortMappings().isEmpty()) {
             ArrayNode pms = objectMapper.createArrayNode();
@@ -197,6 +224,11 @@ public class EcsResponseWriter {
                 pmNode.put("containerPort", pm.containerPort());
                 pmNode.put("hostPort", pm.hostPort());
                 pmNode.put("protocol", pm.protocol());
+                if (pm.name() != null) { pmNode.put("name", pm.name()); }
+                if (pm.appProtocol() != null) { pmNode.put("appProtocol", pm.appProtocol()); }
+                if (pm.containerPortRange() != null) {
+                    pmNode.put("containerPortRange", pm.containerPortRange());
+                }
                 pms.add(pmNode);
             }
             n.set("portMappings", pms);
@@ -210,6 +242,9 @@ public class EcsResponseWriter {
         }
         if (def.getEnvironment() != null && !def.getEnvironment().isEmpty()) {
             n.set("environment", keyValuePairsNode(def.getEnvironment()));
+        }
+        if (def.getEnvironmentFiles() != null && !def.getEnvironmentFiles().isEmpty()) {
+            n.set("environmentFiles", environmentFilesNode(def.getEnvironmentFiles()));
         }
         if (def.getSecrets() != null && !def.getSecrets().isEmpty()) {
             n.set("secrets", secretsNode(def.getSecrets()));
@@ -234,6 +269,16 @@ public class EcsResponseWriter {
                 volumesFrom.add(volumeFromNode);
             }
             n.set("volumesFrom", volumesFrom);
+        }
+        if (def.getDependsOn() != null && !def.getDependsOn().isEmpty()) {
+            ArrayNode dependsOn = objectMapper.createArrayNode();
+            for (ContainerDependency dependency : def.getDependsOn()) {
+                ObjectNode dependencyNode = objectMapper.createObjectNode();
+                dependencyNode.put("containerName", dependency.containerName());
+                dependencyNode.put("condition", dependency.condition());
+                dependsOn.add(dependencyNode);
+            }
+            n.set("dependsOn", dependsOn);
         }
 
         if (def.getLogConfiguration() != null) {
@@ -279,10 +324,56 @@ public class EcsResponseWriter {
             n.set("healthCheck", hcNode);
         }
 
+        if (def.getStartTimeout() != null) { n.put("startTimeout", def.getStartTimeout()); }
+        if (def.getStopTimeout() != null) { n.put("stopTimeout", def.getStopTimeout()); }
+        if (def.getUser() != null) { n.put("user", def.getUser()); }
+        if (def.getWorkingDirectory() != null) { n.put("workingDirectory", def.getWorkingDirectory()); }
+        if (def.getHostname() != null) { n.put("hostname", def.getHostname()); }
+        if (def.getReadonlyRootFilesystem() != null) {
+            n.put("readonlyRootFilesystem", def.getReadonlyRootFilesystem());
+        }
+        if (def.getPrivileged() != null) { n.put("privileged", def.getPrivileged()); }
+        if (def.getDisableNetworking() != null) { n.put("disableNetworking", def.getDisableNetworking()); }
+        if (def.getInteractive() != null) { n.put("interactive", def.getInteractive()); }
+        if (def.getPseudoTerminal() != null) { n.put("pseudoTerminal", def.getPseudoTerminal()); }
+        if (def.getLinks() != null && !def.getLinks().isEmpty()) {
+            n.set("links", stringArray(def.getLinks()));
+        }
+        if (def.getDnsServers() != null && !def.getDnsServers().isEmpty()) {
+            n.set("dnsServers", stringArray(def.getDnsServers()));
+        }
+        if (def.getDnsSearchDomains() != null && !def.getDnsSearchDomains().isEmpty()) {
+            n.set("dnsSearchDomains", stringArray(def.getDnsSearchDomains()));
+        }
+        if (def.getDockerSecurityOptions() != null && !def.getDockerSecurityOptions().isEmpty()) {
+            n.set("dockerSecurityOptions", stringArray(def.getDockerSecurityOptions()));
+        }
+        if (def.getDockerLabels() != null && !def.getDockerLabels().isEmpty()) {
+            ObjectNode labels = objectMapper.createObjectNode();
+            def.getDockerLabels().forEach(labels::put);
+            n.set("dockerLabels", labels);
+        }
+        if (def.getRepositoryCredentialsParameter() != null) {
+            n.putObject("repositoryCredentials")
+                    .put("credentialsParameter", def.getRepositoryCredentialsParameter());
+        }
+        EcsJsonPassthrough.write(n, def.getUnparsed(), objectMapper);
         return n;
     }
 
     // ── Tasks ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Renders a task for a describe, where its tags are reported only when the caller asked for
+     * them with {@code include: ["TAGS"]}.
+     */
+    public ObjectNode taskNode(EcsTask t, boolean includeTags) {
+        ObjectNode n = taskNode(t);
+        if (!includeTags) {
+            n.remove("tags");
+        }
+        return n;
+    }
 
     /** Renders an ECS task to its data-plane JSON shape. Reused by the Step Functions
      *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
@@ -293,16 +384,52 @@ public class EcsResponseWriter {
         n.put("taskDefinitionArn", t.getTaskDefinitionArn());
         n.put("lastStatus", t.getLastStatus());
         n.put("desiredStatus", t.getDesiredStatus());
-        if (t.getLaunchType() != null) { n.put("launchType", t.getLaunchType().name()); }
+        // A task placed through a capacity provider reports both: the provider it was placed
+        // through and the launch type that provider resolves to. (A service reports only one of
+        // the two, which is why serviceNode does it differently.)
+        if (t.getCapacityProviderName() != null) {
+            n.put("capacityProviderName", t.getCapacityProviderName());
+        }
+        if (t.getLaunchType() != null) {
+            n.put("launchType", t.getLaunchType().name());
+        }
+        if (t.getPlatformVersion() != null) { n.put("platformVersion", t.getPlatformVersion()); }
+        if (t.getPlatformFamily() != null) { n.put("platformFamily", t.getPlatformFamily()); }
         if (t.getCpu() != null) { n.put("cpu", t.getCpu()); }
         if (t.getMemory() != null) { n.put("memory", t.getMemory()); }
+        if (t.getEphemeralStorage() != null) {
+            n.set("ephemeralStorage", ephemeralStorageNode(t.getEphemeralStorage()));
+            // A Fargate task also reports the storage it actually got, which is the same size here.
+            if (t.getPlatformVersion() != null) {
+                n.set("fargateEphemeralStorage", ephemeralStorageNode(t.getEphemeralStorage()));
+            }
+        }
         if (t.getGroup() != null) { n.put("group", t.getGroup()); }
         if (t.getStartedBy() != null) { n.put("startedBy", t.getStartedBy()); }
         if (t.getContainerInstanceArn() != null) { n.put("containerInstanceArn", t.getContainerInstanceArn()); }
-        if (t.getCreatedAt() != null) { n.put("createdAt", t.getCreatedAt().toEpochMilli() / 1000.0); }
-        if (t.getStartedAt() != null) { n.put("startedAt", t.getStartedAt().toEpochMilli() / 1000.0); }
-        if (t.getStoppedAt() != null) { n.put("stoppedAt", t.getStoppedAt().toEpochMilli() / 1000.0); }
+        if (t.getAvailabilityZone() != null) { n.put("availabilityZone", t.getAvailabilityZone()); }
+        if (t.getConnectivity() != null) { n.put("connectivity", t.getConnectivity()); }
+        putInstant(n, "connectivityAt", t.getConnectivityAt());
+        if (t.getHealthStatus() != null) { n.put("healthStatus", t.getHealthStatus()); }
+        if (t.getStopCode() != null) { n.put("stopCode", t.getStopCode()); }
+        n.put("enableExecuteCommand", t.isEnableExecuteCommand());
+        n.put("version", t.getVersion());
+        putInstant(n, "createdAt", t.getCreatedAt());
+        putInstant(n, "startedAt", t.getStartedAt());
+        putInstant(n, "stoppingAt", t.getStoppingAt());
+        putInstant(n, "stoppedAt", t.getStoppedAt());
+        putInstant(n, "pullStartedAt", t.getPullStartedAt());
+        putInstant(n, "pullStoppedAt", t.getPullStoppedAt());
+        putInstant(n, "executionStoppedAt", t.getExecutionStoppedAt());
         if (t.getStoppedReason() != null) { n.put("stoppedReason", t.getStoppedReason()); }
+        // A task always reports overrides, with one containerOverrides entry per container even
+        // when the request overrode nothing, which is what DescribeTasks answers with.
+        n.set("overrides", taskOverrideNode(t));
+        if (t.getAttributes() != null && !t.getAttributes().isEmpty()) {
+            ArrayNode attrs = objectMapper.createArrayNode();
+            t.getAttributes().forEach(a -> attrs.add(attributeNode(a)));
+            n.set("attributes", attrs);
+        }
         if (t.getNetworkInterfaceId() != null) {
             n.putArray("attachments").add(eniAttachmentNode(t));
         }
@@ -322,9 +449,10 @@ public class EcsResponseWriter {
 
     private ObjectNode eniAttachmentNode(EcsTask t) {
         ObjectNode attachment = objectMapper.createObjectNode();
-        attachment.put("id", "eni-attach-" + t.getNetworkInterfaceId());
+        attachment.put("id", t.getAttachmentId() != null
+                ? t.getAttachmentId() : "eni-attach-" + t.getNetworkInterfaceId());
         attachment.put("type", "ElasticNetworkInterface");
-        attachment.put("status", "ATTACHED");
+        attachment.put("status", t.getAttachmentStatus() != null ? t.getAttachmentStatus() : "ATTACHED");
         ArrayNode details = objectMapper.createArrayNode();
         if (t.getNetworkConfiguration() != null
                 && t.getNetworkConfiguration().getAwsvpcConfiguration() != null
@@ -333,6 +461,12 @@ public class EcsResponseWriter {
                     t.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst());
         }
         details.addObject().put("name", "networkInterfaceId").put("value", t.getNetworkInterfaceId());
+        if (t.getMacAddress() != null) {
+            details.addObject().put("name", "macAddress").put("value", t.getMacAddress());
+        }
+        if (t.getPrivateDnsName() != null) {
+            details.addObject().put("name", "privateDnsName").put("value", t.getPrivateDnsName());
+        }
         details.addObject().put("name", "privateIPv4Address").put("value", t.getPrivateIpAddress());
         attachment.set("details", details);
         return attachment;
@@ -347,6 +481,13 @@ public class EcsResponseWriter {
         cn.put("lastStatus", c.getLastStatus());
         if (c.getExitCode() != null) { cn.put("exitCode", c.getExitCode()); }
         if (c.getReason() != null) { cn.put("reason", c.getReason()); }
+        if (c.getHealthStatus() != null) { cn.put("healthStatus", c.getHealthStatus()); }
+        if (c.getRuntimeId() != null) { cn.put("runtimeId", c.getRuntimeId()); }
+        if (c.getImageDigest() != null) { cn.put("imageDigest", c.getImageDigest()); }
+        // A container definition that asked for no CPU units reports zero, not nothing.
+        cn.put("cpu", c.getCpu() != null ? c.getCpu() : "0");
+        if (c.getMemory() != null) { cn.put("memory", c.getMemory()); }
+        if (c.getMemoryReservation() != null) { cn.put("memoryReservation", c.getMemoryReservation()); }
 
         ArrayNode bindings = objectMapper.createArrayNode();
         if (c.getNetworkBindings() != null) {
@@ -360,11 +501,91 @@ public class EcsResponseWriter {
             }
         }
         cn.set("networkBindings", bindings);
+        if (c.getNetworkInterfaces() != null && !c.getNetworkInterfaces().isEmpty()) {
+            ArrayNode interfaces = objectMapper.createArrayNode();
+            for (TaskNetworkInterface ni : c.getNetworkInterfaces()) {
+                ObjectNode in = objectMapper.createObjectNode();
+                if (ni.attachmentId() != null) { in.put("attachmentId", ni.attachmentId()); }
+                if (ni.privateIpv4Address() != null) { in.put("privateIpv4Address", ni.privateIpv4Address()); }
+                if (ni.ipv6Address() != null) { in.put("ipv6Address", ni.ipv6Address()); }
+                interfaces.add(in);
+            }
+            cn.set("networkInterfaces", interfaces);
+        }
+        if (c.getManagedAgents() != null && !c.getManagedAgents().isEmpty()) {
+            ArrayNode agents = objectMapper.createArrayNode();
+            for (ManagedAgent agent : c.getManagedAgents()) {
+                ObjectNode an = objectMapper.createObjectNode();
+                an.put("name", agent.name());
+                an.put("lastStatus", agent.lastStatus());
+                if (agent.reason() != null) { an.put("reason", agent.reason()); }
+                putInstant(an, "lastStartedAt", agent.lastStartedAt());
+                agents.add(an);
+            }
+            cn.set("managedAgents", agents);
+        }
         return cn;
+    }
+
+    /**
+     * The task's overrides. Every container is listed, carrying whatever the request overrode for
+     * it and nothing more, so a client that walks {@code containerOverrides} sees the same entries
+     * AWS returns rather than an empty list for a task nobody overrode.
+     */
+    private ObjectNode taskOverrideNode(EcsTask task) {
+        TaskOverride overrides = task.getOverrides() != null ? task.getOverrides() : new TaskOverride();
+        Map<String, ContainerOverride> byName = new LinkedHashMap<>();
+        if (task.getContainers() != null) {
+            task.getContainers().forEach(container -> {
+                ContainerOverride placeholder = new ContainerOverride();
+                placeholder.setName(container.getName());
+                byName.put(container.getName(), placeholder);
+            });
+        }
+        if (overrides.getContainerOverrides() != null) {
+            overrides.getContainerOverrides().forEach(override -> byName.put(override.getName(), override));
+        }
+        return taskOverrideNode(overrides, List.copyOf(byName.values()));
+    }
+
+    private ObjectNode taskOverrideNode(TaskOverride overrides, List<ContainerOverride> perContainer) {
+        ObjectNode n = objectMapper.createObjectNode();
+        ArrayNode containerOverrides = objectMapper.createArrayNode();
+        for (ContainerOverride co : perContainer) {
+            ObjectNode con = objectMapper.createObjectNode();
+            con.put("name", co.getName());
+            if (co.getCommand() != null && !co.getCommand().isEmpty()) {
+                con.set("command", stringArray(co.getCommand()));
+            }
+            if (co.getEnvironment() != null && !co.getEnvironment().isEmpty()) {
+                con.set("environment", keyValuePairsNode(co.getEnvironment()));
+            }
+            if (co.getEnvironmentFiles() != null && !co.getEnvironmentFiles().isEmpty()) {
+                con.set("environmentFiles", environmentFilesNode(co.getEnvironmentFiles()));
+            }
+            if (co.getCpu() != null) { con.put("cpu", co.getCpu()); }
+            if (co.getMemory() != null) { con.put("memory", co.getMemory()); }
+            if (co.getMemoryReservation() != null) {
+                con.put("memoryReservation", co.getMemoryReservation());
+            }
+            containerOverrides.add(con);
+        }
+        n.set("containerOverrides", containerOverrides);
+        if (overrides.getCpu() != null) { n.put("cpu", overrides.getCpu()); }
+        if (overrides.getMemory() != null) { n.put("memory", overrides.getMemory()); }
+        if (overrides.getTaskRoleArn() != null) { n.put("taskRoleArn", overrides.getTaskRoleArn()); }
+        if (overrides.getExecutionRoleArn() != null) {
+            n.put("executionRoleArn", overrides.getExecutionRoleArn());
+        }
+        if (overrides.getEphemeralStorage() != null) {
+            n.set("ephemeralStorage", ephemeralStorageNode(overrides.getEphemeralStorage()));
+        }
+        return n;
     }
 
     // ── Services ──────────────────────────────────────────────────────────────
 
+    /** Renders a service for a describe, gating its tags on {@code include: ["TAGS"]}. */
     public ObjectNode serviceNode(EcsServiceModel s) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("serviceArn", s.getServiceArn());
@@ -375,8 +596,13 @@ public class EcsResponseWriter {
         n.put("runningCount", s.getRunningCount());
         n.put("pendingCount", s.getPendingCount());
         n.put("status", s.getStatus());
-        if (s.getLaunchType() != null) { n.put("launchType", s.getLaunchType().name()); }
-        if (s.getCreatedAt() != null) { n.put("createdAt", s.getCreatedAt().toEpochMilli() / 1000.0); }
+        if (s.getCapacityProviderStrategy() != null && !s.getCapacityProviderStrategy().isEmpty()) {
+            n.set("capacityProviderStrategy",
+                    capacityProviderStrategyNode(s.getCapacityProviderStrategy()));
+        } else if (s.getLaunchType() != null) {
+            n.put("launchType", s.getLaunchType().name());
+        }
+        putInstant(n, "createdAt", s.getCreatedAt());
         if (s.getNamespace() != null) { n.put("namespace", s.getNamespace()); }
         // Services persisted before these fields existed read back with the AWS defaults.
         n.put("schedulingStrategy", s.getSchedulingStrategy() != null
@@ -407,12 +633,15 @@ public class EcsResponseWriter {
     }
 
     private ObjectNode loadBalancerNode(EcsLoadBalancer lb) {
-        ObjectNode ln = objectMapper.createObjectNode();
-        if (lb.getTargetGroupArn() != null) { ln.put("targetGroupArn", lb.getTargetGroupArn()); }
-        if (lb.getLoadBalancerName() != null) { ln.put("loadBalancerName", lb.getLoadBalancerName()); }
-        if (lb.getContainerName() != null) { ln.put("containerName", lb.getContainerName()); }
-        if (lb.getContainerPort() != null) { ln.put("containerPort", lb.getContainerPort()); }
-        return ln;
+        ObjectNode n = objectMapper.createObjectNode();
+        if (lb.getTargetGroupArn() != null) { n.put("targetGroupArn", lb.getTargetGroupArn()); }
+        if (lb.getLoadBalancerName() != null) { n.put("loadBalancerName", lb.getLoadBalancerName()); }
+        if (lb.getContainerName() != null) { n.put("containerName", lb.getContainerName()); }
+        if (lb.getContainerPort() != null) { n.put("containerPort", lb.getContainerPort()); }
+        if (lb.getAdvancedConfiguration() != null) {
+            n.set("advancedConfiguration", objectMapper.valueToTree(lb.getAdvancedConfiguration()));
+        }
+        return n;
     }
 
     private ObjectNode networkConfigurationNode(AwsVpcConfiguration awsvpc) {
@@ -455,8 +684,6 @@ public class EcsResponseWriter {
         return n;
     }
 
-    // ── Container instances ───────────────────────────────────────────────────
-
     public ObjectNode containerInstanceNode(ContainerInstance ci) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("containerInstanceArn", ci.getContainerInstanceArn());
@@ -477,8 +704,7 @@ public class EcsResponseWriter {
         return n;
     }
 
-    // ── Capacity providers ────────────────────────────────────────────────────
-
+    /** @param includeTags DescribeCapacityProviders returns tags only for {@code include: ["TAGS"]}. */
     public ObjectNode capacityProviderNode(CapacityProvider cp) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("name", cp.getName());
@@ -489,8 +715,6 @@ public class EcsResponseWriter {
         }
         return n;
     }
-
-    // ── Task sets ─────────────────────────────────────────────────────────────
 
     public ObjectNode taskSetNode(TaskSet ts) {
         ObjectNode n = objectMapper.createObjectNode();
@@ -518,8 +742,6 @@ public class EcsResponseWriter {
         return n;
     }
 
-    // ── Service deployments and revisions ─────────────────────────────────────
-
     public ObjectNode serviceDeploymentNode(ServiceDeployment d) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("serviceDeploymentArn", d.getServiceDeploymentArn());
@@ -543,15 +765,11 @@ public class EcsResponseWriter {
         return n;
     }
 
-    // ── Shared members ────────────────────────────────────────────────────────
-
     public ObjectNode protectedTaskNode(ProtectedTask pt) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("taskArn", pt.taskArn());
         n.put("protectionEnabled", pt.protectionEnabled());
-        if (pt.expirationDate() != null) {
-            n.put("expirationDate", pt.expirationDate().toEpochMilli() / 1000.0);
-        }
+        putInstant(n, "expirationDate", pt.expirationDate());
         return n;
     }
 
@@ -582,6 +800,24 @@ public class EcsResponseWriter {
         return arr;
     }
 
+    public ArrayNode capacityProviderStrategyNode(List<CapacityProviderStrategyItem> strategy) {
+        ArrayNode arr = objectMapper.createArrayNode();
+        for (CapacityProviderStrategyItem item : strategy) {
+            ObjectNode n = objectMapper.createObjectNode();
+            n.put("capacityProvider", item.capacityProvider());
+            n.put("weight", item.weight());
+            n.put("base", item.base());
+            arr.add(n);
+        }
+        return arr;
+    }
+
+    private ObjectNode ephemeralStorageNode(EphemeralStorage storage) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("sizeInGiB", storage.sizeInGiB());
+        return n;
+    }
+
     private ArrayNode keyValuePairsNode(List<KeyValuePair> pairs) {
         ArrayNode arr = objectMapper.createArrayNode();
         for (KeyValuePair kv : pairs) {
@@ -589,6 +825,17 @@ public class EcsResponseWriter {
             kvNode.put("name", kv.name());
             kvNode.put("value", kv.value());
             arr.add(kvNode);
+        }
+        return arr;
+    }
+
+    private ArrayNode environmentFilesNode(List<EnvironmentFile> files) {
+        ArrayNode arr = objectMapper.createArrayNode();
+        for (EnvironmentFile file : files) {
+            ObjectNode fileNode = objectMapper.createObjectNode();
+            fileNode.put("value", file.value());
+            fileNode.put("type", file.type());
+            arr.add(fileNode);
         }
         return arr;
     }
@@ -606,7 +853,16 @@ public class EcsResponseWriter {
 
     private ArrayNode stringArray(List<String> values) {
         ArrayNode arr = objectMapper.createArrayNode();
-        values.forEach(arr::add);
+        if (values != null) {
+            values.forEach(arr::add);
+        }
         return arr;
+    }
+
+    /** ECS timestamps go on the wire as epoch seconds with a fractional part. */
+    private static void putInstant(ObjectNode target, String field, Instant value) {
+        if (value != null) {
+            target.put(field, value.toEpochMilli() / 1000.0);
+        }
     }
 }

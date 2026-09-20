@@ -5,6 +5,11 @@
 
 ECS emulates clusters, task definitions, tasks, and services. In the default configuration tasks run as real Docker containers. Set `mock: true` (enabled automatically in tests) to run tasks as in-process stubs without Docker.
 
+A value an enum-typed member does not have is rejected with `InvalidParameterException` rather
+than treated as absent. That matters more than it sounds: a `launchType` of `EC22` silently
+ignored would fall through to Floci's default and place the task on Fargate, which is neither
+what the caller asked for nor what AWS answers.
+
 ## Supported Operations
 
 ### Clusters
@@ -30,10 +35,58 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 | `DeregisterTaskDefinition` | Mark a revision INACTIVE |
 | `DeleteTaskDefinitions` | Delete one or more task definitions |
 
-`runtimePlatform` and a container's `logConfiguration` are stored and returned exactly as
-registered, so a client that reads back what it wrote (Terraform, or a deploy tool verifying its
-own `RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change where a local task
+A task definition round-trips whole. Members Floci acts on are modelled
+(`ephemeralStorage`, `pidMode`, `ipcMode`, `runtimePlatform`, and at container level `dependsOn`,
+`startTimeout`, `stopTimeout`, `user`, `workingDirectory`, `readonlyRootFilesystem`,
+`environmentFiles`, `dockerLabels`, `repositoryCredentials` and the rest); everything else it does
+not act on, such as `proxyConfiguration`, `linuxParameters`, `ulimits`, `resourceRequirements`,
+`systemControls` and placement constraints, is kept verbatim and returned as registered. A client
+that reads back what it wrote (Terraform, or a deploy tool verifying its own
+`RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change where a local task
 runs: Floci launches every task on the host's own architecture.
+
+The round trip reaches inside the members Floci does parse. A port mapping keeps its `name`,
+`appProtocol` and `containerPortRange`, which is what a service's `serviceConnectConfiguration`
+and `vpcLatticeConfigurations` reference by name, and a volume keeps the configurations Floci
+backs with nothing: `dockerVolumeConfiguration`, `fsxWindowsFileServerVolumeConfiguration`,
+`s3filesVolumeConfiguration` and `configuredAtLaunch`.
+
+`compatibilities` is derived from the definition rather than echoed from
+`requiresCompatibilities`: ECS reports the launch types a definition actually works on, so an
+`awsvpc` definition with a valid Fargate size pair and no Fargate-unsupported parameters comes
+back as `["EC2", "FARGATE"]` even when it never asked for FARGATE. `EXTERNAL` is added for any
+network mode other than `awsvpc`, which ECS Anywhere instances do not support. The derivation runs
+Fargate's own registration rules, so it can never disagree with what `requiresCompatibilities:
+["FARGATE"]` would have accepted.
+
+`requiresAttributes` names the container instance capabilities the definition needs for EC2
+placement. ECS derives these from the container agent's capability model, which AWS does not
+publish in full, so Floci derives the subset whose names appear verbatim in the AWS documentation:
+the base `com.amazonaws.ecs.capability.docker-remote-api.1.18`, `ecs.capability.task-eni` for
+`awsvpc`, `com.amazonaws.ecs.capability.task-iam-role` (or
+`...task-iam-role-network-host` under `host` networking) for a `taskRoleArn`,
+`com.amazonaws.ecs.capability.logging-driver.<driver>` per container log driver,
+`com.amazonaws.ecs.capability.ecr-auth` for an ECR image, and
+`com.amazonaws.ecs.capability.privileged-container`. Capabilities outside that set are not
+reported.
+
+A revision goes ACTIVE, then INACTIVE on `DeregisterTaskDefinition` (which stamps
+`deregisteredAt`), then `DELETE_IN_PROGRESS` on `DeleteTaskDefinitions` (which stamps
+`deleteRequestedAt`). Deleting a revision that has not been deregistered is refused, as is a
+reference that names only the family: `DeleteTaskDefinitions` takes a revision, at most 10 per
+call. A deleted revision is not dropped, because AWS keeps describing it and the tasks already on
+it keep running; it just cannot start anything new, so `RunTask`, `CreateService` and
+`UpdateService` refuse it.
+
+At launch, a container's `dependsOn` decides the start order, and a `COMPLETE`, `SUCCESS` or
+`HEALTHY` condition holds the dependent container until the dependency gets there. The wait is
+bounded by the dependent container's `startTimeout`, defaulting to 60 seconds rather than AWS's
+longer agent default, because `RunTask` here answers synchronously. A container's `cpu` becomes its
+CPU shares, its `memory` its hard limit, and a container without a `memory` of its own is capped at
+the task's; the task's `cpu` becomes a CPU quota. `stopTimeout` is the grace period the container gets
+on teardown; a container that does not ask for one gets 5 seconds rather than AWS's 30, because
+`StopTask` here answers synchronously and most containers ignore SIGTERM as PID 1. A container
+still running when its grace period is up is killed, so its exit code is always reported.
 
 `firelensConfiguration` is stored and returned the same way. `RegisterTaskDefinition` rejects a
 missing or unsupported `type` (`fluentd` and `fluentbit` only), and a task using `awsfirelens`
@@ -76,12 +129,11 @@ FirelensConfiguration config file from 's3'`, and rejects a `config-file-value` 
 object ARN with `Invalid arn syntax`. A Fargate task can still take its config from S3 the way AWS
 documents, by giving the aws-for-fluent-bit init process its `aws_fluent_bit_init_s3_*`
 environment variables. ECS never inspects those and Floci passes them through, so that
-registration is accepted here too; it fetches nothing locally either, because Floci serves no ECS
-task metadata endpoint, which the init process reads before downloading.
-Floci also does not validate a task definition's `compatibilities` /
+registration is accepted here too; the init process reads the task metadata endpoint before
+downloading.
+Floci does not validate a task definition's `compatibilities` /
 `requiresCompatibilities` against `RunTask` `launchType`; a Fargate-compatible
-definition can still be run with `launchType=EC2` (and the reverse) the same
-way a missing metadata endpoint is accepted at registration.
+definition can still be run with `launchType=EC2` (and the reverse).
 On an EC2-compatible task definition Floci reads the object from its own S3, writes it to the
 fixed `external.conf` path next to the generated config (`/fluent-bit/etc/external.conf` or
 `/fluentd/etc/external.conf`), and includes it from there, matching the paths the ECS agent uses.
@@ -106,6 +158,89 @@ cycles involving both volume inheritance and log routing are rejected before con
 | `ListTasks` | List task ARNs (filterable by cluster, family, service, status) |
 | `UpdateTaskProtection` | Set scale-in protection for tasks |
 | `GetTaskProtection` | Get current task protection state |
+
+### Fargate
+
+A task definition that declares `FARGATE` in `requiresCompatibilities` is held to Fargate's rules
+at registration:
+
+- `awsvpc` network mode.
+- A task-level `cpu` and `memory` forming one of the documented pairs, from 256 CPU units through
+  32768 (the 32 vCPU tier offers only 60 GB, 120 GB and 244 GB), in CPU units or the `1 vCPU` and
+  `1 GB` string forms. Windows rules out the sub-vCPU sizes.
+- An `ephemeralStorage.sizeInGiB` between 21 and 200.
+- None of the parameters that are not valid in a Fargate task: `disableNetworking`,
+  `dnsSearchDomains`, `dnsServers`, `dockerSecurityOptions`, `extraHosts`, a `GPU`
+  `resourceRequirements` entry, `ipcMode`, `links`, `placementConstraints`, `privileged`,
+  `linuxParameters.maxSwap`, `linuxParameters.swappiness`, a `pidMode` other than `task`, or a
+  host volume with a `sourcePath`. All of them are accepted on an EC2-compatible definition.
+- A `dependsOn` graph that names only containers of the same task definition and has no cycle.
+
+A launched Fargate task reports what AWS reports: `platformVersion` (with `LATEST` resolved to a
+concrete version, as AWS resolves it) and `platformFamily` (`Linux`, or the Windows Server family
+from the task definition's `runtimePlatform.operatingSystemFamily`), `connectivity` and
+`connectivityAt`, `healthStatus`, `stopCode`, `version`, `availabilityZone`, `attributes` with
+`ecs.cpu-architecture`, `pullStartedAt` / `pullStoppedAt` / `stoppingAt` / `executionStoppedAt`,
+`ephemeralStorage` and `fargateEphemeralStorage`, and `enableExecuteCommand`. `overrides` is
+always present with one `containerOverrides` entry per container, carrying whatever the request
+overrode, which is how AWS answers a task nobody overrode. `group` defaults to `family:<family>`
+for a `RunTask` and is `service:<name>` for a service's tasks. A container that asked for no CPU
+units reports `"cpu": "0"`, as on AWS.
+
+A task's `attachments` entry is an `ElasticNetworkInterface` carrying `subnetId`,
+`networkInterfaceId`, `macAddress`, `privateDnsName` and `privateIPv4Address`. `DescribeTasks` and
+`DescribeServices` report tags only when the request asks for them with `include: ["TAGS"]`, as
+`DescribeTaskDefinition` already did. A task `DescribeTasks` cannot resolve comes back as a
+`MISSING` entry in `failures`, which is what the `TasksRunning` and `TasksStopped` waiters treat
+as terminal.
+
+A created service reports the documented defaults: `propagateTags` is `NONE` and
+`healthCheckGracePeriodSeconds` is `0` when the request sets neither. A `role` is accepted only on
+a load-balanced service whose task definition does not use `awsvpc`, which is the only case AWS
+permits it in.
+
+`RunTask` places at most 10 tasks per call and rejects `propagateTags: SERVICE`, which is a
+service-only option; `TASK_DEFINITION` copies the task definition's tags onto each task.
+`StartTask` requires the `containerInstances` it places onto, at most 10 of them.
+
+On `UpdateService`, the changes that start new tasks roll the deployment: the task definition, the
+network configuration, the load balancers, the service registries, the Service Connect
+configuration, and `forceNewDeployment`. The ones AWS documents as not triggering a deployment
+(`desiredCount`, `deploymentConfiguration`, `enableExecuteCommand`, `enableECSManagedTags`,
+`propagateTags`, `healthCheckGracePeriodSeconds`, `availabilityZoneRebalancing`, the capacity
+provider strategy and the placement members) are applied without rolling anything.
+
+Every `awsvpc` task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
+and reports it as an `attachments` entry with its `networkInterfaceId`, `privateIPv4Address` and
+`subnetId`; the task's containers report the same interface in `networkInterfaces`. A subnet that
+does not exist fails the request rather than being ignored. While the task runs, `ec2
+DescribeNetworkInterfaces` reports that ENI as `in-use` and refuses to delete it, so it never
+answers a search for a free interface; it carries no EC2 attachment, every member of one naming an
+instance that a task does not have. The ECS attachment is reported as `DELETED` once the task
+stops, and the ENI is released. Security-group enforcement
+(`FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED`) adds packet filtering on top of the ENI; it is
+not needed for the ENI itself.
+
+#### Capacity providers
+
+`capacityProviderStrategy` is honoured on `RunTask` and `CreateService`, including the built-in
+`FARGATE` and `FARGATE_SPOT` providers. Tasks are spread the way ECS spreads them: the single entry
+that declares a `base` is filled first, then the rest are split by weight, with the remainder of
+the integer split going to the heaviest entries. A strategy and a `launchType` in the same request
+are rejected, as is an unknown provider or a second `base`, and a cluster's
+`defaultCapacityProviderStrategy` applies when a request carries neither. The documented bounds
+are enforced: at most 20 providers in a strategy, a `weight` of 0 to 1,000 and a `base` of 0 to
+100,000. A provider of `weight` 0 places nothing beyond its base, so a strategy naming several
+providers that all weigh 0 is rejected; a lone provider of `weight` 0 still places the tasks,
+since the request named no alternative.
+
+A task placed through a provider reports `capacityProviderName` **and** the `launchType` that
+provider resolves to. A service reports one or the other: `DescribeServices` omits `launchType`
+for a service created with a strategy, and omits `capacityProviderStrategy` for one created with a
+launch type, which is what AWS documents for the `Service` shape.
+
+With no launch type, no strategy and no cluster default, a task keeps Floci's `FARGATE` default: a
+local cluster has no container instances, so an EC2 default would have nowhere to place it.
 
 ### Services
 
@@ -235,6 +370,10 @@ unchanged.
 | `UntagResource` | Remove tags from a resource |
 | `ListTagsForResource` | List tags on a resource |
 
+Every operation that takes `tags` holds it to the limits ECS documents: at most 50 tags, a key of
+1 to 128 characters and a value of up to 256. The count is taken from the request rather than the
+parsed map, so 51 entries that collapse to fewer distinct keys are still rejected.
+
 ### Account Settings & Attributes
 
 | Operation | Description |
@@ -258,7 +397,7 @@ unchanged.
 
 ## Configuration
 
-Docker-backed `awsvpc` tasks receive an emulated ENI and share one protected network namespace across their containers when `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state and does not enforce packet filtering.
+Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, a Docker-backed task's containers additionally share one protected network namespace built around that ENI, and packets are filtered against its security groups. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state, including the ENI, and does not enforce packet filtering.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -313,7 +452,7 @@ A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volu
 
 ### Mock mode
 
-Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
+Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
 
 ```yaml
 # docker-compose.yml — CI / test environment
