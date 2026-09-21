@@ -205,10 +205,13 @@ service-only option; `TASK_DEFINITION` copies the task definition's tags onto ea
 
 On `UpdateService`, the changes that start new tasks roll the deployment: the task definition, the
 network configuration, the load balancers, the service registries, the Service Connect
-configuration, and `forceNewDeployment`. The ones AWS documents as not triggering a deployment
-(`desiredCount`, `deploymentConfiguration`, `enableExecuteCommand`, `enableECSManagedTags`,
-`propagateTags`, `healthCheckGracePeriodSeconds`, `availabilityZoneRebalancing`, the capacity
-provider strategy and the placement members) are applied without rolling anything.
+configuration, `platformVersion` and `forceNewDeployment`. The ones AWS documents as not
+triggering a deployment (`desiredCount`, `deploymentConfiguration`, `enableExecuteCommand`,
+`enableECSManagedTags`, `propagateTags`, `healthCheckGracePeriodSeconds`,
+`availabilityZoneRebalancing`, the capacity provider strategy and the placement members) are
+applied without rolling anything. An update replaces only the members it names: one that sends
+`placementStrategy` alone leaves a `placementConstraints` stored earlier in place, and an empty
+array clears a member the way AWS clears it.
 
 Every `awsvpc` task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
 and reports it as an `attachments` entry with its `networkInterfaceId`, `privateIPv4Address` and
@@ -289,6 +292,11 @@ Known differences from AWS:
   `deployments` list still reports a single `PRIMARY` throughout.
 - `updatedAt` equals `createdAt`. AWS advances it as a rollout progresses; Floci has no
   intermediate rollout state to report.
+- `deploymentConfiguration` (including the circuit breaker), `healthCheckGracePeriodSeconds`,
+  `serviceRegistries` and the placement constraints and strategies are stored and reported as
+  given, so a client that reads them back sees no drift, but the reconciler does not act on them:
+  it converges to `desiredCount` without a maximum or minimum percent, registers nothing in Cloud
+  Map, and places tasks without evaluating constraints.
 
 #### ECS EventBridge events
 
@@ -353,6 +361,24 @@ unchanged.
 | `UpdateCapacityProvider` | Update a capacity provider |
 | `DeleteCapacityProvider` | Delete a capacity provider |
 | `DescribeCapacityProviders` | Describe capacity providers (includes FARGATE built-ins) |
+
+A capacity provider name is validated the way AWS documents it: up to 255 letters, numbers,
+underscores and hyphens, and never prefixed with `aws`, `ecs` or `fargate`. A created provider
+reports its `capacityProviderArn`, a `type` of `EC2_AUTOSCALING`, and the
+`autoScalingGroupProvider` it was created with, so a client that wrote one reads back what it
+registered instead of seeing drift.
+
+`DescribeCapacityProviders` returns tags only for `include: ["TAGS"]`, and reports a name that
+resolves to nothing as a `MISSING` entry in `failures` rather than dropping it. The built-in
+`FARGATE` and `FARGATE_SPOT` providers are described with their own ARNs and a `type` matching
+their name.
+
+`DeleteCapacityProvider` refuses the reserved `FARGATE` and `FARGATE_SPOT` providers, one that is
+still attached to a cluster (detach it with `PutClusterCapacityProviders`, or delete the cluster,
+first), and one still named in an active service's capacity provider strategy, which AWS requires
+to be removed with `UpdateService` before the provider goes. A deleted provider is reported with
+`updateStatus: DELETE_IN_PROGRESS` and an unchanged `status`, because `DELETE_IN_PROGRESS` is not
+one of the four values `CapacityProviderStatus` takes.
 
 ### Service Deployments & Revisions
 

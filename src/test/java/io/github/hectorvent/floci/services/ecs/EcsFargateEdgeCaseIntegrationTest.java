@@ -425,7 +425,94 @@ class EcsFargateEdgeCaseIntegrationTest {
                 "the attachment must carry the details AWS reports, got: " + names);
     }
 
+    @Test
+    void aCreatedServiceReportsTheDocumentedDefaults() {
+        String family = seed("edge-service-defaults");
+
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"edge-defaults-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + "}", 200)
+                .then()
+                .body("service.propagateTags", equalTo("NONE"))
+                .body("service.healthCheckGracePeriodSeconds", equalTo(0))
+                .body("service.enableExecuteCommand", equalTo(false))
+                .body("service.enableECSManagedTags", equalTo(false));
+    }
+
+    @Test
+    void aServiceRoleIsOnlyPermittedWithALoadBalancerAndWithoutAwsvpc() {
+        String family = seed("edge-service-role");
+
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"edge-role-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + ",\"role\":\"arn:aws:iam::000000000000:role/ecsServiceRole\"}", 400)
+                .then().body("message", containsString("role parameter"));
+    }
+
     // ── Service updates ──────────────────────────────────────────────────────
+
+    @Test
+    void onlyTheDocumentedUpdatesRollTheServiceDeployment() {
+        String family = seed("edge-update-rolls");
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"edge-roll-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + "}", 200);
+
+        String initial = deploymentId("edge-roll-svc");
+
+        // desiredCount and the exec switch are documented as not triggering a deployment.
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-roll-svc\","
+                + "\"desiredCount\":0,\"enableExecuteCommand\":true}", 200);
+        assertEquals(initial, deploymentId("edge-roll-svc"),
+                "desiredCount and enableExecuteCommand must not roll the deployment");
+
+        // A changed network configuration starts new tasks, so it rolls.
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-roll-svc\","
+                + "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
+                + "[\"subnet-default-us-east-1-b\"]}}}", 200);
+        assertNotEquals(initial, deploymentId("edge-roll-svc"),
+                "a changed network configuration must roll the deployment");
+
+        // platformVersion is documented as triggering a deployment, but only where it changes:
+        // LATEST on a service already running the version LATEST resolves to is not a change.
+        String rolled = deploymentId("edge-roll-svc");
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-roll-svc\","
+                + "\"platformVersion\":\"LATEST\"}", 200);
+        assertEquals(rolled, deploymentId("edge-roll-svc"),
+                "LATEST on a service already at the resolved version must not roll the deployment");
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-roll-svc\","
+                + "\"platformVersion\":\"1.3.0\"}", 200)
+                .then().body("service.platformVersion", equalTo("1.3.0"));
+        assertNotEquals(rolled, deploymentId("edge-roll-svc"),
+                "a changed platformVersion must roll the deployment");
+    }
+
+    @Test
+    void anUpdateReplacesOnlyTheMembersItNames() {
+        String family = seed("edge-update-members");
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"edge-members-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + ",\"placementConstraints\":[{\"type\":\"distinctInstance\"}]}", 200)
+                .then().body("service.placementConstraints[0].type", equalTo("distinctInstance"));
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-members-svc\","
+                + "\"placementStrategy\":[{\"type\":\"spread\","
+                + "\"field\":\"attribute:ecs.availability-zone\"}]}", 200)
+                .then().body("service.placementStrategy[0].type", equalTo("spread"))
+                .body("service.placementConstraints[0].type", equalTo("distinctInstance"));
+
+        call("DescribeServices", "{\"cluster\":\"" + CLUSTER
+                + "\",\"services\":[\"edge-members-svc\"]}", 200)
+                .then().body("services[0].placementConstraints[0].type", equalTo("distinctInstance"))
+                .body("services[0].placementStrategy[0].type", equalTo("spread"));
+
+        // A member the update does name is replaced outright, which is how an empty array clears it.
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-members-svc\","
+                + "\"placementConstraints\":[]}", 200)
+                .then().body("service.placementConstraints", hasSize(0))
+                .body("service.placementStrategy[0].type", equalTo("spread"));
+    }
 
     private static String deploymentId(String serviceName) {
         return call("DescribeServices", "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\""
@@ -533,6 +620,104 @@ class EcsFargateEdgeCaseIntegrationTest {
     }
 
     // ── Capacity providers ───────────────────────────────────────────────────
+
+    @Test
+    void capacityProviderNamesCannotUseTheReservedPrefixes() {
+        for (String reserved : List.of("aws-edge-cp", "ecs-edge-cp", "fargate-edge-cp")) {
+            call("CreateCapacityProvider", "{\"name\":\"" + reserved + "\","
+                    + "\"autoScalingGroupProvider\":{\"autoScalingGroupArn\":\"arn:aws:autoscaling:"
+                    + "us-east-1:000000000000:autoScalingGroup:x:autoScalingGroupName/asg-x\"}}", 400)
+                    .then().body("message", containsString("prefixed"));
+        }
+        call("CreateCapacityProvider", "{\"name\":\"edge cp with spaces\","
+                + "\"autoScalingGroupProvider\":{\"autoScalingGroupArn\":\"arn:aws:autoscaling:"
+                + "us-east-1:000000000000:autoScalingGroup:x:autoScalingGroupName/asg-x\"}}", 400);
+    }
+
+    @Test
+    void aCapacityProviderRoundTripsItsGroupAndGatesItsTags() {
+        String name = "edge-cp-roundtrip";
+        call("CreateCapacityProvider", "{\"name\":\"" + name + "\","
+                + "\"autoScalingGroupProvider\":{\"autoScalingGroupArn\":\"arn:aws:autoscaling:"
+                + "us-east-1:000000000000:autoScalingGroup:x:autoScalingGroupName/asg-x\","
+                + "\"managedScaling\":{\"status\":\"ENABLED\",\"targetCapacity\":75}},"
+                + "\"tags\":[{\"key\":\"owner\",\"value\":\"platform\"}]}", 200)
+                .then()
+                .body("capacityProvider.type", equalTo("EC2_AUTOSCALING"))
+                .body("capacityProvider.capacityProviderArn", containsString("capacity-provider/" + name));
+
+        call("DescribeCapacityProviders", "{\"capacityProviders\":[\"" + name + "\"]}", 200)
+                .then()
+                .body("capacityProviders[0].autoScalingGroupProvider.managedScaling.targetCapacity",
+                        equalTo(75))
+                // Tags are held back until the request asks for them.
+                .body("capacityProviders[0].tags", nullValue());
+
+        call("DescribeCapacityProviders", "{\"capacityProviders\":[\"" + name
+                + "\"],\"include\":[\"TAGS\"]}", 200)
+                .then().body("capacityProviders[0].tags", hasSize(1));
+    }
+
+    @Test
+    void anUnknownCapacityProviderIsAFailureAndTheFargateOnesCannotBeDeleted() {
+        call("DescribeCapacityProviders", "{\"capacityProviders\":[\"edge-cp-nope\"]}", 200)
+                .then()
+                .body("capacityProviders", hasSize(0))
+                .body("failures", hasSize(1))
+                .body("failures[0].reason", equalTo("MISSING"))
+                .body("failures[0].arn", containsString("capacity-provider/edge-cp-nope"));
+
+        call("DescribeCapacityProviders", "{\"capacityProviders\":[\"FARGATE\"]}", 200)
+                .then()
+                .body("capacityProviders[0].type", equalTo("FARGATE"))
+                .body("capacityProviders[0].capacityProviderArn",
+                        containsString("capacity-provider/FARGATE"));
+
+        call("DeleteCapacityProvider", "{\"capacityProvider\":\"FARGATE\"}", 400)
+                .then().body("message", containsString("reserved"));
+    }
+
+    @Test
+    void aCapacityProviderAttachedToAClusterCannotBeDeleted() {
+        String cluster = "edge-cp-attached-cluster";
+        String name = "edge-cp-attached";
+        call("CreateCapacityProvider", "{\"name\":\"" + name + "\","
+                + "\"autoScalingGroupProvider\":{\"autoScalingGroupArn\":\"arn:aws:autoscaling:"
+                + "us-east-1:000000000000:autoScalingGroup:x:autoScalingGroupName/asg-x\"}}", 200);
+        call("CreateCluster", "{\"clusterName\":\"" + cluster + "\",\"capacityProviders\":[\""
+                + name + "\"]}", 200);
+
+        call("DeleteCapacityProvider", "{\"capacityProvider\":\"" + name + "\"}", 400)
+                .then().body("message", containsString(cluster));
+
+        call("PutClusterCapacityProviders", "{\"cluster\":\"" + cluster + "\","
+                + "\"capacityProviders\":[],\"defaultCapacityProviderStrategy\":[]}", 200);
+        call("DeleteCapacityProvider", "{\"capacityProvider\":\"" + name + "\"}", 200)
+                .then().body("capacityProvider.updateStatus", equalTo("DELETE_IN_PROGRESS"))
+                // DELETE_IN_PROGRESS is an updateStatus, never one of the four status values.
+                .body("capacityProvider.status", equalTo("ACTIVE"));
+    }
+
+    @Test
+    void aCapacityProviderInAServiceStrategyCannotBeDeleted() {
+        String family = seed("edge-cp-in-service");
+        String name = "edge-cp-in-strategy";
+        call("CreateCapacityProvider", "{\"name\":\"" + name + "\","
+                + "\"autoScalingGroupProvider\":{\"autoScalingGroupArn\":\"arn:aws:autoscaling:"
+                + "us-east-1:000000000000:autoScalingGroup:y:autoScalingGroupName/asg-y\"}}", 200);
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"edge-cp-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0," + NETWORK + ","
+                + "\"capacityProviderStrategy\":[{\"capacityProvider\":\"" + name
+                + "\",\"weight\":1}]}", 200);
+
+        // The provider is in no cluster, so only the service's strategy holds the delete back.
+        call("DeleteCapacityProvider", "{\"capacityProvider\":\"" + name + "\"}", 400)
+                .then().body("message", containsString("edge-cp-svc"));
+
+        call("DeleteService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-cp-svc\"}", 200);
+        call("DeleteCapacityProvider", "{\"capacityProvider\":\"" + name + "\"}", 200)
+                .then().body("capacityProvider.updateStatus", equalTo("DELETE_IN_PROGRESS"));
+    }
 
     // ── Round trips the parser used to drop ──────────────────────────────────
 

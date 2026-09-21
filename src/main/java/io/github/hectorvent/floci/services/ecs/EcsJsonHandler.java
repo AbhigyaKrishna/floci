@@ -455,6 +455,18 @@ public class EcsJsonHandler {
 
     // ── Services ──────────────────────────────────────────────────────────────
 
+    /**
+     * Members of CreateService the parser consumes. {@code clientToken} is deliberately not
+     * round-tripped: it is a request-only member and has no place on the Service shape.
+     */
+    private static final Set<String> SERVICE_CONSUMED = Set.of(
+            "cluster", "serviceName", "taskDefinition", "service", "desiredCount", "launchType",
+            "capacityProviderStrategy", "platformVersion", "loadBalancers", "serviceRegistries",
+            "networkConfiguration", "tags", "schedulingStrategy", "deploymentController",
+            "availabilityZoneRebalancing", "serviceConnectConfiguration", "deploymentConfiguration",
+            "enableExecuteCommand", "enableECSManagedTags", "propagateTags",
+            "healthCheckGracePeriodSeconds", "role", "clientToken", "forceNewDeployment");
+
     private Response handleCreateService(JsonNode req, String region) {
         CreateServiceRequest request = new CreateServiceRequest();
         request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
@@ -463,7 +475,10 @@ public class EcsJsonHandler {
         request.setDesiredCount(req.path("desiredCount").asInt(1));
         request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
         request.setCapacityProviderStrategy(parseCapacityProviderStrategy(req.path("capacityProviderStrategy")));
+        request.setPlatformVersion(req.hasNonNull("platformVersion")
+                ? req.path("platformVersion").asText() : null);
         request.setLoadBalancers(parseLoadBalancers(req.path("loadBalancers")));
+        request.setServiceRegistries(parseRawObjectList(req.path("serviceRegistries")));
         request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
         request.setTags(parseTagMap(req.path("tags")));
         request.setSchedulingStrategy(parseChoice(req, "schedulingStrategy", SCHEDULING_STRATEGIES));
@@ -471,6 +486,14 @@ public class EcsJsonHandler {
                 "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES));
         request.setAvailabilityZoneRebalancing(parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
         request.setServiceConnectConfiguration(parseRawObject(req.path("serviceConnectConfiguration")));
+        request.setDeploymentConfiguration(parseRawObject(req.path("deploymentConfiguration")));
+        request.setEnableExecuteCommand(req.path("enableExecuteCommand").asBoolean(false));
+        request.setEnableECSManagedTags(req.path("enableECSManagedTags").asBoolean(false));
+        request.setPropagateTags(parseChoice(req, "propagateTags", PROPAGATE_TAGS));
+        request.setHealthCheckGracePeriodSeconds(req.hasNonNull("healthCheckGracePeriodSeconds")
+                ? req.path("healthCheckGracePeriodSeconds").asInt() : null);
+        request.setRoleArn(req.hasNonNull("role") ? req.path("role").asText() : null);
+        request.setUnparsed(EcsJsonPassthrough.capture(req, objectMapper, SERVICE_CONSUMED));
 
         EcsServiceModel svc = service.createService(request, region);
 
@@ -490,6 +513,23 @@ public class EcsJsonHandler {
         request.setForceNewDeployment(req.path("forceNewDeployment").asBoolean(false));
         request.setServiceConnectConfiguration(parseRawObject(req.path("serviceConnectConfiguration")));
         request.setCapacityProviderStrategy(parseCapacityProviderStrategy(req.path("capacityProviderStrategy")));
+        request.setPlatformVersion(req.hasNonNull("platformVersion")
+                ? req.path("platformVersion").asText() : null);
+        request.setEnableExecuteCommand(req.hasNonNull("enableExecuteCommand")
+                ? req.path("enableExecuteCommand").asBoolean() : null);
+        request.setEnableECSManagedTags(req.hasNonNull("enableECSManagedTags")
+                ? req.path("enableECSManagedTags").asBoolean() : null);
+        request.setPropagateTags(parseChoice(req, "propagateTags", PROPAGATE_TAGS));
+        request.setHealthCheckGracePeriodSeconds(req.hasNonNull("healthCheckGracePeriodSeconds")
+                ? req.path("healthCheckGracePeriodSeconds").asInt() : null);
+        request.setDeploymentConfiguration(parseRawObject(req.path("deploymentConfiguration")));
+        if (req.has("loadBalancers")) {
+            request.setLoadBalancers(parseLoadBalancers(req.path("loadBalancers")));
+        }
+        if (req.has("serviceRegistries")) {
+            request.setServiceRegistries(parseRawObjectList(req.path("serviceRegistries")));
+        }
+        request.setUnparsed(EcsJsonPassthrough.capture(req, objectMapper, SERVICE_CONSUMED));
 
         EcsServiceModel svc = service.updateService(request, region);
 
@@ -579,12 +619,13 @@ public class EcsJsonHandler {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         List<String> serviceIds = jsonArrayToList(req.path("services"));
 
+        boolean includeTags = jsonArrayToList(req.path("include")).contains("TAGS");
         EcsService.DescribeServicesResult found =
                 service.describeServicesDetailed(cluster, serviceIds, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.services().forEach(s -> arr.add(writer.serviceNode(s)));
+        found.services().forEach(s -> arr.add(writer.serviceNode(s, includeTags)));
         resp.set("services", arr);
         ArrayNode failures = objectMapper.createArrayNode();
         found.failures().forEach(f -> failures.add(writer.failureNode(f)));
@@ -813,11 +854,16 @@ public class EcsJsonHandler {
 
     private Response handleDescribeCapacityProviders(JsonNode req, String region) {
         List<String> providers = req.has("capacityProviders") ? jsonArrayToList(req.path("capacityProviders")) : null;
-        List<CapacityProvider> found = service.describeCapacityProviders(providers);
+        boolean includeTags = jsonArrayToList(req.path("include")).contains("TAGS");
+        EcsService.DescribeCapacityProvidersResult result =
+                service.describeCapacityProvidersDetailed(providers, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(cp -> arr.add(writer.capacityProviderNode(cp)));
+        result.capacityProviders().forEach(cp -> arr.add(writer.capacityProviderNode(cp, includeTags)));
         resp.set("capacityProviders", arr);
+        ArrayNode failures = objectMapper.createArrayNode();
+        result.failures().forEach(f -> failures.add(writer.failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
