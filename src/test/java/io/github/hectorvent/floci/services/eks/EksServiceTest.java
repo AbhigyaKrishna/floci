@@ -1816,6 +1816,47 @@ class EksServiceTest {
     }
 
     @Test
+    void explicitVersionPreservedAcrossRestart() throws Exception {
+        CreateClusterRequest explicitReq = createTestClusterRequest("explicit-129-cluster");
+        explicitReq.setVersion("1.29");
+        Cluster createdExplicit = eksService.createCluster(explicitReq);
+        assertTrue(createdExplicit.isExplicitVersion());
+
+        CreateClusterRequest defaultReq = createTestClusterRequest("default-129-cluster");
+        defaultReq.setVersion(null);
+        Cluster createdDefault = eksService.createCluster(defaultReq);
+        assertFalse(createdDefault.isExplicitVersion());
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        Cluster reloadedExplicit = mapper.readValue(mapper.writeValueAsString(createdExplicit), Cluster.class);
+        assertTrue(reloadedExplicit.isExplicitVersion());
+        assertEquals("1.29", reloadedExplicit.getVersion());
+
+        Cluster reloadedDefault = mapper.readValue(mapper.writeValueAsString(createdDefault), Cluster.class);
+        assertFalse(reloadedDefault.isExplicitVersion());
+        assertEquals("1.29", reloadedDefault.getVersion());
+    }
+
+    @Test
+    void clusterCopyClearsExplicitVersionForWireResponse() throws Exception {
+        CreateClusterRequest explicitReq = createTestClusterRequest("wire-explicit-cluster");
+        explicitReq.setVersion("1.29");
+        Cluster explicitCluster = eksService.createCluster(explicitReq);
+        assertTrue(explicitCluster.isExplicitVersion());
+
+        Cluster responseCopy = explicitCluster.copy();
+        responseCopy.setExplicitVersion(false);
+        assertFalse(responseCopy.isExplicitVersion());
+        assertEquals("wire-explicit-cluster", responseCopy.getName());
+        assertEquals("1.29", responseCopy.getVersion());
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        String json = mapper.writeValueAsString(responseCopy);
+        assertFalse(json.contains("explicitVersion"));
+        assertTrue(json.contains("\"version\":\"1.29\""));
+    }
+
+    @Test
     void createClusterWithInvalidVersionFormatThrowsInvalidParameterException() {
         CreateClusterRequest req1 = createTestClusterRequest("v-prefix-cluster");
         req1.setVersion("v1.30");
