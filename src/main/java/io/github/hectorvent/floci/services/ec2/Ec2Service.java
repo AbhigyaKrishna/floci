@@ -8309,14 +8309,55 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return ni;
     }
 
-    /** Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9. */
+    /**
+     * Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9, and equally
+     * while a service holds it: {@link #holdNetworkInterfaceForService} leaves no attachment
+     * behind, so the status is what says the interface is spoken for.
+     */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null) {
+        if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
             throw new AwsException("InvalidParameterValue",
                     "Network interface '" + networkInterfaceId + "' is currently in use", 400);
         }
         networkInterfaces.delete(key(region, networkInterfaceId));
+    }
+
+    /**
+     * Marks an ENI as held by an AWS service rather than by an instance in this account, the state
+     * a running ECS task's interface is in. DescribeNetworkInterfaces documents the status rule
+     * this rests on: an interface that is not attached is {@code available}, one that is attached
+     * is {@code in-use}, and AWS does not let the account delete a task's interface while the task
+     * runs.
+     *
+     * <p>No attachment is synthesised. Every member AWS documents on one describes an instance
+     * ({@code instanceId}, {@code instanceOwnerId} "The AWS account ID of the owner of the
+     * instance", {@code deviceIndex} "The device index ... on the instance"), and a task has no
+     * instance in the account to name there.
+     */
+    public void holdNetworkInterfaceForService(String region, String networkInterfaceId) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidNetworkInterface.InUse",
+                    "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
+        }
+        ni.setStatus("in-use");
+        networkInterfaces.put(key(region, networkInterfaceId), ni);
+    }
+
+    /**
+     * Returns a service-held ENI to {@code available}, the mirror of
+     * {@link #holdNetworkInterfaceForService}. Silent on an interface that is already gone, or one
+     * an instance holds, so a teardown that runs twice is harmless and cannot free an attachment
+     * that AttachNetworkInterface owns.
+     */
+    public void releaseNetworkInterfaceFromService(String region, String networkInterfaceId) {
+        NetworkInterface ni = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+        if (ni == null || ni.getAttachment() != null) {
+            return;
+        }
+        ni.setStatus("available");
+        networkInterfaces.put(key(region, networkInterfaceId), ni);
     }
 
     /**

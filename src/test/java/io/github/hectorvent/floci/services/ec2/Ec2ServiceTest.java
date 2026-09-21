@@ -492,6 +492,84 @@ class Ec2ServiceTest {
     }
 
     /**
+     * An interface a service holds on the caller's behalf, an ECS task's ENI being the one this
+     * emulator allocates, is {@code in-use}: DescribeNetworkInterfaces documents an unattached
+     * interface as {@code available} and an attached one as {@code in-use}, so left
+     * {@code available} it would answer a caller looking for a free interface. No attachment is
+     * synthesised, every member AWS documents on one naming an instance the task does not have,
+     * and the read-time reconciliation that frees an interface whose instance died therefore has
+     * nothing to act on here.
+     */
+    @Test
+    void aServiceHeldInterfaceStaysInUseUntilItIsReleased() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+        String eniId = eni.getNetworkInterfaceId();
+        assertEquals("available", eni.getStatus());
+
+        service.holdNetworkInterfaceForService("us-east-1", eniId);
+
+        assertEquals("in-use", readInterface(service, eniId).getStatus());
+        assertNull(readInterface(service, eniId).getAttachment());
+        assertTrue(service.describeNetworkInterfaces("us-east-1", List.of(),
+                        Map.of("status", List.of("available")), 0, null)
+                .networkInterfaces().stream()
+                .noneMatch(n -> eniId.equals(n.getNetworkInterfaceId())));
+
+        // AWS does not let the account delete an interface a task holds, so a teardown has to
+        // release it first.
+        AwsException inUse = assertThrows(AwsException.class,
+                () -> service.deleteNetworkInterface("us-east-1", eniId));
+        assertEquals("InvalidParameterValue", inUse.getErrorCode());
+
+        service.releaseNetworkInterfaceFromService("us-east-1", eniId);
+
+        assertEquals("available", readInterface(service, eniId).getStatus());
+        assertDoesNotThrow(() -> service.deleteNetworkInterface("us-east-1", eniId));
+        // Releasing an interface that is already gone is a no-op, so a second teardown is harmless.
+        assertDoesNotThrow(() -> service.releaseNetworkInterfaceFromService("us-east-1", eniId));
+    }
+
+    /**
+     * The service hold must not reach an interface an instance owns: releasing one of those is
+     * DetachNetworkInterface's job, and it has an instance-side copy to clear as well.
+     */
+    @Test
+    void aServiceHoldLeavesAnInstanceHeldInterfaceAlone() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null,
+                eni.getNetworkInterfaceId(), 0);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+
+        AwsException held = assertThrows(AwsException.class,
+                () -> service.holdNetworkInterfaceForService("us-east-1", eni.getNetworkInterfaceId()));
+        assertEquals("InvalidNetworkInterface.InUse", held.getErrorCode());
+
+        service.releaseNetworkInterfaceFromService("us-east-1", eni.getNetworkInterfaceId());
+
+        NetworkInterface after = readInterface(service, eni.getNetworkInterfaceId());
+        assertEquals("in-use", after.getStatus());
+        assertEquals(instanceId, after.getAttachment().getInstanceId());
+    }
+
+    private static NetworkInterface readInterface(Ec2Service service, String networkInterfaceId) {
+        return service.describeNetworkInterfaces("us-east-1", List.of(networkInterfaceId), Map.of(), 0, null)
+                .networkInterfaces().getFirst();
+    }
+
+    /**
      * A NetworkInterface can carry a real GroupIdentifier entry whose groupId is null (a name-only
      * association). The group-id filter must skip that entry instead of NPE-ing on
      * {@code null.matches(...)} in the shared value matcher, while a real group on the same interface

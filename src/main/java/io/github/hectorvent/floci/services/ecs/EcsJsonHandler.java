@@ -6,13 +6,17 @@ import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
+import io.github.hectorvent.floci.services.ecs.model.CapacityProviderStrategyItem;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.ecs.model.CreateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.CreateTaskSetRequest;
+import io.github.hectorvent.floci.services.ecs.model.EnvironmentFile;
+import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
@@ -35,9 +39,10 @@ import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.TaskOverride;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
-import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -49,11 +54,13 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 @ApplicationScoped
 public class EcsJsonHandler {
@@ -87,14 +94,14 @@ public class EcsJsonHandler {
             case "UpdateCluster" -> handleUpdateCluster(request, region);
             case "UpdateClusterSettings" -> handleUpdateClusterSettings(request, region);
             case "PutClusterCapacityProviders" -> handlePutClusterCapacityProviders(request, region);
-            // Task Definitions
+
             case "RegisterTaskDefinition" -> handleRegisterTaskDefinition(request, region);
             case "DescribeTaskDefinition" -> handleDescribeTaskDefinition(request, region);
             case "ListTaskDefinitions" -> handleListTaskDefinitions(request, region);
             case "ListTaskDefinitionFamilies" -> handleListTaskDefinitionFamilies(request, region);
             case "DeregisterTaskDefinition" -> handleDeregisterTaskDefinition(request, region);
             case "DeleteTaskDefinitions" -> handleDeleteTaskDefinitions(request, region);
-            // Tasks
+
             case "RunTask" -> handleRunTask(request, region);
             case "StartTask" -> handleStartTask(request, region);
             case "StopTask" -> handleStopTask(request, region);
@@ -102,53 +109,54 @@ public class EcsJsonHandler {
             case "ListTasks" -> handleListTasks(request, region);
             case "UpdateTaskProtection" -> handleUpdateTaskProtection(request, region);
             case "GetTaskProtection" -> handleGetTaskProtection(request, region);
-            // Services
+
             case "CreateService" -> handleCreateService(request, region);
             case "UpdateService" -> handleUpdateService(request, region);
             case "DeleteService" -> handleDeleteService(request, region);
             case "DescribeServices" -> handleDescribeServices(request, region);
             case "ListServices" -> handleListServices(request, region);
             case "ListServicesByNamespace" -> handleListServicesByNamespace(request, region);
-            // Tags
+
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
-            // Account Settings
+
             case "PutAccountSetting" -> handlePutAccountSetting(request, region);
             case "PutAccountSettingDefault" -> handlePutAccountSettingDefault(request, region);
             case "DeleteAccountSetting" -> handleDeleteAccountSetting(request, region);
             case "ListAccountSettings" -> handleListAccountSettings(request, region);
-            // Attributes
+
             case "PutAttributes" -> handlePutAttributes(request, region);
             case "DeleteAttributes" -> handleDeleteAttributes(request, region);
             case "ListAttributes" -> handleListAttributes(request, region);
-            // Container Instances
+
             case "RegisterContainerInstance" -> handleRegisterContainerInstance(request, region);
             case "DeregisterContainerInstance" -> handleDeregisterContainerInstance(request, region);
             case "DescribeContainerInstances" -> handleDescribeContainerInstances(request, region);
             case "ListContainerInstances" -> handleListContainerInstances(request, region);
             case "UpdateContainerAgent" -> handleUpdateContainerAgent(request, region);
             case "UpdateContainerInstancesState" -> handleUpdateContainerInstancesState(request, region);
-            // Capacity Providers
+
             case "CreateCapacityProvider" -> handleCreateCapacityProvider(request, region);
             case "UpdateCapacityProvider" -> handleUpdateCapacityProvider(request, region);
             case "DeleteCapacityProvider" -> handleDeleteCapacityProvider(request, region);
             case "DescribeCapacityProviders" -> handleDescribeCapacityProviders(request, region);
-            // Task Sets
+
             case "CreateTaskSet" -> handleCreateTaskSet(request, region);
             case "UpdateTaskSet" -> handleUpdateTaskSet(request, region);
             case "DeleteTaskSet" -> handleDeleteTaskSet(request, region);
             case "DescribeTaskSets" -> handleDescribeTaskSets(request, region);
             case "UpdateServicePrimaryTaskSet" -> handleUpdateServicePrimaryTaskSet(request, region);
-            // Service Deployments & Revisions
+
             case "DescribeServiceDeployments" -> handleDescribeServiceDeployments(request, region);
             case "ListServiceDeployments" -> handleListServiceDeployments(request, region);
             case "DescribeServiceRevisions" -> handleDescribeServiceRevisions(request, region);
-            // Stubs
+
             case "SubmitTaskStateChange" -> handleSubmitTaskStateChange(request, region);
             case "SubmitContainerStateChange" -> handleSubmitContainerStateChange(request, region);
             case "SubmitAttachmentStateChanges" -> handleSubmitAttachmentStateChanges(request, region);
             case "DiscoverPollEndpoint" -> handleDiscoverPollEndpoint(request, region);
+
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -160,9 +168,16 @@ public class EcsJsonHandler {
 
     private Response handleCreateCluster(JsonNode req, String region) {
         CreateClusterRequest request = new CreateClusterRequest();
-        request.setClusterName(req.path("clusterName").asText(null));
+        request.setClusterName(req.has("clusterName") ? req.path("clusterName").asText() : null);
         request.setTags(parseTagMap(req.path("tags")));
         request.setSettings(parseClusterSettings(req.path("settings")));
+        if (req.has("capacityProviders")) {
+            request.setCapacityProviders(jsonArrayToList(req.path("capacityProviders")));
+        }
+        if (req.has("defaultCapacityProviderStrategy")) {
+            request.setDefaultCapacityProviderStrategy(
+                    parseRawObjectList(req.path("defaultCapacityProviderStrategy")));
+        }
         EcsCluster cluster = service.createCluster(request, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", writer.clusterNode(cluster));
@@ -198,34 +213,40 @@ public class EcsJsonHandler {
     }
 
     private Response handleUpdateCluster(JsonNode req, String region) {
-        String clusterRef = req.path("cluster").asText();
+        String clusterId = req.path("cluster").asText();
         List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
-        EcsCluster cluster = service.updateCluster(clusterRef, settings, region);
+        EcsCluster cluster = service.updateCluster(clusterId, settings, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
     private Response handleUpdateClusterSettings(JsonNode req, String region) {
-        String clusterRef = req.path("cluster").asText();
+        String clusterId = req.path("cluster").asText();
         List<ClusterSetting> settings = parseClusterSettings(req.path("settings"));
-        EcsCluster cluster = service.updateClusterSettings(clusterRef, settings, region);
+        EcsCluster cluster = service.updateClusterSettings(clusterId, settings, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
     private Response handlePutClusterCapacityProviders(JsonNode req, String region) {
-        String clusterRef = req.path("cluster").asText();
+        String clusterId = req.path("cluster").asText();
         List<String> providers = jsonArrayToList(req.path("capacityProviders"));
         List<Map<String, Object>> defaultStrategy = parseRawObjectList(req.path("defaultCapacityProviderStrategy"));
-        EcsCluster cluster = service.putClusterCapacityProviders(clusterRef, providers, defaultStrategy, region);
+        EcsCluster cluster = service.putClusterCapacityProviders(clusterId, providers, defaultStrategy, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", writer.clusterNode(cluster));
         return Response.ok(resp).build();
     }
 
-    // ── Task Definitions ──────────────────────────────────────────────────────
+    // ── Task definitions ──────────────────────────────────────────────────────
+
+    /** Members of RegisterTaskDefinition the parser consumes; the rest round-trips verbatim. */
+    private static final Set<String> TASK_DEFINITION_CONSUMED = Set.of(
+            "family", "containerDefinitions", "networkMode", "cpu", "memory", "taskRoleArn",
+            "executionRoleArn", "requiresCompatibilities", "volumes", "runtimePlatform",
+            "ephemeralStorage", "pidMode", "ipcMode", "tags");
 
     private Response handleRegisterTaskDefinition(JsonNode req, String region) {
         RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
@@ -235,17 +256,24 @@ public class EcsJsonHandler {
         request.setCpu(req.has("cpu") ? req.path("cpu").asText() : null);
         request.setMemory(req.has("memory") ? req.path("memory").asText() : null);
         request.setTaskRoleArn(req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null);
-        request.setExecutionRoleArn(
-                req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null);
-        request.setRequiresCompatibilities(jsonArrayToList(req.path("requiresCompatibilities")));
+        request.setExecutionRoleArn(req.hasNonNull("executionRoleArn")
+                ? req.path("executionRoleArn").asText() : null);
+        request.setRequiresCompatibilities(parseCompatibilities(req.path("requiresCompatibilities")));
         request.setVolumes(parseVolumes(req.path("volumes")));
         request.setRuntimePlatform(parseRuntimePlatform(req.path("runtimePlatform")));
+        request.setEphemeralStorage(parseEphemeralStorage(req.path("ephemeralStorage")));
+        request.setPidMode(parseChoice(req, "pidMode", PID_MODES));
+        request.setIpcMode(parseChoice(req, "ipcMode", IPC_MODES));
         request.setTags(parseTagMap(req.path("tags")));
+        request.setUnparsed(EcsJsonPassthrough.capture(req, objectMapper, TASK_DEFINITION_CONSUMED));
 
         TaskDefinition td = service.registerTaskDefinition(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", writer.taskDefinitionNode(td));
+        if (td.getTags() != null && !td.getTags().isEmpty()) {
+            resp.set("tags", writer.tagsNode(td.getTags()));
+        }
         return Response.ok(resp).build();
     }
 
@@ -254,6 +282,11 @@ public class EcsJsonHandler {
         TaskDefinition td = service.describeTaskDefinition(tdRef, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", writer.taskDefinitionNode(td));
+        // DescribeTaskDefinition reports tags at the top level, and only when asked for them.
+        if (jsonArrayToList(req.path("include")).contains("TAGS")
+                && td.getTags() != null && !td.getTags().isEmpty()) {
+            resp.set("tags", writer.tagsNode(td.getTags()));
+        }
         return Response.ok(resp).build();
     }
 
@@ -300,17 +333,7 @@ public class EcsJsonHandler {
     // ── Tasks ─────────────────────────────────────────────────────────────────
 
     private Response handleRunTask(JsonNode req, String region) {
-        RunTaskRequest request = new RunTaskRequest();
-        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
-        request.setTaskDefinition(req.path("taskDefinition").asText());
-        request.setCount(req.path("count").asInt(1));
-        request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
-        request.setGroup(req.has("group") ? req.path("group").asText() : null);
-        request.setStartedBy(req.has("startedBy") ? req.path("startedBy").asText() : null);
-        request.setContainerOverrides(
-                parseContainerOverrides(req.path("overrides").path("containerOverrides")));
-        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
-
+        RunTaskRequest request = parseRunTaskRequest(req);
         List<EcsTask> launched = service.runTask(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
@@ -322,13 +345,8 @@ public class EcsJsonHandler {
     }
 
     private Response handleStartTask(JsonNode req, String region) {
-        RunTaskRequest request = new RunTaskRequest();
-        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        RunTaskRequest request = parseRunTaskRequest(req);
         request.setContainerInstances(jsonArrayToList(req.path("containerInstances")));
-        request.setTaskDefinition(req.path("taskDefinition").asText());
-        request.setGroup(req.has("group") ? req.path("group").asText() : null);
-        request.setStartedBy(req.has("startedBy") ? req.path("startedBy").asText() : null);
-
         List<EcsTask> launched = service.startTask(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
@@ -337,6 +355,27 @@ public class EcsJsonHandler {
         resp.set("tasks", arr);
         resp.set("failures", objectMapper.createArrayNode());
         return Response.ok(resp).build();
+    }
+
+    private RunTaskRequest parseRunTaskRequest(JsonNode req) {
+        RunTaskRequest request = new RunTaskRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setTaskDefinition(req.path("taskDefinition").asText());
+        request.setCount(req.path("count").asInt(1));
+        request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
+        request.setCapacityProviderStrategy(parseCapacityProviderStrategy(req.path("capacityProviderStrategy")));
+        request.setGroup(req.has("group") ? req.path("group").asText() : null);
+        request.setStartedBy(req.has("startedBy") ? req.path("startedBy").asText() : null);
+        request.setOverrides(parseTaskOverride(req.path("overrides")));
+        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
+        request.setPlatformVersion(req.hasNonNull("platformVersion")
+                ? req.path("platformVersion").asText() : null);
+        request.setEnableExecuteCommand(req.path("enableExecuteCommand").asBoolean(false));
+        request.setEnableECSManagedTags(req.path("enableECSManagedTags").asBoolean(false));
+        request.setPropagateTags(parseChoice(req, "propagateTags", PROPAGATE_TAGS));
+        request.setReferenceId(req.has("referenceId") ? req.path("referenceId").asText() : null);
+        request.setTags(parseTagMap(req.path("tags")));
+        return request;
     }
 
     private Response handleStopTask(JsonNode req, String region) {
@@ -354,13 +393,16 @@ public class EcsJsonHandler {
     private Response handleDescribeTasks(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         List<String> taskRefs = jsonArrayToList(req.path("tasks"));
-        List<EcsTask> found = service.describeTasks(cluster, taskRefs, region);
+        boolean includeTags = jsonArrayToList(req.path("include")).contains("TAGS");
+        EcsService.DescribeTasksResult found = service.describeTasksDetailed(cluster, taskRefs, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        found.forEach(t -> arr.add(writer.taskNode(t)));
+        found.tasks().forEach(t -> arr.add(writer.taskNode(t, includeTags)));
         resp.set("tasks", arr);
-        resp.set("failures", objectMapper.createArrayNode());
+        ArrayNode failures = objectMapper.createArrayNode();
+        found.failures().forEach(f -> failures.add(writer.failureNode(f)));
+        resp.set("failures", failures);
         return Response.ok(resp).build();
     }
 
@@ -420,18 +462,36 @@ public class EcsJsonHandler {
         request.setTaskDefinition(req.path("taskDefinition").asText());
         request.setDesiredCount(req.path("desiredCount").asInt(1));
         request.setLaunchType(parseEnum(req, "launchType", LaunchType.class));
+        request.setCapacityProviderStrategy(parseCapacityProviderStrategy(req.path("capacityProviderStrategy")));
         request.setLoadBalancers(parseLoadBalancers(req.path("loadBalancers")));
         request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
         request.setTags(parseTagMap(req.path("tags")));
         request.setSchedulingStrategy(parseChoice(req, "schedulingStrategy", SCHEDULING_STRATEGIES));
         request.setDeploymentControllerType(parseChoice(req.path("deploymentController"), "type",
                 "deploymentController.type", DEPLOYMENT_CONTROLLER_TYPES));
-        request.setAvailabilityZoneRebalancing(
-                parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
-        request.setServiceConnectConfiguration(
-                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration")));
+        request.setAvailabilityZoneRebalancing(parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
+        request.setServiceConnectConfiguration(parseRawObject(req.path("serviceConnectConfiguration")));
 
         EcsServiceModel svc = service.createService(request, region);
+
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("service", writer.serviceNode(svc));
+        return Response.ok(resp).build();
+    }
+
+    private Response handleUpdateService(JsonNode req, String region) {
+        UpdateServiceRequest request = new UpdateServiceRequest();
+        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
+        request.setService(req.path("service").asText());
+        request.setTaskDefinition(req.has("taskDefinition") ? req.path("taskDefinition").asText() : null);
+        request.setDesiredCount(req.has("desiredCount") ? req.path("desiredCount").asInt() : null);
+        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
+        request.setAvailabilityZoneRebalancing(parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
+        request.setForceNewDeployment(req.path("forceNewDeployment").asBoolean(false));
+        request.setServiceConnectConfiguration(parseRawObject(req.path("serviceConnectConfiguration")));
+        request.setCapacityProviderStrategy(parseCapacityProviderStrategy(req.path("capacityProviderStrategy")));
+
+        EcsServiceModel svc = service.updateService(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", writer.serviceNode(svc));
@@ -476,6 +536,9 @@ public class EcsJsonHandler {
             m.setLoadBalancerName(loadBalancerName);
             m.setContainerName(containerName);
             m.setContainerPort(containerPort);
+            // The blue/green listener and alternate target group wiring, kept raw: Floci shifts no
+            // traffic, but a service created with it has to read back with it.
+            m.setAdvancedConfiguration(parseRawObject(lb.path("advancedConfiguration")));
             result.add(m);
         }
         return result;
@@ -498,26 +561,6 @@ public class EcsJsonHandler {
         NetworkConfiguration networkConfiguration = new NetworkConfiguration();
         networkConfiguration.setAwsvpcConfiguration(awsvpcConfig);
         return networkConfiguration;
-    }
-
-    private Response handleUpdateService(JsonNode req, String region) {
-        UpdateServiceRequest request = new UpdateServiceRequest();
-        request.setCluster(req.has("cluster") ? req.path("cluster").asText() : null);
-        request.setService(req.path("service").asText());
-        request.setTaskDefinition(req.has("taskDefinition") ? req.path("taskDefinition").asText() : null);
-        request.setDesiredCount(req.has("desiredCount") ? req.path("desiredCount").asInt() : null);
-        request.setNetworkConfiguration(parseNetworkConfiguration(req.path("networkConfiguration")));
-        request.setAvailabilityZoneRebalancing(
-                parseChoice(req, "availabilityZoneRebalancing", AZ_REBALANCING));
-        request.setForceNewDeployment(req.path("forceNewDeployment").asBoolean(false));
-        request.setServiceConnectConfiguration(
-                parseServiceConnectConfiguration(req.path("serviceConnectConfiguration")));
-
-        EcsServiceModel svc = service.updateService(request, region);
-
-        ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("service", writer.serviceNode(svc));
-        return Response.ok(resp).build();
     }
 
     private Response handleDeleteService(JsonNode req, String region) {
@@ -933,42 +976,17 @@ public class EcsJsonHandler {
         return writer.taskNode(task);
     }
 
-    private static final Set<String> SCHEDULING_STRATEGIES = Set.of("REPLICA", "DAEMON");
-    private static final Set<String> DEPLOYMENT_CONTROLLER_TYPES = Set.of("ECS", "CODE_DEPLOY", "EXTERNAL");
-    private static final Set<String> AZ_REBALANCING = Set.of("ENABLED", "DISABLED");
-
-    /** Optional enum-valued string field: absent → {@code null}; present but not in {@code allowed} → 400. */
-    private static String parseChoice(JsonNode node, String field, Set<String> allowed) {
-        return parseChoice(node, field, field, allowed);
-    }
-
-    private static String parseChoice(JsonNode node, String field, String displayName, Set<String> allowed) {
-        if (node == null || node.isMissingNode() || !node.hasNonNull(field)) {
-            return null;
-        }
-        String value = node.path(field).asText();
-        if (!allowed.contains(value)) {
-            throw new AwsException("InvalidParameterException",
-                    "Invalid " + displayName + ": " + value + ". Valid values: "
-                            + String.join(", ", new java.util.TreeSet<>(allowed)) + ".", 400);
-        }
-        return value;
-    }
-
-    /**
-     * Keeps the caller's Service Connect configuration as given. AWS's {@code Service} shape has
-     * no member for it, so DescribeServices reports it on each deployment rather than on the
-     * service, and a generated client drops anything written anywhere else.
-     */
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> parseServiceConnectConfiguration(JsonNode node) {
-        if (node == null || !node.isObject()) {
-            return null;
-        }
-        return objectMapper.convertValue(node, Map.class);
-    }
-
     // ── Parsing helpers ───────────────────────────────────────────────────────
+
+    /** Members of a container definition the parser consumes; the rest round-trips verbatim. */
+    private static final Set<String> CONTAINER_DEFINITION_CONSUMED = Set.of(
+            "name", "image", "essential", "cpu", "memory", "memoryReservation", "portMappings",
+            "environment", "environmentFiles", "secrets", "mountPoints", "volumesFrom", "dependsOn",
+            "logConfiguration", "firelensConfiguration", "healthCheck", "command", "entryPoint",
+            "startTimeout", "stopTimeout", "user", "workingDirectory", "hostname",
+            "readonlyRootFilesystem", "privileged", "disableNetworking", "interactive",
+            "pseudoTerminal", "links", "dnsServers", "dnsSearchDomains", "dockerSecurityOptions",
+            "dockerLabels", "repositoryCredentials");
 
     private List<ContainerDefinition> parseContainerDefinitions(JsonNode node) {
         List<ContainerDefinition> result = new ArrayList<>();
@@ -986,11 +1004,17 @@ public class EcsJsonHandler {
 
             def.setPortMappings(parsePortMappings(item.path("portMappings")));
             def.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            if (item.has("environmentFiles")) {
+                def.setEnvironmentFiles(parseEnvironmentFiles(item.path("environmentFiles")));
+            }
             if (item.has("secrets")) {
                 def.setSecrets(parseSecrets(item.path("secrets")));
             }
             def.setMountPoints(parseMountPoints(item.path("mountPoints")));
             def.setVolumesFrom(parseVolumesFrom(item.path("volumesFrom")));
+            if (item.has("dependsOn")) {
+                def.setDependsOn(parseDependsOn(item.path("dependsOn"), def.getName()));
+            }
             def.setLogConfiguration(parseLogConfiguration(item.path("logConfiguration")));
             def.setFirelensConfiguration(parseFirelensConfiguration(
                     item.path("firelensConfiguration"), result.size() + 1));
@@ -999,15 +1023,49 @@ public class EcsJsonHandler {
             }
 
             if (item.has("command") && item.path("command").isArray()) {
-                List<String> cmd = new ArrayList<>();
-                item.path("command").forEach(c -> cmd.add(c.asText()));
-                def.setCommand(cmd);
+                def.setCommand(jsonArrayToList(item.path("command")));
             }
             if (item.has("entryPoint") && item.path("entryPoint").isArray()) {
-                List<String> ep = new ArrayList<>();
-                item.path("entryPoint").forEach(e -> ep.add(e.asText()));
-                def.setEntryPoint(ep);
+                def.setEntryPoint(jsonArrayToList(item.path("entryPoint")));
             }
+
+            if (item.hasNonNull("startTimeout")) { def.setStartTimeout(item.path("startTimeout").asInt()); }
+            if (item.hasNonNull("stopTimeout")) { def.setStopTimeout(item.path("stopTimeout").asInt()); }
+            if (item.hasNonNull("user")) { def.setUser(item.path("user").asText()); }
+            if (item.hasNonNull("workingDirectory")) {
+                def.setWorkingDirectory(item.path("workingDirectory").asText());
+            }
+            if (item.hasNonNull("hostname")) { def.setHostname(item.path("hostname").asText()); }
+            if (item.hasNonNull("readonlyRootFilesystem")) {
+                def.setReadonlyRootFilesystem(item.path("readonlyRootFilesystem").asBoolean());
+            }
+            if (item.hasNonNull("privileged")) { def.setPrivileged(item.path("privileged").asBoolean()); }
+            if (item.hasNonNull("disableNetworking")) {
+                def.setDisableNetworking(item.path("disableNetworking").asBoolean());
+            }
+            if (item.hasNonNull("interactive")) { def.setInteractive(item.path("interactive").asBoolean()); }
+            if (item.hasNonNull("pseudoTerminal")) {
+                def.setPseudoTerminal(item.path("pseudoTerminal").asBoolean());
+            }
+            if (item.has("links")) { def.setLinks(jsonArrayToList(item.path("links"))); }
+            if (item.has("dnsServers")) { def.setDnsServers(jsonArrayToList(item.path("dnsServers"))); }
+            if (item.has("dnsSearchDomains")) {
+                def.setDnsSearchDomains(jsonArrayToList(item.path("dnsSearchDomains")));
+            }
+            if (item.has("dockerSecurityOptions")) {
+                def.setDockerSecurityOptions(jsonArrayToList(item.path("dockerSecurityOptions")));
+            }
+            if (item.path("dockerLabels").isObject()) {
+                Map<String, String> labels = new LinkedHashMap<>();
+                item.path("dockerLabels").fields()
+                        .forEachRemaining(entry -> labels.put(entry.getKey(), entry.getValue().asText()));
+                def.setDockerLabels(labels);
+            }
+            if (item.path("repositoryCredentials").hasNonNull("credentialsParameter")) {
+                def.setRepositoryCredentialsParameter(
+                        item.path("repositoryCredentials").path("credentialsParameter").asText());
+            }
+            def.setUnparsed(EcsJsonPassthrough.capture(item, objectMapper, CONTAINER_DEFINITION_CONSUMED));
 
             result.add(def);
         }
@@ -1023,7 +1081,12 @@ public class EcsJsonHandler {
             int containerPort = item.path("containerPort").asInt(0);
             int hostPort = item.path("hostPort").asInt(0);
             String protocol = item.path("protocol").asText("tcp");
-            result.add(new PortMapping(containerPort, hostPort, protocol));
+            String name = item.hasNonNull("name") ? item.path("name").asText() : null;
+            String appProtocol = item.hasNonNull("appProtocol") ? item.path("appProtocol").asText() : null;
+            String containerPortRange = item.hasNonNull("containerPortRange")
+                    ? item.path("containerPortRange").asText() : null;
+            result.add(new PortMapping(containerPort, hostPort, protocol, name, appProtocol,
+                    containerPortRange));
         }
         return result;
     }
@@ -1035,6 +1098,40 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             result.add(new KeyValuePair(item.path("name").asText(), item.path("value").asText()));
+        }
+        return result;
+    }
+
+    private List<EnvironmentFile> parseEnvironmentFiles(JsonNode node) {
+        List<EnvironmentFile> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new EnvironmentFile(item.path("value").asText(), item.path("type").asText("s3")));
+        }
+        return result;
+    }
+
+    /**
+     * Parses {@code dependsOn}, rejecting a condition ECS does not define. An unknown condition
+     * would otherwise silently become a plain start-ordering edge.
+     */
+    private List<ContainerDependency> parseDependsOn(JsonNode node, String containerName) {
+        List<ContainerDependency> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            String condition = item.path("condition").asText();
+            if (!DEPENDENCY_CONDITIONS.contains(condition)) {
+                throw new AwsException("ClientException",
+                        "Container '" + containerName + "' depends on container '"
+                                + item.path("containerName").asText() + "' with an invalid condition: "
+                                + condition + ". Valid values: "
+                                + String.join(", ", new TreeSet<>(DEPENDENCY_CONDITIONS)) + ".", 400);
+            }
+            result.add(new ContainerDependency(item.path("containerName").asText(), condition));
         }
         return result;
     }
@@ -1073,6 +1170,43 @@ public class EcsJsonHandler {
             return null;
         }
         return new RuntimePlatform(cpuArchitecture, operatingSystemFamily);
+    }
+
+    private EphemeralStorage parseEphemeralStorage(JsonNode node) {
+        if (node == null || !node.isObject() || !node.hasNonNull("sizeInGiB")) {
+            return null;
+        }
+        return new EphemeralStorage(node.path("sizeInGiB").asInt());
+    }
+
+    private List<CapacityProviderStrategyItem> parseCapacityProviderStrategy(JsonNode node) {
+        if (node == null || !node.isArray() || node.isEmpty()) {
+            return null;
+        }
+        List<CapacityProviderStrategyItem> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            result.add(new CapacityProviderStrategyItem(
+                    item.path("capacityProvider").asText(),
+                    item.path("weight").asInt(0),
+                    item.path("base").asInt(0)));
+        }
+        return result;
+    }
+
+    private TaskOverride parseTaskOverride(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        TaskOverride overrides = new TaskOverride();
+        overrides.setContainerOverrides(parseContainerOverrides(node.path("containerOverrides")));
+        if (node.hasNonNull("cpu")) { overrides.setCpu(node.path("cpu").asText()); }
+        if (node.hasNonNull("memory")) { overrides.setMemory(node.path("memory").asText()); }
+        if (node.hasNonNull("taskRoleArn")) { overrides.setTaskRoleArn(node.path("taskRoleArn").asText()); }
+        if (node.hasNonNull("executionRoleArn")) {
+            overrides.setExecutionRoleArn(node.path("executionRoleArn").asText());
+        }
+        overrides.setEphemeralStorage(parseEphemeralStorage(node.path("ephemeralStorage")));
+        return overrides.isEmpty() ? null : overrides;
     }
 
     private LogConfiguration parseLogConfiguration(JsonNode node) {
@@ -1121,6 +1255,7 @@ public class EcsJsonHandler {
         }
         return new FirelensConfiguration(type, options);
     }
+
     private HealthCheck parseHealthCheck(JsonNode node) {
         if (node == null || !node.isObject()) {
             return null;
@@ -1147,10 +1282,17 @@ public class EcsJsonHandler {
                 hostVolumePolicy.validate(hostSourcePath);
             }
             EfsVolumeConfiguration efs = parseEfsVolumeConfiguration(item.path("efsVolumeConfiguration"));
-            result.add(new Volume(item.path("name").asText(), hostSourcePath, efs));
+            // "host" stays out of the consumed set so that a volume declaring an empty one reads
+            // back with it; a host that did carry a sourcePath is written from the typed field and
+            // the passthrough leaves it alone.
+            result.add(new Volume(item.path("name").asText(), hostSourcePath, efs,
+                    EcsJsonPassthrough.capture(item, objectMapper, VOLUME_CONSUMED)));
         }
         return result;
     }
+
+    /** Volume members the parser consumes; the rest round-trips verbatim. */
+    private static final Set<String> VOLUME_CONSUMED = Set.of("name", "efsVolumeConfiguration");
 
     private EfsVolumeConfiguration parseEfsVolumeConfiguration(JsonNode node) {
         if (node == null || !node.isObject()) {
@@ -1205,11 +1347,17 @@ public class EcsJsonHandler {
             ContainerOverride co = new ContainerOverride();
             co.setName(item.path("name").asText());
             if (item.has("command") && item.path("command").isArray()) {
-                List<String> cmd = new ArrayList<>();
-                item.path("command").forEach(c -> cmd.add(c.asText()));
-                co.setCommand(cmd);
+                co.setCommand(jsonArrayToList(item.path("command")));
             }
             co.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            if (item.has("environmentFiles")) {
+                co.setEnvironmentFiles(parseEnvironmentFiles(item.path("environmentFiles")));
+            }
+            if (item.hasNonNull("cpu")) { co.setCpu(item.path("cpu").asInt()); }
+            if (item.hasNonNull("memory")) { co.setMemory(item.path("memory").asInt()); }
+            if (item.hasNonNull("memoryReservation")) {
+                co.setMemoryReservation(item.path("memoryReservation").asInt());
+            }
             result.add(co);
         }
         return result;
@@ -1242,24 +1390,53 @@ public class EcsJsonHandler {
         return result;
     }
 
+    /**
+     * Parses a {@code tags} list, holding it to the limits ECS documents for every operation that
+     * takes one: at most 50 tags, a key of 1 to 128 characters and a value of up to 256. The count
+     * is taken from the request rather than the parsed map, so 51 entries that collapse to fewer
+     * distinct keys are still rejected.
+     */
     private Map<String, String> parseTagMap(JsonNode node) {
         Map<String, String> result = new HashMap<>();
         if (!node.isArray()) {
             return result;
         }
+        if (node.size() > MAX_TAGS_PER_RESOURCE) {
+            throw new AwsException("InvalidParameterException",
+                    "Too many tags specified. A resource takes at most "
+                            + MAX_TAGS_PER_RESOURCE + " tags.", 400);
+        }
         for (JsonNode item : node) {
-            result.put(item.path("key").asText(), item.path("value").asText());
+            String key = item.path("key").asText();
+            String value = item.path("value").asText();
+            if (key.isEmpty() || key.length() > MAX_TAG_KEY_LENGTH) {
+                throw new AwsException("InvalidParameterException",
+                        "Tag keys must be between 1 and " + MAX_TAG_KEY_LENGTH
+                                + " characters long.", 400);
+            }
+            if (value.length() > MAX_TAG_VALUE_LENGTH) {
+                throw new AwsException("InvalidParameterException",
+                        "Tag values can be up to " + MAX_TAG_VALUE_LENGTH
+                                + " characters long.", 400);
+            }
+            result.put(key, value);
         }
         return result;
     }
 
+    private static final int MAX_TAGS_PER_RESOURCE = 50;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
+
+    @SuppressWarnings("unchecked")
     private Map<String, Object> parseRawObject(JsonNode node) {
-        if (node == null || node.isMissingNode()) {
+        if (node == null || node.isMissingNode() || !node.isObject()) {
             return null;
         }
         return objectMapper.convertValue(node, Map.class);
     }
 
+    @SuppressWarnings("unchecked")
     private List<Map<String, Object>> parseRawObjectList(JsonNode node) {
         List<Map<String, Object>> result = new ArrayList<>();
         if (!node.isArray()) {
@@ -1279,15 +1456,67 @@ public class EcsJsonHandler {
         return result;
     }
 
+    /**
+     * Parses an enum-typed member, rejecting a value the enum does not have. Treating an
+     * unrecognised value as absent is worse than it sounds: a {@code launchType} of {@code "EC22"}
+     * would silently fall through to Floci's default and place the task on Fargate, which is not
+     * what the caller asked for and not what AWS answers.
+     */
     private <T extends Enum<T>> T parseEnum(JsonNode req, String field, Class<T> enumClass) {
-        if (!req.has(field)) {
+        if (!req.hasNonNull(field)) {
             return null;
         }
         String val = req.path(field).asText();
         try {
             return Enum.valueOf(enumClass, val);
         } catch (IllegalArgumentException e) {
+            List<String> valid = Arrays.stream(enumClass.getEnumConstants()).map(Enum::name).toList();
+            throw new AwsException("InvalidParameterException",
+                    "Invalid " + field + ": " + val + ". Valid values: "
+                            + String.join(", ", valid) + ".", 400);
+        }
+    }
+
+    /** Rejects a compatibility the enum does not have, rather than carrying it into the model. */
+    private List<String> parseCompatibilities(JsonNode node) {
+        List<String> requested = jsonArrayToList(node);
+        for (String value : requested) {
+            if (!COMPATIBILITIES.contains(value)) {
+                throw new AwsException("InvalidParameterException",
+                        "Invalid requiresCompatibilities value: " + value + ". Valid values: "
+                                + String.join(", ", new TreeSet<>(COMPATIBILITIES)) + ".", 400);
+            }
+        }
+        return requested;
+    }
+
+    private static final Set<String> COMPATIBILITIES =
+            Set.of("EC2", "FARGATE", "EXTERNAL", "MANAGED_INSTANCES");
+    private static final Set<String> PID_MODES = Set.of("host", "task");
+    private static final Set<String> IPC_MODES = Set.of("host", "task", "none");
+    private static final Set<String> SCHEDULING_STRATEGIES = Set.of("REPLICA", "DAEMON");
+    private static final Set<String> DEPLOYMENT_CONTROLLER_TYPES = Set.of("ECS", "CODE_DEPLOY", "EXTERNAL");
+    private static final Set<String> AZ_REBALANCING = Set.of("ENABLED", "DISABLED");
+    private static final Set<String> PROPAGATE_TAGS = Set.of("TASK_DEFINITION", "SERVICE", "NONE");
+    private static final Set<String> DEPENDENCY_CONDITIONS = Set.of(
+            ContainerDependency.START, ContainerDependency.COMPLETE,
+            ContainerDependency.SUCCESS, ContainerDependency.HEALTHY);
+
+    /** Optional enum-valued string field: absent → {@code null}; present but not in {@code allowed} → 400. */
+    private static String parseChoice(JsonNode node, String field, Set<String> allowed) {
+        return parseChoice(node, field, field, allowed);
+    }
+
+    private static String parseChoice(JsonNode node, String field, String displayName, Set<String> allowed) {
+        if (node == null || node.isMissingNode() || !node.hasNonNull(field)) {
             return null;
         }
+        String value = node.path(field).asText();
+        if (!allowed.contains(value)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid " + displayName + ": " + value + ". Valid values: "
+                            + String.join(", ", new TreeSet<>(allowed)) + ".", 400);
+        }
+        return value;
     }
 }

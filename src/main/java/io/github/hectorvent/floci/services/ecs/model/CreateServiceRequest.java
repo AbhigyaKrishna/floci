@@ -14,6 +14,7 @@ public class CreateServiceRequest {
     private String taskDefinition;
     private int desiredCount = 1;
     private LaunchType launchType;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
     private List<EcsLoadBalancer> loadBalancers;
     private NetworkConfiguration networkConfiguration;
     private Map<String, String> tags;
@@ -36,6 +37,11 @@ public class CreateServiceRequest {
 
     public LaunchType getLaunchType() { return launchType; }
     public void setLaunchType(LaunchType launchType) { this.launchType = launchType; }
+
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> capacityProviderStrategy) {
+        this.capacityProviderStrategy = capacityProviderStrategy;
+    }
 
     public List<EcsLoadBalancer> getLoadBalancers() { return loadBalancers; }
     public void setLoadBalancers(List<EcsLoadBalancer> loadBalancers) { this.loadBalancers = loadBalancers; }
@@ -65,4 +71,5 @@ public class CreateServiceRequest {
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
     }
+
 }

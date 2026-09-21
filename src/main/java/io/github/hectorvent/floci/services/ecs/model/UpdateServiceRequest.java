@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -21,6 +22,7 @@ public class UpdateServiceRequest {
     private String availabilityZoneRebalancing;
     private boolean forceNewDeployment;
     private Map<String, Object> serviceConnectConfiguration;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
 
     public String getCluster() { return cluster; }
     public void setCluster(String cluster) { this.cluster = cluster; }
@@ -51,4 +53,10 @@ public class UpdateServiceRequest {
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
     }
+
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> capacityProviderStrategy) {
+        this.capacityProviderStrategy = capacityProviderStrategy;
+    }
+
 }

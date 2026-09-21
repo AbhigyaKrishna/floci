@@ -26,7 +26,12 @@ public class RegisterTaskDefinitionRequest {
     private List<String> requiresCompatibilities;
     private List<Volume> volumes;
     private RuntimePlatform runtimePlatform;
+    private EphemeralStorage ephemeralStorage;
+    private String pidMode;
+    private String ipcMode;
     private Map<String, String> tags;
+    /** Members Floci does not act on, such as proxyConfiguration and placementConstraints. */
+    private Map<String, Object> unparsed;
 
     public String getFamily() { return family; }
     public void setFamily(String family) { this.family = family; }
@@ -62,8 +67,22 @@ public class RegisterTaskDefinitionRequest {
     public RuntimePlatform getRuntimePlatform() { return runtimePlatform; }
     public void setRuntimePlatform(RuntimePlatform runtimePlatform) { this.runtimePlatform = runtimePlatform; }
 
+    public EphemeralStorage getEphemeralStorage() { return ephemeralStorage; }
+    public void setEphemeralStorage(EphemeralStorage ephemeralStorage) {
+        this.ephemeralStorage = ephemeralStorage;
+    }
+
+    public String getPidMode() { return pidMode; }
+    public void setPidMode(String pidMode) { this.pidMode = pidMode; }
+
+    public String getIpcMode() { return ipcMode; }
+    public void setIpcMode(String ipcMode) { this.ipcMode = ipcMode; }
+
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public Map<String, Object> getUnparsed() { return unparsed; }
+    public void setUnparsed(Map<String, Object> unparsed) { this.unparsed = unparsed; }
 
     public boolean isFargate() {
         return requiresCompatibilities != null && requiresCompatibilities.contains("FARGATE");
