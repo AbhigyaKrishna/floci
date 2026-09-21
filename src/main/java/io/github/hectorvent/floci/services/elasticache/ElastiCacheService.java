@@ -596,37 +596,80 @@ public class ElastiCacheService implements ResourceProvider {
      * reachable, the group keeps its metadata and reports available without a container, rather
      * than being failed for a daemon that may appear later. A failure raised while the daemon
      * <em>is</em> reachable is a genuine container problem and fails the group.
+     *
+     * <p>The container work runs outside the group's monitor, as it does on create: a restore
+     * that may pull an image must not hold a delete of the same group behind it. The write-back
+     * takes the monitor and re-reads the record, because a delete taken while the container
+     * started has already removed it.
      */
     private void restoreSingleNodeGroup(ReplicationGroup group) {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         try {
             ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image);
-            if (handle != null) {
-                group.setContainerId(handle.getContainerId());
-                group.setContainerHost(handle.getHost());
-                group.setContainerPort(handle.getPort());
-                proxyManager.startProxy(groupId, group.getAuthMode(), group.getProxyPort(),
-                        handle.getHost(), handle.getPort(),
-                        (username, password) -> validatePassword(groupId, username, password));
-            } else {
-                // Cleared rather than left alone: whatever the record carried describes a
-                // container from the previous process, and nothing must read it as live.
-                group.setContainerId(null);
-                group.setContainerHost(null);
-                group.setContainerPort(0);
-                LOG.warnv("Replication group {0} restored without a backing cache container: no "
-                        + "Docker daemon is reachable. Metadata operations work; connections to "
-                        + "the cache do not until a daemon appears.", groupId);
+            synchronized (lockFor("rg:" + groupId)) {
+                if (restoreTargetLost(groupId)) {
+                    abandonRestoredContainer(groupId, handle);
+                    return;
+                }
+                if (handle != null) {
+                    group.setContainerId(handle.getContainerId());
+                    group.setContainerHost(handle.getHost());
+                    group.setContainerPort(handle.getPort());
+                    proxyManager.startProxy(groupId, group.getAuthMode(), group.getProxyPort(),
+                            handle.getHost(), handle.getPort(),
+                            (username, password) -> validatePassword(groupId, username, password));
+                } else {
+                    // Cleared rather than left alone: whatever the record carried describes a
+                    // container from the previous process, and nothing must read it as live.
+                    group.setContainerId(null);
+                    group.setContainerHost(null);
+                    group.setContainerPort(0);
+                    LOG.warnv("Replication group {0} restored without a backing cache container: no "
+                            + "Docker daemon is reachable. Metadata operations work; connections to "
+                            + "the cache do not until a daemon appears.", groupId);
+                }
+                group.setStatus(ReplicationGroupStatus.AVAILABLE);
+                groups.put(groupId, group);
+                LOG.infov("Restored replication group {0}, endpoint={1}:{2}", groupId,
+                        group.getConfigurationEndpoint().address(),
+                        String.valueOf(group.getProxyPort()));
             }
-            group.setStatus(ReplicationGroupStatus.AVAILABLE);
-            groups.put(groupId, group);
-            LOG.infov("Restored replication group {0}, endpoint={1}:{2}", groupId,
-                    group.getConfigurationEndpoint().address(),
-                    String.valueOf(group.getProxyPort()));
         } catch (RuntimeException e) {
             failSingleNodeRestore(group, e);
         }
+    }
+
+    /**
+     * Whether the record a restore is about to write back is still there to write back to. Callers
+     * must hold the group's monitor: a delete taken while the container work ran removed the record
+     * under that same monitor, and a restore that put its group back afterwards would resurrect a
+     * group the caller was told had been deleted, as {@code available}, with a fresh container
+     * behind it.
+     */
+    private boolean restoreTargetLost(String groupId) {
+        return groups.get(groupId)
+                .map(current -> current.getStatus() == ReplicationGroupStatus.DELETING)
+                .orElse(true);
+    }
+
+    /**
+     * Drops the container a restore started for a group that was deleted while it ran. The proxy
+     * port is deliberately not released: the delete that removed the record released it already,
+     * and releasing it a second time would return a port a later create has since taken to the
+     * pool, letting two groups be handed the same one.
+     */
+    private void abandonRestoredContainer(String groupId, ElastiCacheContainerHandle handle) {
+        if (handle != null) {
+            try {
+                containerManager.stop(handle);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for deleted replication group {0}: {1}",
+                        groupId, e.getMessage());
+            }
+        }
+        LOG.infov("Discarded the restored data plane for replication group {0}: it was deleted "
+                + "while it was being restored", groupId);
     }
 
     /**
@@ -634,33 +677,50 @@ public class ElastiCacheService implements ResourceProvider {
      * the group still exists on the control plane, it just has nothing behind it. Tears down
      * whatever the attempt left running and frees the port, so the next create can use it rather
      * than leaking a reservation nothing serves.
+     *
+     * <p>A group deleted while the failed attempt ran gets the teardown but no write-back and no
+     * port release: reporting {@code create-failed} would put a deleted group back, and the
+     * delete released the port itself.
      */
     private void failSingleNodeRestore(ReplicationGroup group, RuntimeException cause) {
         String groupId = group.getReplicationGroupId();
-        try {
-            proxyManager.stopProxy(groupId);
-        } catch (RuntimeException e) {
-            LOG.warnv("Error stopping proxy for replication group {0}: {1}", groupId, e.getMessage());
+        synchronized (lockFor("rg:" + groupId)) {
+            try {
+                proxyManager.stopProxy(groupId);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping proxy for replication group {0}: {1}", groupId, e.getMessage());
+            }
+            try {
+                containerManager.stopByGroupId(groupId);
+            } catch (RuntimeException e) {
+                LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
+            }
+            if (restoreTargetLost(groupId)) {
+                LOG.warnv(cause, "Failed to restore replication group {0}, which was deleted while "
+                        + "it was being restored", groupId);
+                return;
+            }
+            releaseProxyPort(group.getProxyPort());
+            group.setContainerId(null);
+            group.setContainerHost(null);
+            group.setContainerPort(0);
+            group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
+            group.setConfigurationEndpoint(null);
+            try {
+                groups.put(groupId, group);
+            } catch (RuntimeException persistFailure) {
+                cause.addSuppressed(persistFailure);
+            }
+            LOG.warnv(cause, "Failed to restore replication group {0}", groupId);
         }
-        try {
-            containerManager.stopByGroupId(groupId);
-        } catch (RuntimeException e) {
-            LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
-        }
-        releaseProxyPort(group.getProxyPort());
-        group.setContainerId(null);
-        group.setContainerHost(null);
-        group.setContainerPort(0);
-        group.setStatus(ReplicationGroupStatus.CREATE_FAILED);
-        group.setConfigurationEndpoint(null);
-        try {
-            groups.put(groupId, group);
-        } catch (RuntimeException persistFailure) {
-            cause.addSuppressed(persistFailure);
-        }
-        LOG.warnv(cause, "Failed to restore replication group {0}", groupId);
     }
 
+    /**
+     * Restarts the containers, cluster formation and proxies behind a cluster-mode group. Like
+     * {@link #restoreSingleNodeGroup}, the container work runs outside the group's monitor and
+     * only the write-back takes it, so a delete that ran in the meantime is seen before the
+     * group is put back.
+     */
     private void restoreClusterModeGroup(ReplicationGroup group) {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
@@ -692,24 +752,57 @@ public class ElastiCacheService implements ResourceProvider {
 
             clusterFormation.form(groupId, formationNodes, group.getNumNodeGroups());
 
-            for (int i = 0; i < nodes.size(); i++) {
-                ClusterNode node = nodes.get(i);
-                ElastiCacheContainerHandle handle = handles.get(i);
-                proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
-                        handle.getHost(), handle.getPort(),
-                        (username, password) -> validatePassword(groupId, username, password));
-                startedProxyKeys.add(node.getMemberClusterId());
-            }
+            synchronized (lockFor("rg:" + groupId)) {
+                if (restoreTargetLost(groupId)) {
+                    // No ports: the delete that removed the record released every one of them.
+                    rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId,
+                            List.of());
+                    LOG.infov("Discarded the restored data plane for cluster-mode replication group "
+                            + "{0}: it was deleted while it was being restored", groupId);
+                    return;
+                }
+                for (int i = 0; i < nodes.size(); i++) {
+                    ClusterNode node = nodes.get(i);
+                    ElastiCacheContainerHandle handle = handles.get(i);
+                    proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
+                            handle.getHost(), handle.getPort(),
+                            (username, password) -> validatePassword(groupId, username, password));
+                    startedProxyKeys.add(node.getMemberClusterId());
+                }
 
-            group.setConfigurationEndpoint(new Endpoint(endpointHost, nodes.getFirst().getProxyPort()));
-            group.setStatus(ReplicationGroupStatus.AVAILABLE);
-            groups.put(groupId, group);
-            LOG.infov("Restored cluster-mode replication group {0}: {1} node(s), configuration endpoint={2}:{3}",
-                    groupId, String.valueOf(nodes.size()), endpointHost,
-                    String.valueOf(group.getConfigurationEndpoint().port()));
+                group.setConfigurationEndpoint(new Endpoint(endpointHost, nodes.getFirst().getProxyPort()));
+                group.setStatus(ReplicationGroupStatus.AVAILABLE);
+                groups.put(groupId, group);
+                LOG.infov("Restored cluster-mode replication group {0}: {1} node(s), configuration endpoint={2}:{3}",
+                        groupId, String.valueOf(nodes.size()), endpointHost,
+                        String.valueOf(group.getConfigurationEndpoint().port()));
+            }
         } catch (RuntimeException e) {
-            rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId, reservedPorts);
-            for (ClusterNode node : nodes) {
+            failClusterModeRestore(group, startedProxyKeys, handles, inFlightMemberId, reservedPorts, e);
+        }
+    }
+
+    /**
+     * Reports a cluster-mode group whose data plane could not be brought back, mirroring
+     * {@link #failSingleNodeRestore}: the record stays, reporting {@code create-failed} with no
+     * endpoint, unless a delete removed it while the attempt ran. In that case the rollback still
+     * runs but the ports are left to the delete that released them, and nothing is written back.
+     */
+    private void failClusterModeRestore(ReplicationGroup group, List<String> startedProxyKeys,
+                                        List<ElastiCacheContainerHandle> handles,
+                                        String inFlightMemberId, Collection<Integer> reservedPorts,
+                                        RuntimeException cause) {
+        String groupId = group.getReplicationGroupId();
+        synchronized (lockFor("rg:" + groupId)) {
+            boolean lost = restoreTargetLost(groupId);
+            rollbackClusterModeGroup(groupId, startedProxyKeys, handles, inFlightMemberId,
+                    lost ? List.of() : reservedPorts);
+            if (lost) {
+                LOG.warnv(cause, "Failed to restore cluster-mode replication group {0}, which was "
+                        + "deleted while it was being restored", groupId);
+                return;
+            }
+            for (ClusterNode node : group.getClusterNodes()) {
                 node.setContainerId(null);
                 node.setContainerHost(null);
                 node.setContainerPort(0);
@@ -719,9 +812,9 @@ public class ElastiCacheService implements ResourceProvider {
             try {
                 groups.put(groupId, group);
             } catch (RuntimeException persistFailure) {
-                e.addSuppressed(persistFailure);
+                cause.addSuppressed(persistFailure);
             }
-            LOG.warnv(e, "Failed to restore cluster-mode replication group {0}", groupId);
+            LOG.warnv(cause, "Failed to restore cluster-mode replication group {0}", groupId);
         }
     }
 

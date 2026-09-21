@@ -192,6 +192,32 @@ class ElastiCacheMemcachedServiceTest {
                 "A cluster whose container is gone must not advertise an endpoint");
     }
 
+    @Test
+    void restoreDoesNotResurrectAClusterDeletedWhileItWasRestoring() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
+        when(beforeRestart.tryStart(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 32770));
+        serviceWith(storageFactory, beforeRestart).createCacheCluster("my-cluster");
+
+        ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
+        ElastiCacheMemcachedService restartedService = serviceWith(storageFactory, restarted);
+        ElastiCacheContainerHandle restoredHandle =
+                new ElastiCacheContainerHandle("cid2", "my-cluster", "localhost", 32771);
+        // The delete lands in the window the cluster's monitor closes: the container is up, the
+        // record has not been written back yet.
+        when(restarted.tryStart(anyString(), anyString())).thenAnswer(inv -> {
+            restartedService.deleteCacheCluster("my-cluster");
+            return restoredHandle;
+        });
+
+        restartedService.restorePersistedRuntime().join();
+
+        assertThrows(AwsException.class, () -> restartedService.getCacheCluster("my-cluster"),
+                "A cluster deleted while it was restoring must stay deleted");
+        verify(restarted).stop(restoredHandle);
+    }
+
     private static StorageFactory sharedStorageFactory() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         Map<String, Object> backends = new ConcurrentHashMap<>();

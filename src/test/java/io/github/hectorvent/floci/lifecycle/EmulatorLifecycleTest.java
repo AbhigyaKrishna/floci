@@ -39,6 +39,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -207,15 +208,15 @@ class EmulatorLifecycleTest {
         stubStorageConfig();
         when(elastiCacheServiceConfig.enabled()).thenReturn(true);
         when(elastiCacheService.restorePersistedRuntime())
-                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+                .thenReturn(CompletableFuture.completedFuture(null));
         when(elastiCacheMemcachedService.restorePersistedRuntime())
-                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+                .thenReturn(CompletableFuture.completedFuture(null));
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(storageFactory, elastiCacheService, elastiCacheMemcachedService);
+        InOrder inOrder = Mockito.inOrder(storageFactory, elastiCacheService, elastiCacheMemcachedService);
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elastiCacheService).restorePersistedRuntime();
         inOrder.verify(elastiCacheMemcachedService).restorePersistedRuntime();

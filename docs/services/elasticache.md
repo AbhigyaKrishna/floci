@@ -83,6 +83,12 @@ backend on a host port Docker picks per run, so a restored cluster's `Configurat
 can differ from the one it had before the restart. Replication groups keep their port: it is a
 proxy port Floci owns and re-reserves.
 
+A delete that arrives while a record is still `creating` wins. The restore takes the same
+per-record monitor `DeleteReplicationGroup` and `DeleteCacheCluster` take, and skips its write-back
+when the record is gone, so a group or cluster deleted in the first seconds after boot stays
+deleted rather than coming back `available`. Any container the abandoned restore had already
+started is stopped.
+
 `DescribeReplicationGroups` reports the topology honestly: `ClusterEnabled`, one `NodeGroup` per
 shard with its `Slots`, `NodeGroupMembers`, and `MemberClusters`. Each member also answers
 `DescribeCacheClusters` (as on AWS), which is what terraform-provider-aws reads node type, engine

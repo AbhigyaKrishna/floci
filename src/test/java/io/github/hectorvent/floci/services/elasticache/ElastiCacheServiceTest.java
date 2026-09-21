@@ -574,6 +574,39 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void restoreDoesNotResurrectAGroupDeletedWhileItWasRestoring() {
+        StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+        ElastiCacheContainerHandle restoredHandle =
+                new ElastiCacheContainerHandle("cid-grp-restored", "grp", "localhost", 6379);
+        // The delete lands in the window the group's monitor closes: the container is up, the
+        // record has not been written back yet.
+        when(restartedContainers.tryStart(eq("grp"), anyString())).thenAnswer(inv -> {
+            restarted.deleteReplicationGroup("grp");
+            // Takes the port that delete just freed, so a restore that released it a second
+            // time would hand the same port out twice.
+            restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+            return restoredHandle;
+        });
+
+        restarted.restorePersistedRuntime().join();
+
+        assertThrows(AwsException.class, () -> restarted.getReplicationGroup("grp"),
+                "A group deleted while it was restoring must stay deleted");
+        verify(restartedProxies, never()).startProxy(eq("grp"), any(), anyInt(), anyString(), anyInt(), any());
+        verify(restartedContainers).stop(restoredHandle);
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp3", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16380, next.getProxyPort(),
+                "The abandoned restore must leave grp2 holding the port the delete released");
+    }
+
+    @Test
     void restorePersistedRuntimeSkipsGroupsBeingDeleted() {
         StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
         ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
