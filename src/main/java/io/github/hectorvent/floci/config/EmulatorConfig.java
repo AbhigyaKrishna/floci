@@ -1765,6 +1765,13 @@ public interface EmulatorConfig {
          * compatibility with Step Functions Local.
          */
         Optional<String> mockConfigFile();
+
+        /**
+         * Ceiling, in seconds, on a Wait state pause and a Retry backoff. AWS allows waits far longer
+         * than this, but the emulator caps them to keep runs fast. Raise it to exercise longer waits.
+         */
+        @WithDefault("30")
+        int maxWaitSeconds();
     }
 
     interface SwfServiceConfig {

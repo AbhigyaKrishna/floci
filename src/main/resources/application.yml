@@ -461,6 +461,7 @@ floci:
       enabled: true
       allow-plaintext-http: false
       mock-config-file: ${SFN_MOCK_CONFIG:}
+      max-wait-seconds: 30
     swf:
       enabled: true
       timeout-sweep-enabled: true
