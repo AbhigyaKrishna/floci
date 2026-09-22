@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs.exec;
 
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -12,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The token gate in front of an interactive shell. A session is claimed once, by the exact token
- * that was minted for it, and never by a replay of that token.
+ * that was minted for it, never by a replay of that token, and never once it has outlived its TTL.
  */
 class EcsExecSessionRegistryTest {
 
@@ -21,7 +22,8 @@ class EcsExecSessionRegistryTest {
     private static final String CLUSTER_ARN =
             "arn:aws:ecs:us-east-1:000000000000:cluster/my-cluster";
 
-    private final EcsExecSessionRegistry registry = new EcsExecSessionRegistry();
+    private final MutableClock clock = new MutableClock();
+    private final EcsExecSessionRegistry registry = new EcsExecSessionRegistry(clock);
 
     @Test
     void claimWithTheMintedToken() {
@@ -91,6 +93,37 @@ class EcsExecSessionRegistryTest {
         registry.clear();
 
         assertFalse(registry.find(created.sessionId()).isPresent());
+    }
+
+    @Test
+    void claim_sessionPastItsTtl_isRejected() {
+        ExecSession created = mint();
+
+        clock.advance(EcsExecSessionRegistry.SESSION_TTL.plusSeconds(1));
+
+        assertTrue(registry.claim(created.sessionId(), created.tokenValue()).isEmpty(),
+                "a session nobody connected to must stop being claimable once it expires");
+        assertTrue(registry.find(created.sessionId()).isEmpty(),
+                "an expired session must be dropped, not left holding its token");
+    }
+
+    @Test
+    void claim_sessionWithinItsTtl_stillWorks() {
+        ExecSession created = mint();
+
+        clock.advance(EcsExecSessionRegistry.SESSION_TTL.minusSeconds(1));
+
+        assertTrue(registry.claim(created.sessionId(), created.tokenValue()).isPresent());
+    }
+
+    @Test
+    void find_sessionPastItsTtl_isEmpty() {
+        ExecSession created = mint();
+
+        clock.advance(EcsExecSessionRegistry.SESSION_TTL.plusSeconds(1));
+
+        assertTrue(registry.find(created.sessionId()).isEmpty(),
+                "the channel upgrade must refuse an expired session instead of opening a channel");
     }
 
     private ExecSession mint() {

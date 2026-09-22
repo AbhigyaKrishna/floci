@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.ecs.exec;
 
 import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -35,6 +37,18 @@ public class EcsExecSessionRegistry implements Resettable {
 
     private final Map<String, ExecSession> sessions = new ConcurrentHashMap<>();
 
+    private final Clock clock;
+
+    @Inject
+    public EcsExecSessionRegistry(Clock clock) {
+        this.clock = clock;
+    }
+
+    /** With the system clock, for callers that assemble the registry without CDI. */
+    public EcsExecSessionRegistry() {
+        this(Clock.systemUTC());
+    }
+
     /** Mints a session for a container, returning it with the token the client must present. */
     public ExecSession create(String taskArn, String clusterArn, String containerName,
                               String containerArn, String runtimeId, List<String> command,
@@ -46,7 +60,7 @@ public class EcsExecSessionRegistry implements Resettable {
         ExecSession session = new ExecSession(sessionId,
                 Base64.getUrlEncoder().withoutPadding().encodeToString(token),
                 taskArn, clusterArn, containerName, containerArn, runtimeId, command, interactive,
-                Instant.now());
+                clock.instant());
         sessions.put(sessionId, session);
         return session;
     }
@@ -54,10 +68,11 @@ public class EcsExecSessionRegistry implements Resettable {
     /**
      * Claims a session for a connecting client. The session is removed, so a replayed token cannot
      * open a second channel into the container. The token is the only gate in front of an
-     * interactive shell, so it is compared in constant time.
+     * interactive shell, so it is compared in constant time, and only for a session that is still
+     * within its TTL.
      */
     public Optional<ExecSession> claim(String sessionId, String tokenValue) {
-        ExecSession session = sessions.get(sessionId);
+        ExecSession session = liveSession(sessionId);
         if (session == null) {
             return Optional.empty();
         }
@@ -70,13 +85,37 @@ public class EcsExecSessionRegistry implements Resettable {
         return sessions.remove(sessionId, session) ? Optional.of(session) : Optional.empty();
     }
 
+    /** The session behind a data channel, or empty once it has expired or been claimed. */
     public Optional<ExecSession> find(String sessionId) {
-        return Optional.ofNullable(sessions.get(sessionId));
+        return Optional.ofNullable(liveSession(sessionId));
+    }
+
+    /**
+     * The session under {@code sessionId}, or null if there is none or it has outlived
+     * {@link #SESSION_TTL}. An expired session is dropped here rather than waiting for the next
+     * {@code create()}: nothing else sweeps the map, so a session nobody connects to would
+     * otherwise stay claimable, token and all, for as long as the emulator runs.
+     */
+    private ExecSession liveSession(String sessionId) {
+        ExecSession session = sessions.get(sessionId);
+        if (session == null) {
+            return null;
+        }
+        if (session.createdAt().isBefore(cutoff())) {
+            sessions.remove(sessionId, session);
+            LOG.debugv("Dropped the expired ECS Exec session {0}", sessionId);
+            return null;
+        }
+        return session;
     }
 
     private void expireStaleSessions() {
-        Instant cutoff = Instant.now().minus(SESSION_TTL);
+        Instant cutoff = cutoff();
         sessions.values().removeIf(session -> session.createdAt().isBefore(cutoff));
+    }
+
+    private Instant cutoff() {
+        return clock.instant().minus(SESSION_TTL);
     }
 
     @Override
