@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -51,14 +53,17 @@ public class EcsExecSessionRegistry implements Resettable {
 
     /**
      * Claims a session for a connecting client. The session is removed, so a replayed token cannot
-     * open a second channel into the container.
+     * open a second channel into the container. The token is the only gate in front of an
+     * interactive shell, so it is compared in constant time.
      */
     public Optional<ExecSession> claim(String sessionId, String tokenValue) {
         ExecSession session = sessions.get(sessionId);
         if (session == null) {
             return Optional.empty();
         }
-        if (!session.tokenValue().equals(tokenValue)) {
+        if (tokenValue == null || !MessageDigest.isEqual(
+                session.tokenValue().getBytes(StandardCharsets.UTF_8),
+                tokenValue.getBytes(StandardCharsets.UTF_8))) {
             LOG.warnv("Rejected an ECS Exec channel for session {0}: the token does not match", sessionId);
             return Optional.empty();
         }
