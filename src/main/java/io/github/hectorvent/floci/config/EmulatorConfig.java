@@ -1699,6 +1699,14 @@ public interface EmulatorConfig {
     interface KinesisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Lifetime of a ListShards NextToken, in milliseconds. AWS expires these tokens 300000
+         * milliseconds after they are issued; lowering it lets tests exercise the expiry path
+         * without waiting.
+         */
+        @WithDefault("300000")
+        long listShardsNextTokenTtlMillis();
     }
 
     interface FirehoseServiceConfig {

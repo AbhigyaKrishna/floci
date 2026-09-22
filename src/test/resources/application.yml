@@ -235,6 +235,7 @@ floci:
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+      list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
       tick-interval-seconds: 10
