@@ -393,6 +393,7 @@ public class EksClusterManager {
 
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
+        configurePodIdentityRelay(cluster, containerId);
         attachClusterLogs(cluster);
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
@@ -449,6 +450,7 @@ public class EksClusterManager {
         cluster.setHostPort(hostPort);
         applyEndpoints(cluster, containerName, hostPort, info);
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
+        configurePodIdentityRelay(cluster, info.containerId());
         attachClusterLogsFromNow(cluster);
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
@@ -1313,6 +1315,39 @@ public class EksClusterManager {
             LOG.infov("Configured link-local IMDS endpoint for EKS cluster {0}", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not configure link-local IMDS endpoint for EKS cluster {0}: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    void configurePodIdentityRelay(Cluster cluster, String containerId) {
+        if (!config.services().eks().podIdentityWebhook() || !config.tls().enabled()) {
+            return;
+        }
+        try {
+            ContainerExecResult install = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.installCommand(), 180);
+            if (install.exitCode() != 0) {
+                LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
+                        cluster.getName(), install.summary());
+                return;
+            }
+
+            String flociHost = dockerHostResolver.resolve();
+            int flociPort = config.port();
+
+            ContainerExecResult start = execInContainerForResult(containerId,
+                    Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
+            if (start.exitCode() != 0) {
+                LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
+                        cluster.getName(), start.summary());
+                return;
+            }
+
+            configurePodNetworkRouting(cluster, containerId, List.of(EksPodNetworkRouting.POD_IDENTITY_ENDPOINT));
+
+            LOG.infov("Configured link-local Pod Identity relay for EKS cluster {0}", cluster.getName());
+        } catch (Exception e) {
+            LOG.warnv("Could not configure link-local Pod Identity relay for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
         }
     }
