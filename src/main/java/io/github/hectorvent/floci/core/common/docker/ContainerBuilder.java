@@ -132,6 +132,7 @@ public class ContainerBuilder {
         private boolean readonlyRootfs;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPortBindings = new ArrayList<>();
+        private final Map<Integer, String> portBindingHostIps = new HashMap<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
@@ -260,6 +261,21 @@ public class ContainerBuilder {
         public Builder withPortBinding(int containerPort, int hostPort) {
             this.portBindings.put(containerPort, hostPort);
             this.exposedPorts.add(containerPort);
+            return this;
+        }
+
+        /**
+         * Adds a port binding to a specific host port on a specific host interface.
+         *
+         * <p>Use this for a port whose reachability is an operator decision rather than a fixed
+         * property of the container: the caller passes the configured address through, and a null
+         * or blank one falls back to Docker's own default of publishing on every interface.
+         */
+        public Builder withPortBinding(int containerPort, int hostPort, String hostIp) {
+            withPortBinding(containerPort, hostPort);
+            if (hostIp != null && !hostIp.isBlank()) {
+                this.portBindingHostIps.put(containerPort, hostIp.strip());
+            }
             return this;
         }
 
@@ -657,7 +673,8 @@ public class ContainerBuilder {
                     nanoCpus,
                     cpuShares,
                     readonlyRootfs,
-                    List.copyOf(linkLocalIps)
+                    List.copyOf(linkLocalIps),
+                    Map.copyOf(portBindingHostIps)
             );
         }
     }

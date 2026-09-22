@@ -63,6 +63,9 @@ public class ContainerLifecycleManager {
 
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
 
+    /** Host interface a port marked loopback-only publishes on. */
+    private static final String LOOPBACK_HOST_IP = "127.0.0.1";
+
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
@@ -999,10 +1002,7 @@ public class ContainerLifecycleManager {
                     hostPort = portAllocator.allocateAny();
                 }
 
-                Ports.Binding binding = spec.loopbackPortBindings().contains(containerPort)
-                        ? Ports.Binding.bindIpAndPort("127.0.0.1", hostPort)
-                        : Ports.Binding.bindPort(hostPort);
-                ports.bind(ExposedPort.tcp(containerPort), binding);
+                ports.bind(ExposedPort.tcp(containerPort), bindingFor(spec, containerPort, hostPort));
                 LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);
@@ -1056,6 +1056,27 @@ public class ContainerLifecycleManager {
         }
 
         return hostConfig;
+    }
+
+    /**
+     * The host interface a published port binds to.
+     *
+     * <p>An explicit address from {@code portBindingHostIps} wins, so a caller that reads the
+     * address from configuration keeps control of it. {@code loopbackPortBindings} is the fixed
+     * form of the same decision, for a port that is an implementation detail and must never leave
+     * the host. A port in neither binds every interface, which is Docker's own default and what
+     * every caller that does not ask has always got.
+     */
+    private static Ports.Binding bindingFor(ContainerSpec spec, int containerPort, int hostPort) {
+        String hostIp = spec.portBindingHostIps() == null
+                ? null
+                : spec.portBindingHostIps().get(containerPort);
+        if (hostIp != null && !hostIp.isBlank()) {
+            return Ports.Binding.bindIpAndPort(hostIp, hostPort);
+        }
+        return spec.loopbackPortBindings().contains(containerPort)
+                ? Ports.Binding.bindIpAndPort(LOOPBACK_HOST_IP, hostPort)
+                : Ports.Binding.bindPort(hostPort);
     }
 
     /**
