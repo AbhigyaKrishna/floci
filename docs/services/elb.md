@@ -174,3 +174,28 @@ aws elbv2 delete-target-group \
 ## Listener Ports
 
 Listener sockets bind on the Floci host. Expose any listener ports you need in Docker Compose when Floci itself runs in a container, similar to RDS and ElastiCache proxy ports.
+
+### Two load balancers on the same port
+
+In AWS each load balancer has its own DNS name and addresses, so two of them can both listen on
+port 80 and never interact: the network picks the load balancer, and a `host-header` rule only picks
+a rule inside one listener. Floci serves every load balancer from a single socket per port, so the
+Host header has to carry both decisions. A template that puts a public and an internal load balancer
+on port 80 is correct for AWS and stays accepted here, but the request has to name the one it wants.
+
+A listener is chosen in this order:
+
+1. The Host header equals a load balancer's own DNS name (`{name}-{id}.elb.localhost.floci.io`).
+2. Exactly one listener on the port has a rule whose `host-header` condition matches the Host
+   header. Wildcards (`*`, `?`) apply, matching is case-insensitive, and the port is ignored, the
+   same as the rule evaluation that follows.
+3. Only one listener is on the port, in which case it answers any Host header.
+
+If none of those resolve, and in particular when two load balancers declare the same hostname or
+neither declares any, the request answers `502 No listener for host`. Floci logs a warning naming
+both load balancers the first time a second one takes a port, because the targets behind them stay
+healthy and nothing else reports the collision.
+
+Giving each load balancer a `host-header` rule for the hostname it serves is usually enough, and it
+is the same configuration AWS needs. Moving one load balancer to a different listener port also
+works, at the cost of a Floci-only difference from the deployed template.
