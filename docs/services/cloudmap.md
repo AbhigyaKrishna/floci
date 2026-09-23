@@ -139,5 +139,5 @@ print(found["Instances"])
 - Route 53 hosted zone / record set creation.
 - SRV, AAAA and CNAME records: `AWS_INSTANCE_PORT` is stored and returned, but only A records are served.
 - Route 53 health checks backing `HealthCheckConfig` (custom health status is stored, not actively probed).
-- `AWS_INIT_HEALTH_STATUS` and `AWS_EC2_INSTANCE_ID` on `RegisterInstance`: an instance registers `HEALTHY`.
+- `AWS_INIT_HEALTH_STATUS` and `AWS_EC2_INSTANCE_ID` on `RegisterInstance`. Every instance registers `HEALTHY`, which is AWS's own initial status when `AWS_INIT_HEALTH_STATUS` is absent, so only a caller that explicitly asks for `UNHEALTHY` sees a difference.
 - Cross-region namespace and service discovery. A DNS query carries no region, so a name resolves through whichever namespace copy holds instances.

@@ -484,9 +484,11 @@ Known differences from AWS:
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
 - `EC2_INSTANCE_ID` is not recorded. Every Floci task runs as a container rather than on a
   registered EC2 host, which is the Fargate case on AWS, where the attribute is also absent.
-- An instance registers `HEALTHY` rather than `UNHEALTHY`-until-checked: Floci does not feed
-  container health checks into Cloud Map, and a task that never turns healthy would never
-  resolve.
+- An instance's health status never moves. AWS registers a task `UNHEALTHY` and promotes it to
+  `HEALTHY` once the container health check passes, for a service discovery service that
+  declares `HealthCheckCustomConfig`. Floci feeds no container health into Cloud Map, so a task
+  registers `HEALTHY`, which is Cloud Map's own default for a `RegisterInstance` that names no
+  `AWS_INIT_HEALTH_STATUS`, and stays there until it is deregistered.
 
 #### Unknown services
 
