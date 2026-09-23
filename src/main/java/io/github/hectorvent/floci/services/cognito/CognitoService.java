@@ -331,11 +331,22 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * Fills in AWS's per-field password policy defaults for a pool created with a
-     * {@code PasswordPolicy} that has some fields unset: MinimumLength 8 (AWS's documented
-     * complex-password recommendation; the field itself only documents a minimum of 6), the four
-     * character-class requirements enabled, and TemporaryPasswordValidityDays 7 (the one default
-     * the API reference states explicitly). "If you don't provide a value for an attribute,
-     * Amazon Cognito sets it to its default value" (CreateUserPool).
+     * {@code PasswordPolicy} that has some fields unset: TemporaryPasswordValidityDays 7 (the one
+     * default the API reference states explicitly) and MinimumLength 8 (AWS's documented
+     * complex-password recommendation; the field itself only documents a minimum of 6).
+     * "If you don't provide a value for an attribute, Amazon Cognito sets it to its default
+     * value" (CreateUserPool).
+     *
+     * <p>RequireUppercase, RequireLowercase, RequireNumbers and RequireSymbols are deliberately
+     * left alone. The API reference documents no default for any of them, and they are unboxed
+     * booleans in the Cognito model, so a client that wants one off cannot say so on the wire:
+     * aws-sdk-go-v2 emits each under {@code if v.RequireLowercase != false}. Absence therefore
+     * means "not required", which is what the live service reports back - the Terraform provider
+     * asserts require_numbers and require_uppercase read as false immediately after a create
+     * that set them to false. Defaulting them to enabled made every Terraform plan after a
+     * create show spurious drift, and over-enforced the policy on SignUp and
+     * AdminSetUserPassword. The all-enabled policy is the console's "Cognito defaults" mode,
+     * not an API default.
      *
      * <p>Deliberately does not fabricate a {@code PasswordPolicy} for a pool that supplies none
      * at all — every other test and fixture in this codebase creates pools that way, relying on
@@ -355,10 +366,6 @@ public class CognitoService implements ResourceProvider {
         Map<String, Object> normalized = new HashMap<>(policies);
         Map<String, Object> passwordPolicy = new HashMap<>((Map<String, Object>) raw);
         passwordPolicy.putIfAbsent("MinimumLength", 8);
-        passwordPolicy.putIfAbsent("RequireUppercase", true);
-        passwordPolicy.putIfAbsent("RequireLowercase", true);
-        passwordPolicy.putIfAbsent("RequireNumbers", true);
-        passwordPolicy.putIfAbsent("RequireSymbols", true);
         passwordPolicy.putIfAbsent("TemporaryPasswordValidityDays", 7);
         normalized.put("PasswordPolicy", passwordPolicy);
         pool.setPolicies(normalized);
