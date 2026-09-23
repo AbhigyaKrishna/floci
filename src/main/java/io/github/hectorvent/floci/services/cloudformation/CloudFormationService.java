@@ -1085,10 +1085,38 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── ListStacks ────────────────────────────────────────────────────────────
 
+    /**
+     * Summaries for the region's stacks, the ones still within the deleted-stack retention window
+     * included. AWS keeps a deleted stack in ListStacks as {@code DELETE_COMPLETE} long after
+     * DescribeStacks has stopped answering for it by name, which is how a client reconciles what
+     * it deployed against what is left. A name reused after a delete lists twice, once per stack
+     * id, as it does on AWS.
+     *
+     * <p>Reduced by stack id, because a stack being deleted is briefly in both maps: it is
+     * retained before it is removed from the live one, so that it is never in neither.
+     *
+     * <p>The maps are read one after the other, the live one first and in full, rather than as one
+     * concatenated pipeline. A delete retains before it removes, so reading in that order leaves a
+     * stack mid-handover in at least one of the two views. Building both views up front breaks
+     * that: a {@link ConcurrentHashMap} view reflects the table at some point at or since its own
+     * creation and is not guaranteed to reflect a modification made after it, so a retained view
+     * created before the retain need never show the stack, while a live view created after it can
+     * already miss it. Traversing the retained view second does not rescue this, because it is
+     * creation and not traversal that bounds the guarantee.
+     */
     public List<Stack> listStacks(String region) {
         String accountId = currentAccount();
-        return stacks.values().stream()
+        Instant current = now();
+        Map<String, Stack> byStackId = new LinkedHashMap<>();
+        stacks.values().stream()
                 .filter(s -> accountId.equals(ownerAccount(s)) && region.equals(s.getRegion()))
+                .forEach(s -> byStackId.putIfAbsent(s.getStackId(), s));
+        deletedStacks.values().stream()
+                .filter(entry -> !entry.isExpired(current))
+                .map(DeletedStackEntry::stack)
+                .filter(s -> accountId.equals(ownerAccount(s)) && region.equals(s.getRegion()))
+                .forEach(s -> byStackId.putIfAbsent(s.getStackId(), s));
+        return byStackId.values().stream()
                 .sorted(Comparator.comparing(Stack::getCreationTime))
                 .toList();
     }
@@ -2062,15 +2090,24 @@ public class CloudFormationService implements ResourceProvider {
                 throw new IllegalStateException(reason);
             }
 
+            // Before the status, never after. Status is the volatile publishing write, so a reader
+            // that observes DELETE_COMPLETE is guaranteed to observe every write that preceded it.
+            // Assigned afterwards, a concurrent DescribeStacks can report the terminal status with
+            // no DeletionTime at all.
+            stack.setDeletionTime(now());
             stack.setStatus("DELETE_COMPLETE");
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
-            stacks.remove(stackKey(ownerAccount(stack), stack.getStackName(), region));
-            unpersistStack(ownerAccount(stack), stack.getStackName(), region);
+            // Retained before it leaves the live map, never after: the other order leaves a window
+            // in which the stack is in neither, and a ListStacks landing there loses it entirely.
+            // Overlapping instead is harmless, since both maps hold this same Stack and listStacks
+            // reduces by stack id.
             deletedStacks.put(stack.getStackId(), new DeletedStackEntry(
                     stack,
                     now().plusSeconds(config.services().cloudformation().deletedStackRetentionSeconds())));
+            stacks.remove(stackKey(ownerAccount(stack), stack.getStackName(), region));
+            unpersistStack(ownerAccount(stack), stack.getStackName(), region);
             LOG.infov("Stack {0} deleted", stack.getStackName());
 
         } catch (Exception e) {
