@@ -269,6 +269,9 @@ public class SesService {
         if (additionalHeaders != null && !additionalHeaders.isEmpty()) {
             email.setHeaders(additionalHeaders);
         }
+        email.setEmailTags(emailTags);
+        email.setInsights(SesMessageInsights.build(envelope,
+                SesRecipientEvents.classify(envelope, suppressedReasons, rejected), email.getSentAt()));
         if (rejected) {
             email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
         }
@@ -381,6 +384,16 @@ public class SesService {
                 : firstNonBlank(headers.returnPath(), returnPath, effectiveSource);
         SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         email.setReturnPath(effectiveReturnPath);
+        // The MIME subject is already parsed for the published events; store it too so
+        // GetMessageInsights reports it for a raw send as it does for a simple one. The parser
+        // yields "" for a missing header, and an absent subject must stay absent.
+        email.setSubject(firstNonBlank(headers.subject()));
+        // A rejected message publishes only the tags that came with the request, so the stored
+        // record keeps the same set: tags read off its headers must not resurface through insights.
+        email.setEmailTags(rejected ? requestTags(emailTags) : effectiveTags);
+        email.setInsights(SesMessageInsights.build(effectiveDestinations,
+                SesRecipientEvents.classify(effectiveDestinations, suppressedReasons, rejected),
+                email.getSentAt()));
         if (rejected) {
             email.discardContent(SesRecipientEvents.CONTENT_REJECT_REASON);
         }
@@ -699,6 +712,9 @@ public class SesService {
                 List.of(emailAddress), List.of(), List.of(), List.of(),
                 template.getTemplateSubject(), null, renderedHtml);
         email.setReturnPath(template.getFromEmailAddress());
+        email.setInsights(SesMessageInsights.build(List.of(emailAddress),
+                SesRecipientEvents.classify(List.of(emailAddress), Map.of(), false),
+                email.getSentAt()));
         sentEmailService.record(region, messageId, email);
         smtpRelay.relay(SmtpRelay.RelayMessage.builder(template.getFromEmailAddress())
                 .returnPath(template.getFromEmailAddress())
