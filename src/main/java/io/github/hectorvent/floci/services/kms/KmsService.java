@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.kms.keytype.KmsKeyType;
 import io.github.hectorvent.floci.services.kms.keytype.KmsKeyTypes;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsGrant;
@@ -866,7 +867,7 @@ public class KmsService implements ResourceProvider {
         KmsKey key = resolveKey(keyId, region);
         requireExternalOrigin(key);
         requireNotPendingDeletion(key);
-        KmsKeyImport.validateWrappingAlgorithm(wrappingAlgorithm);
+        KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm);
 
         KmsKeyImport.WrappingKeyPair wrappingKeyPair = KmsKeyImport.generateWrappingKeyPair(wrappingKeySpec);
         KmsImportParameters parameters = new KmsImportParameters();
@@ -903,11 +904,12 @@ public class KmsService implements ResourceProvider {
 
         byte[] material = KmsKeyImport.unwrap(parameters.getWrappingPrivateKeyEncoded(),
                 parameters.getWrappingAlgorithm(), encryptedKeyMaterial);
-        validateMaterialLength(key, material);
         String keyMaterialId = keyMaterialId(key.getKeyId(), material);
         requireSameMaterialAsFirstImport(key, keyMaterialId);
 
-        key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
+        KmsKeyType keyType = keyTypes.of(key.getKeySpec());
+        keyType.importKeyMaterial(key, material);
+
         if (KmsKeySpec.SYMMETRIC_DEFAULT == key.getKeySpec()) {
             installImportedBackingKey(key, keyMaterialId, material);
         }
@@ -1081,15 +1083,6 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private static void validateMaterialLength(KmsKey key, byte[] material) {
-        int expected = key.getKeySpec().materialByteLength();
-        if (material.length != expected) {
-            throw new AwsException("IncorrectKeyMaterialException",
-                    "Key material for key spec " + key.getKeySpec() + " must be " + expected
-                            + " bytes but was " + material.length + " bytes.", 400);
-        }
-    }
-
     private static void requireSameMaterialAsFirstImport(KmsKey key, String keyMaterialId) {
         if (key.getKeyMaterialId() != null && !key.getKeyMaterialId().equals(keyMaterialId)) {
             throw new AwsException("IncorrectKeyMaterialException",
@@ -1129,14 +1122,15 @@ public class KmsService implements ResourceProvider {
     }
 
     /**
-     * Imported material here is a raw byte string, which covers SYMMETRIC_DEFAULT and the HMAC
-     * specs. Real KMS also imports asymmetric material as a DER key pair; refusing it outright
-     * beats accepting a key that could never sign or decrypt anything.
+     * Allows imports for symmetric, HMAC and RSA key specs. Other key specs are not supported.
      */
     private static String requireImportableSpec(KmsKeySpec spec) {
-        if (spec != KmsKeySpec.SYMMETRIC_DEFAULT && spec.getKeyType() != KmsKeySpec.KeyType.HMAC) {
+        if (spec != KmsKeySpec.SYMMETRIC_DEFAULT
+                && spec.getKeyType() != KmsKeySpec.KeyType.HMAC
+                && spec.getKeyType() != KmsKeySpec.KeyType.RSA) {
+
             throw new AwsException("UnsupportedOperationException",
-                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT and HMAC key specs, not "
+                    "Origin EXTERNAL is only supported for SYMMETRIC_DEFAULT, HMAC and RSA key specs, not "
                             + spec + ".", 400);
         }
         return EXTERNAL_ORIGIN;
