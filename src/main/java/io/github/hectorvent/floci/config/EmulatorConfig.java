@@ -2314,6 +2314,21 @@ public interface EmulatorConfig {
         int port();
 
         /**
+         * Host interface {@link #port()} is published on.
+         * Env: {@code FLOCI_SERVICES_UI_BIND_ADDRESS}
+         *
+         * <p>Unset by default, which is Docker's own default of publishing on every interface.
+         * Set it to {@code 127.0.0.1} when Floci's own port is published on loopback only
+         * (a {@code "127.0.0.1:4566:4566"} mapping, say): the console is unauthenticated and
+         * drives every emulated service, so leaving it on every interface would hand out an
+         * authority the API deliberately withholds.
+         *
+         * <p>A blank value is a hard error rather than a silent fall back to the wildcard: an
+         * operator who set the key meant to choose an address.
+         */
+        Optional<String> bindAddress();
+
+        /**
          * Port the console listens on <em>inside</em> its container, published as {@link #port()}.
          * Env: {@code FLOCI_SERVICES_UI_INTERNAL_PORT}
          *

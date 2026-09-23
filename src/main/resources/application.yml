@@ -566,6 +566,10 @@ floci:
       image: "floci/floci-ui:latest"
       container-name: floci-ui
       port: 4500
+      # bind-address: unset by default, so Docker publishes the console on every interface.
+      # Set it to 127.0.0.1 when Floci's own port is published on loopback only, so the
+      # unauthenticated console is not reachable where the API deliberately is not.
+      # Env var: FLOCI_SERVICES_UI_BIND_ADDRESS=127.0.0.1
       keep-running-on-shutdown: false
       # endpoint: unset by default — Floci derives the sidecar's callback address automatically.
       # Set an absolute http:// or https:// URL here only to override that derivation.

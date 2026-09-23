@@ -507,6 +507,7 @@ Floci starts the web console as a sidecar container the first time `/_floci/ui` 
 | `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
 | `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
 | `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
+| `FLOCI_SERVICES_UI_BIND_ADDRESS` | _(none)_ | Host interface that port is published on. Unset publishes on every interface; set `127.0.0.1` when Floci's own port is loopback-only |
 | `FLOCI_SERVICES_UI_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave the sidecar running when Floci stops |
 | `FLOCI_SERVICES_UI_DOCKER_NETWORK` | _(none)_ | Docker network for the sidecar (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_UI_ENDPOINT` | _(derived)_ | Floci endpoint handed to the console, instead of deriving it from the Docker host and TLS settings |
