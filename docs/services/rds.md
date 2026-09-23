@@ -280,6 +280,10 @@ value, so a partial modify does not reset anything.
 Major versions are compared on the leading version component, so a MySQL 8.0 to 8.4 upgrade reads
 as a minor one here while AWS treats it as major.
 
+A refused member fails the whole request: a modify that carries a new `DBInstanceClass` alongside a
+shrinking `AllocatedStorage` returns `InvalidParameterCombination` and leaves the class as it was,
+so a read-back never reports a value the request did not get.
+
 Two deviations are worth knowing:
 
 - **Changes apply immediately.** AWS defers a class, storage or engine-version change to the

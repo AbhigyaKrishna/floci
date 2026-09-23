@@ -33,15 +33,31 @@ public record DbInstanceScalingChanges(String dbInstanceClass,
         return new DbInstanceScalingChanges(null, null, null, null);
     }
 
+    /**
+     * The same changes with AllocatedStorage resolved against the instance and every rule checked,
+     * which leaves {@link #applyTo} pure assignment. AWS refuses a request as a whole, and the
+     * instance a modify works on is the stored object rather than a copy, so a member written
+     * before a later member is refused would stay written and read back as drift.
+     */
+    public DbInstanceScalingChanges resolveFor(DbInstance instance) {
+        if (engineVersion != null && !engineVersion.isBlank()) {
+            requireMajorVersionUpgradeAllowed(instance.getEngineVersion());
+        }
+        Integer resolvedStorage =
+                allocatedStorage == null ? null : resolvedAllocatedStorage(instance);
+        return new DbInstanceScalingChanges(dbInstanceClass, resolvedStorage, engineVersion,
+                allowMajorVersionUpgrade);
+    }
+
+    /** Assigns the members of an instance resolved by {@link #resolveFor}. */
     public void applyTo(DbInstance instance) {
         if (dbInstanceClass != null && !dbInstanceClass.isBlank()) {
             instance.setDbInstanceClass(dbInstanceClass);
         }
         if (allocatedStorage != null) {
-            instance.setAllocatedStorage(resolvedAllocatedStorage(instance));
+            instance.setAllocatedStorage(allocatedStorage);
         }
         if (engineVersion != null && !engineVersion.isBlank()) {
-            requireMajorVersionUpgradeAllowed(instance.getEngineVersion());
             instance.setEngineVersion(engineVersion);
         }
     }

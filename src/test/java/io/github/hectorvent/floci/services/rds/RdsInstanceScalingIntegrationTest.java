@@ -115,6 +115,21 @@ class RdsInstanceScalingIntegrationTest {
     }
 
     @Test
+    void modifyDBInstance_appliesNothingWhenOneMemberIsRefused() {
+        create();
+
+        modify()
+                .formParam("DBInstanceClass", "db.t3.large")
+                .formParam("AllocatedStorage", "10")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterCombination</Code>"));
+
+        describe()
+                .body(RESULT + "DBInstanceClass", equalTo("db.t3.micro"))
+                .body(RESULT + "AllocatedStorage", equalTo("20"));
+    }
+
+    @Test
     void modifyDBInstance_upgradesAMajorEngineVersionWhenTheFlagIsPresent() {
         create();
 

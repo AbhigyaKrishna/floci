@@ -2428,6 +2428,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB instance " + id + " is in state " + instance.getStatus().name().toLowerCase(Locale.ROOT)
                             + " and cannot be modified.", 400);
         }
+        // Resolved before the first setter runs, since the checks it carries read the instance's
+        // current size and engine version: a refusal here must leave the whole request unapplied.
+        DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
@@ -2469,7 +2472,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
         effective.applyTo(instance);
-        scaling.applyTo(instance);
+        resolvedScaling.applyTo(instance);
         if (publiclyAccessible != null) {
             instance.setPubliclyAccessible(publiclyAccessible);
         }

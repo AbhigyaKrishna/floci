@@ -435,6 +435,50 @@ class RdsServiceTest {
         assertEquals("14", modified.getEngineVersion());
     }
 
+    @Test
+    void modifyDbInstanceLeavesInstanceClassAloneWhenTheStorageShrinkIsRejected() {
+        createScalingInstance("rejected-shrink", "postgres", "13", 20);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("rejected-shrink", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges("db.t3.large", 10, null, null)));
+
+        DbInstance stored = rdsService.getDbInstance("rejected-shrink");
+        assertEquals("db.t3.micro", stored.getDbInstanceClass());
+        assertEquals(20, stored.getAllocatedStorage());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesClassAndStorageAloneWhenTheMajorUpgradeIsRejected() {
+        createScalingInstance("rejected-upgrade", "postgres", "13", 20);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("rejected-upgrade", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges("db.t3.large", 100, "14", null)));
+
+        DbInstance stored = rdsService.getDbInstance("rejected-upgrade");
+        assertEquals("db.t3.micro", stored.getDbInstanceClass());
+        assertEquals(20, stored.getAllocatedStorage());
+        assertEquals("13", stored.getEngineVersion());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesEveryOtherMemberAloneWhenAScalingChangeIsRejected() {
+        createScalingInstance("rejected-whole", "postgres", "13", 20);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("rejected-whole", null, null, null,
+                        null, null, null, false,
+                        new DbInstanceSettings(null, null, 7, null, null, null), null,
+                        new DbInstanceScalingChanges(null, 10, null, null)));
+
+        DbInstance stored = rdsService.getDbInstance("rejected-whole");
+        assertTrue(stored.isAutoMinorVersionUpgrade());
+        assertEquals(1, stored.getBackupRetentionPeriod());
+    }
+
     private void createScalingInstance(String id, String engine, String engineVersion, int storage) {
         String dbName = engine.startsWith("sqlserver") ? null : "dbname";
         rdsService.createDbInstance(id, engine, engineVersion,
