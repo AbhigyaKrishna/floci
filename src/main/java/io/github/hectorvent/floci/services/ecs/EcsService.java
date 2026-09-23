@@ -13,6 +13,9 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
+import io.github.hectorvent.floci.services.ecs.exec.EcsExecChannelHandler;
+import io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry;
+import io.github.hectorvent.floci.services.ecs.exec.ExecSession;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
@@ -104,6 +107,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final EcsLoadBalancerRegistrar lbRegistrar;
     private final StorageFactory storageFactory;
     private final EcsEventPublisher eventPublisher;
+    private final EcsExecSessionRegistry execSessions;
     private final boolean dockerMode;
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
@@ -186,7 +190,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                       EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
-                      StorageFactory storageFactory, EcsEventPublisher eventPublisher) {
+                      StorageFactory storageFactory, EcsEventPublisher eventPublisher,
+                      EcsExecSessionRegistry execSessions) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
@@ -194,6 +199,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.lbRegistrar = lbRegistrar;
         this.storageFactory = storageFactory;
         this.eventPublisher = eventPublisher;
+        this.execSessions = execSessions;
+    }
+
+    /** With an exec session registry of its own, for callers that assemble the service without CDI. */
+    public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+                      EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+                      StorageFactory storageFactory, EcsEventPublisher eventPublisher) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory, eventPublisher,
+                new EcsExecSessionRegistry());
     }
 
     @PostConstruct
@@ -1744,6 +1758,91 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
             lbRegistrar.deregisterTask(task, svc, region);
         }
+    }
+
+    // ── ECS Exec ──────────────────────────────────────────────────────────────
+
+    /** The resolved target of an {@code ExecuteCommand}, with the session the client connects to. */
+    public record ExecuteCommandResult(EcsTask task, Container container, ExecSession session) {}
+
+    /**
+     * Opens an ECS Exec session against one of a task's containers.
+     *
+     * <p>The gate is the same as AWS's: the task must be running with execute-command enabled, and
+     * the container must actually be there to exec into. The returned session carries a stream URL
+     * and a single-use token, which {@code session-manager-plugin} then uses to open the data
+     * channel.
+     */
+    public ExecuteCommandResult executeCommand(String clusterRef, String taskRef, String containerName,
+                                                String command, boolean interactive, String region) {
+        if (command == null || command.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "The command cannot be empty.", 400);
+        }
+        // ECS only ever opens interactive sessions, so a request that asks for anything else is
+        // asking for something the API cannot do.
+        if (!interactive) {
+            throw new AwsException("InvalidParameterException",
+                    "Amazon ECS only supports initiating interactive sessions, so you must specify "
+                            + "true for the interactive parameter.", 400);
+        }
+        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+        EcsTask task = resolveTaskOrThrow(taskRef, region);
+        if (!cluster.getClusterArn().equals(task.getClusterArn())) {
+            throw new AwsException("InvalidParameterException",
+                    "The task " + task.getTaskArn() + " is not part of the cluster "
+                            + cluster.getClusterArn() + ".", 400);
+        }
+        if (!TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+            throw new AwsException("TargetNotConnectedException",
+                    "The execute command failed because the task is not running.", 400);
+        }
+        if (!task.isEnableExecuteCommand()) {
+            throw new AwsException("InvalidParameterException",
+                    "The execute command failed because execute command was not enabled when the task "
+                            + "was run or the execute command agent isn't running. Wait and try again "
+                            + "or run a new task with execute command enabled and try again.", 400);
+        }
+        Container container = resolveExecContainer(task, containerName);
+        if (container.getRuntimeId() == null || container.getRuntimeId().isBlank()) {
+            throw new AwsException("TargetNotConnectedException",
+                    "The execute command failed because the execute command agent is not running in "
+                            + "container " + container.getName() + ".", 400);
+        }
+        ExecSession session = execSessions.create(task.getTaskArn(), task.getClusterArn(),
+                container.getName(), container.getContainerArn(), container.getRuntimeId(),
+                List.of("/bin/sh", "-c", command), interactive);
+        LOG.infov("Opened an ECS Exec session on {0} container {1}", task.getTaskArn(), container.getName());
+        return new ExecuteCommandResult(task, container, session);
+    }
+
+    private static Container resolveExecContainer(EcsTask task, String containerName) {
+        List<Container> containers = task.getContainers() != null ? task.getContainers() : List.of();
+        if (containers.isEmpty()) {
+            throw new AwsException("TargetNotConnectedException",
+                    "The execute command failed because the task has no running containers.", 400);
+        }
+        if (containerName == null || containerName.isBlank()) {
+            if (containers.size() > 1) {
+                throw new AwsException("InvalidParameterException",
+                        "The task has more than one container, so the container to run the command "
+                                + "in must be named.", 400);
+            }
+            return containers.getFirst();
+        }
+        return containers.stream()
+                .filter(container -> containerName.equals(container.getName()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidParameterException",
+                        "The container " + containerName + " is not part of the task.", 400));
+    }
+
+    /** The {@code ws://} URL a client opens for an exec session's data channel. */
+    public String execStreamUrl(ExecSession session) {
+        String websocketBase = baseUrl.startsWith("https://")
+                ? "wss://" + baseUrl.substring("https://".length())
+                : "ws://" + baseUrl.substring(baseUrl.indexOf("://") + 3);
+        return websocketBase + EcsExecChannelHandler.CHANNEL_PATH_PREFIX + session.sessionId();
     }
 
     /** A container reached through the task metadata endpoint, with the task it belongs to. */
