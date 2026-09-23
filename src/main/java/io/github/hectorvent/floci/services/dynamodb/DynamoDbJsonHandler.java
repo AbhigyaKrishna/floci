@@ -57,6 +57,7 @@ public class DynamoDbJsonHandler {
             case "UpdateItem" -> handleUpdateItem(request, region);
             case "Query" -> handleQuery(request, region);
             case "Scan" -> handleScan(request, region);
+            case "SearchVectors" -> handleSearchVectors(request, region);
             case "BatchWriteItem" -> handleBatchWriteItem(request, region);
             case "BatchGetItem" -> handleBatchGetItem(request, region);
             case "UpdateTable" -> handleUpdateTable(request, region);
@@ -191,6 +192,18 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        List<DynamoDbService.VectorIndexCreate> vectorIndexes = new ArrayList<>();
+        JsonNode vectorIndexArray = request.path("VectorIndexes");
+        if (vectorIndexArray.isArray()) {
+            int vectorPosition = 0;
+            for (JsonNode vectorIndexNode : vectorIndexArray) {
+                vectorPosition++;
+                String memberPath = "vectorIndexes." + vectorPosition + ".member";
+                vectorIndexes.add(new DynamoDbService.VectorIndexCreate(
+                        parseVectorIndex(vectorIndexNode, memberPath), memberPath));
+            }
+        }
+
         String billingMode = request.has("BillingMode")
                 ? request.get("BillingMode").asText() : null;
 
@@ -221,7 +234,7 @@ public class DynamoDbJsonHandler {
         }
 
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
-                readCapacity, writeCapacity, gsis, lsis, region);
+                readCapacity, writeCapacity, gsis, lsis, vectorIndexes, billingMode, region);
         table.setTableStatus(initialStatus);
 
         table.setDeletionProtectionEnabled(deletionProtection);
@@ -303,6 +316,48 @@ public class DynamoDbJsonHandler {
                     + ".projection.nonKeyAttributes' failed to satisfy constraint: "
                     + "Member must have length greater than or equal to 1", 400);
         }
+    }
+
+    /** Reads a VectorIndex or the CreateVectorIndexAction of a VectorIndexUpdate; same members. */
+    private static VectorIndex parseVectorIndex(JsonNode node, String memberPath) {
+        // An absent VectorAttribute is reported as the member itself, one that is present but
+        // carries no AttributeName as the nested member. Only the request shape tells them apart.
+        JsonNode vectorAttribute = node.path("VectorAttribute");
+        if (vectorAttribute.isObject() && !vectorAttribute.hasNonNull("AttributeName")) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at '" + memberPath
+                    + ".vectorAttribute.attributeName' failed to satisfy constraint: "
+                    + "Member must not be null", 400);
+        }
+        List<SearchSchemaElement> searchSchema = new ArrayList<>();
+        JsonNode searchSchemaArray = node.path("SearchSchema");
+        if (searchSchemaArray.isArray()) {
+            for (JsonNode element : searchSchemaArray) {
+                searchSchema.add(new SearchSchemaElement(
+                        element.path("AttributeName").asText(null),
+                        element.path("SearchSchemaElementType").asText(null)));
+            }
+        }
+        String projectionType = node.hasNonNull("Projection")
+                ? node.path("Projection").path("ProjectionType").asText("ALL") : null;
+        List<String> nonKeyAttributes = new ArrayList<>();
+        JsonNode nonKeyAttrArray = node.path("Projection").path("NonKeyAttributes");
+        if (nonKeyAttrArray.isArray()) {
+            for (JsonNode nonKeyAttr : nonKeyAttrArray) {
+                nonKeyAttributes.add(nonKeyAttr.asText());
+            }
+        }
+        rejectEmptyNonKeyAttributes(nonKeyAttrArray, memberPath);
+        validateProjectionSpec(projectionType, nonKeyAttributes);
+        Long dimensions = node.hasNonNull("Dimensions") ? node.get("Dimensions").asLong() : null;
+        return new VectorIndex(
+                node.path("IndexName").asText(null),
+                node.path("VectorAttribute").path("AttributeName").asText(null),
+                searchSchema,
+                projectionType,
+                nonKeyAttributes,
+                dimensions,
+                node.path("DistanceFunction").asText(null));
     }
 
     // INCLUDE requires the NonKeyAttributes list; every other projection type forbids it.
@@ -1180,6 +1235,111 @@ public class DynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    // The floor AWS reports for a small search. The real figure is non-deterministic there,
+    // so every search reports the floor (measured in eu-west-2, 2026-09-23).
+    private static final double VECTOR_SEARCH_REQUEST_BYTES = 1024;
+
+    private static final int MAX_VECTOR_SEARCH_TOP_K = 100;
+
+    private Response handleSearchVectors(JsonNode request, String region) {
+        requireSearchVectorsMember(request, "SearchVector");
+        requireSearchVectorsMember(request, "IndexName");
+        String tableName = request.path("TableName").asText();
+        String indexName = request.get("IndexName").asText();
+        String rccSearch = request.has("ReturnConsumedCapacity")
+                ? request.get("ReturnConsumedCapacity").asText() : null;
+        if (rccSearch != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccSearch)) {
+            // No "N validation errors detected" envelope here, unlike every other operation.
+            throw new AwsException("ValidationException",
+                    "Value '" + rccSearch + "' at 'returnConsumedCapacity' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: "
+                    + "[INDEXES, TOTAL, NONE]", 400);
+        }
+        requireSearchVectorsMember(request, "TopK");
+        int topK = request.get("TopK").asInt();
+        if (topK < 1) {
+            // AWS names this member TopK and quotes no value, unlike every other member of this
+            // family. Measured on real DynamoDB, eu-west-2, 2026-09-23.
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'TopK' failed to satisfy "
+                    + "constraint: Member must have value greater than or equal to 1", 400);
+        }
+        // Both bounds answer before the table and the index are resolved: AWS reports the range
+        // even for a table that does not exist.
+        if (topK > MAX_VECTOR_SEARCH_TOP_K) {
+            throw new AwsException("ValidationException",
+                    "Provided TopK value '" + topK + "' is out of valid range. "
+                    + "The value must be between 1 and " + MAX_VECTOR_SEARCH_TOP_K + " inclusive", 400);
+        }
+
+        TableDefinition table = dynamoDbService.settledTable(tableName, region);
+        VectorIndex index = requireSearchableVectorIndex(table, indexName);
+
+        JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
+                ? request.get("ExpressionAttributeNames") : null;
+        JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
+                ? request.get("ExpressionAttributeValues") : null;
+        List<DynamoDbVectorSearch.Hit> hits = DynamoDbVectorSearch.search(table, index,
+                dynamoDbService.liveItems(table, region),
+                request.path("SearchVector"), topK,
+                request.has("SearchConditionExpression")
+                        ? request.get("SearchConditionExpression").asText() : null,
+                exprAttrNames, exprAttrValues,
+                request.has("ProjectionExpression") ? request.get("ProjectionExpression").asText() : null);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode searchResults = objectMapper.createArrayNode();
+        for (DynamoDbVectorSearch.Hit hit : hits) {
+            ObjectNode searchResult = objectMapper.createObjectNode();
+            searchResult.set("Item", hit.item());
+            searchResult.put("Score", hit.score());
+            searchResults.add(searchResult);
+        }
+        response.set("SearchResults", searchResults);
+        if (rccSearch != null && !"NONE".equals(rccSearch)) {
+            ObjectNode consumedCapacity = objectMapper.createObjectNode();
+            consumedCapacity.put("VectorSearchRequestBytes", VECTOR_SEARCH_REQUEST_BYTES);
+            response.set("ConsumedCapacity", consumedCapacity);
+        }
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Rejects an omitted required member of SearchVectors the way the AWS frontend does: as a
+     * deserialisation failure quoting the offset of the body's closing brace, which for the
+     * compact JSON an SDK sends is the body length. Measured in eu-west-2, 2026-09-23.
+     */
+    private static void requireSearchVectorsMember(JsonNode request, String member) {
+        if (!request.hasNonNull(member)) {
+            throw new AwsException("ValidationException",
+                    "missing field `" + member + "` at line 1 column "
+                    + request.toString().length(), 400);
+        }
+    }
+
+    /**
+     * The vector index a search may run against.
+     *
+     * <p>An index still in its resource allocation phase answers as if the table did not have it,
+     * which is the wording AWS uses there and what the documented readiness wait retries on.
+     */
+    private VectorIndex requireSearchableVectorIndex(TableDefinition table, String indexName) {
+        VectorIndex index = table.findVectorIndex(indexName).orElse(null);
+        if (index == null) {
+            throw new AwsException("ValidationException",
+                    "The table does not have the specified index: " + indexName, 400);
+        }
+        if ("CREATING".equals(index.getIndexStatus())) {
+            if (!dynamoDbService.isVectorIndexBackfilling(index)) {
+                throw new AwsException("ValidationException",
+                        "The table does not have the specified index: " + indexName, 400);
+            }
+            throw new AwsException("ValidationException",
+                    "Cannot search backfilling vector index: " + indexName, 400);
+        }
+        return index;
+    }
+
     private Response handleBatchWriteItem(JsonNode request, String region) {
         JsonNode requestItems = request.get("RequestItems");
         if (requestItems == null || requestItems.isNull() || requestItems.isMissingNode()
@@ -1467,6 +1627,28 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        List<DynamoDbService.VectorIndexCreate> vectorCreates = new ArrayList<>();
+        List<String> vectorDeletes = new ArrayList<>();
+        JsonNode vectorIndexUpdates = request.path("VectorIndexUpdates");
+        if (vectorIndexUpdates.isArray()) {
+            // AWS reports a per-member constraint under the position in this array, which a
+            // create shares with the deletes beside it.
+            int updatePosition = 0;
+            for (JsonNode update : vectorIndexUpdates) {
+                updatePosition++;
+                JsonNode createNode = update.path("Create");
+                if (createNode.isObject()) {
+                    String memberPath = "vectorIndexUpdates." + updatePosition + ".member.create";
+                    vectorCreates.add(new DynamoDbService.VectorIndexCreate(
+                            parseVectorIndex(createNode, memberPath), memberPath));
+                }
+                JsonNode deleteNode = update.path("Delete");
+                if (deleteNode.isObject()) {
+                    vectorDeletes.add(deleteNode.path("IndexName").asText(null));
+                }
+            }
+        }
+
         List<AttributeDefinition> newAttrDefs = new ArrayList<>();
         JsonNode attrDefsNode = request.path("AttributeDefinitions");
         if (!attrDefsNode.isMissingNode() && attrDefsNode.isArray()) {
@@ -1495,7 +1677,8 @@ public class DynamoDbJsonHandler {
         }
 
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
-                gsiCreates, gsiDeletes, newAttrDefs, region);
+                gsiCreates, gsiDeletes, newAttrDefs, vectorCreates, vectorDeletes,
+                billingModeCheck, region);
 
         for (JsonNode updateNode : gsiUpdatesToApply) {
             GlobalSecondaryIndex gsi = table.findGsi(updateNode.path("IndexName").asText()).orElseThrow();
@@ -2338,8 +2521,22 @@ public class DynamoDbJsonHandler {
             if (!cost.lsi().isEmpty()) {
                 cc.set("LocalSecondaryIndexes", capacityUnitsMap(cost.lsi(), unitsField));
             }
+            if (!cost.vectorBytes().isEmpty()) {
+                cc.set("VectorIndexes", vectorWriteBytesMap(cost.vectorBytes()));
+            }
         }
         return cc;
+    }
+
+    /** A vector index meters bytes processed, so it carries no CapacityUnits of its own. */
+    private ObjectNode vectorWriteBytesMap(Map<String, Double> bytesByIndex) {
+        ObjectNode node = objectMapper.createObjectNode();
+        bytesByIndex.forEach((indexName, bytes) -> {
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("VectorWriteRequestBytes", bytes);
+            node.set(indexName, entry);
+        });
+        return node;
     }
 
     private ObjectNode capacityUnitsMap(Map<String, Double> unitsByIndex, String unitsField) {
@@ -2597,6 +2794,15 @@ public class DynamoDbJsonHandler {
             node.set("LocalSecondaryIndexes", lsiArray);
         }
 
+        List<VectorIndex> vectorIndexes = table.getVectorIndexes();
+        if (!vectorIndexes.isEmpty()) {
+            ArrayNode vectorIndexArray = objectMapper.createArrayNode();
+            for (VectorIndex vectorIndex : vectorIndexes) {
+                vectorIndexArray.add(vectorIndexToNode(vectorIndex));
+            }
+            node.set("VectorIndexes", vectorIndexArray);
+        }
+
         if (table.getStreamArn() != null) {
             ObjectNode streamSpecNode = objectMapper.createObjectNode();
             streamSpecNode.put("StreamEnabled", table.isStreamEnabled());
@@ -2610,6 +2816,54 @@ public class DynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    /**
+     * Renders a VectorIndexDescription. ItemCount and IndexSizeBytes are always 0. AWS refreshes
+     * those two roughly every six hours, so a freshly built index reports 0 for both there too.
+     */
+    private ObjectNode vectorIndexToNode(VectorIndex vectorIndex) {
+        ObjectNode vectorIndexNode = objectMapper.createObjectNode();
+        vectorIndexNode.put("IndexName", vectorIndex.getIndexName());
+
+        ObjectNode vectorAttribute = objectMapper.createObjectNode();
+        vectorAttribute.put("AttributeName", vectorIndex.getVectorAttributeName());
+        vectorIndexNode.set("VectorAttribute", vectorAttribute);
+
+        List<SearchSchemaElement> searchSchema = vectorIndex.getSearchSchema();
+        if (searchSchema != null && !searchSchema.isEmpty()) {
+            ArrayNode searchSchemaArray = objectMapper.createArrayNode();
+            for (SearchSchemaElement element : searchSchema) {
+                ObjectNode elementNode = objectMapper.createObjectNode();
+                elementNode.put("AttributeName", element.getAttributeName());
+                elementNode.put("SearchSchemaElementType", element.getSearchSchemaElementType());
+                searchSchemaArray.add(elementNode);
+            }
+            vectorIndexNode.set("SearchSchema", searchSchemaArray);
+        }
+
+        ObjectNode projection = objectMapper.createObjectNode();
+        projection.put("ProjectionType",
+                vectorIndex.getProjectionType() != null ? vectorIndex.getProjectionType() : "ALL");
+        if ("INCLUDE".equals(vectorIndex.getProjectionType())) {
+            ArrayNode nonKeyAttributes = objectMapper.createArrayNode();
+            for (String attr : vectorIndex.getNonKeyAttributes()) {
+                nonKeyAttributes.add(attr);
+            }
+            projection.set("NonKeyAttributes", nonKeyAttributes);
+        }
+        vectorIndexNode.set("Projection", projection);
+
+        vectorIndexNode.put("Dimensions", vectorIndex.getDimensions());
+        vectorIndexNode.put("DistanceFunction", vectorIndex.getDistanceFunction());
+        vectorIndexNode.put("IndexStatus", vectorIndex.getIndexStatus());
+        if (dynamoDbService.reportsVectorIndexBackfilling(vectorIndex)) {
+            vectorIndexNode.put("Backfilling", dynamoDbService.isVectorIndexBackfilling(vectorIndex));
+        }
+        vectorIndexNode.put("IndexSizeBytes", 0);
+        vectorIndexNode.put("ItemCount", 0);
+        vectorIndexNode.put("IndexArn", vectorIndex.getIndexArn());
+        return vectorIndexNode;
     }
 
     private String defaultKmsMasterKeyArn(String region) {
