@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -330,6 +331,159 @@ class RdsServiceTest {
 
         assertFalse(modified.isPubliclyAccessible());
         assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
+    void modifyDbInstanceAppliesInstanceClassStorageAndEngineVersion() {
+        createScalingInstance("scaled", "postgres", "13", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("scaled", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges("db.t3.large", 100, "13.7", null));
+
+        assertEquals("db.t3.large", modified.getDbInstanceClass());
+        assertEquals(100, modified.getAllocatedStorage());
+        assertEquals("13.7", modified.getEngineVersion());
+
+        DbInstance stored = rdsService.getDbInstance("scaled");
+        assertEquals("db.t3.large", stored.getDbInstanceClass());
+        assertEquals(100, stored.getAllocatedStorage());
+        assertEquals("13.7", stored.getEngineVersion());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesScalingMembersAloneWhenTheRequestOmitsThem() {
+        createScalingInstance("untouched", "postgres", "13", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("untouched", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged());
+
+        assertEquals("db.t3.micro", modified.getDbInstanceClass());
+        assertEquals(20, modified.getAllocatedStorage());
+        assertEquals("13", modified.getEngineVersion());
+    }
+
+    @Test
+    void modifyDbInstanceRoundsAllocatedStorageUpToTenPercentGreater() {
+        createScalingInstance("rounded", "postgres", "13", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("rounded", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, 21, null, null));
+
+        assertEquals(22, modified.getAllocatedStorage());
+    }
+
+    @Test
+    void modifyDbInstanceKeepsSqlServerStorageExactlyAsAsked() {
+        createScalingInstance("mssql", "sqlserver-se", "15.00", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("mssql", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, 21, null, null));
+
+        assertEquals(21, modified.getAllocatedStorage());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesAllocatedStorageAloneWhenItIsUnchanged() {
+        createScalingInstance("same-storage", "postgres", "13", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("same-storage", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, 20, null, null));
+
+        assertEquals(20, modified.getAllocatedStorage());
+    }
+
+    @Test
+    void modifyDbInstanceRejectsAllocatedStorageDecrease() {
+        createScalingInstance("shrinking", "postgres", "13", 20);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("shrinking", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges(null, 10, null, null)));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(20, rdsService.getDbInstance("shrinking").getAllocatedStorage());
+    }
+
+    @Test
+    void modifyDbInstanceRejectsMajorEngineVersionUpgradeWithoutTheFlag() {
+        createScalingInstance("major", "postgres", "13", 20);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("major", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges(null, null, "14", null)));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("13", rdsService.getDbInstance("major").getEngineVersion());
+    }
+
+    @Test
+    void modifyDbInstanceAppliesMajorEngineVersionUpgradeWithTheFlag() {
+        createScalingInstance("major-allowed", "postgres", "13", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("major-allowed", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, null, "14", true));
+
+        assertEquals("14", modified.getEngineVersion());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesInstanceClassAloneWhenTheStorageShrinkIsRejected() {
+        createScalingInstance("rejected-shrink", "postgres", "13", 20);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("rejected-shrink", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges("db.t3.large", 10, null, null)));
+
+        DbInstance stored = rdsService.getDbInstance("rejected-shrink");
+        assertEquals("db.t3.micro", stored.getDbInstanceClass());
+        assertEquals(20, stored.getAllocatedStorage());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesClassAndStorageAloneWhenTheMajorUpgradeIsRejected() {
+        createScalingInstance("rejected-upgrade", "postgres", "13", 20);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("rejected-upgrade", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges("db.t3.large", 100, "14", null)));
+
+        DbInstance stored = rdsService.getDbInstance("rejected-upgrade");
+        assertEquals("db.t3.micro", stored.getDbInstanceClass());
+        assertEquals(20, stored.getAllocatedStorage());
+        assertEquals("13", stored.getEngineVersion());
+    }
+
+    @Test
+    void modifyDbInstanceLeavesEveryOtherMemberAloneWhenAScalingChangeIsRejected() {
+        createScalingInstance("rejected-whole", "postgres", "13", 20);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("rejected-whole", null, null, null,
+                        null, null, null, false,
+                        new DbInstanceSettings(null, null, 7, null, null, null), null,
+                        new DbInstanceScalingChanges(null, 10, null, null)));
+
+        DbInstance stored = rdsService.getDbInstance("rejected-whole");
+        assertTrue(stored.isAutoMinorVersionUpgrade());
+        assertEquals(1, stored.getBackupRetentionPeriod());
+    }
+
+    private void createScalingInstance(String id, String engine, String engineVersion, int storage) {
+        String dbName = engine.startsWith("sqlserver") ? null : "dbname";
+        rdsService.createDbInstance(id, engine, engineVersion,
+                "admin", "Password123!", dbName, "db.t3.micro",
+                storage, false, null, null, null, null, false);
     }
 
     @Test

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -409,16 +410,29 @@ public class RdsQueryHandler {
         }
         try {
             DbInstanceSettings settings = instanceSettings(params, false);
+            DbInstanceScalingChanges scaling = scalingChanges(params);
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             DbInstance instance = service.modifyDbInstance(
                     id, newPassword, iamEnabled, dbSubnetGroupName,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible);
+                    settings, publiclyAccessible, scaling);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    /**
+     * The members a modify scales the instance by. Reading them here is why an SDK request to
+     * resize a live instance, or to upgrade its engine version, used to be accepted and dropped.
+     */
+    private static DbInstanceScalingChanges scalingChanges(MultivaluedMap<String, String> params) {
+        return new DbInstanceScalingChanges(
+                params.getFirst("DBInstanceClass"),
+                optionalInt(params.getFirst("AllocatedStorage")),
+                params.getFirst("EngineVersion"),
+                parseOptionalBoolean(params, "AllowMajorVersionUpgrade"));
     }
 
     private static DbInstanceSettings instanceSettings(MultivaluedMap<String, String> params) {
@@ -2220,7 +2234,7 @@ public class RdsQueryHandler {
         xml.elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
-           .elem("StorageType", "gp2")
+           .elem("StorageType", DbInstance.DEFAULT_STORAGE_TYPE)
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
