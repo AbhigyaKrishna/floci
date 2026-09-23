@@ -187,8 +187,12 @@ A listener is chosen in this order:
 
 1. The Host header equals a load balancer's own DNS name (`{name}-{id}.elb.localhost.floci.io`).
 2. Exactly one listener on the port has a rule whose `host-header` condition matches the Host
-   header. Wildcards (`*`, `?`) apply, matching is case-insensitive, and the port is ignored, the
-   same as the rule evaluation that follows.
+   header. This uses the same matching as the rule evaluation that follows, so it is
+   case-insensitive, ignores the port, and applies AWS's wildcards: `*` matches 0 or more
+   characters and `?` matches exactly 1, which means `*.example.com` claims `test.example.com`
+   but not `example.com`. `HostHeaderConfig.RegexValues` is not supported, by rule evaluation or
+   by selection, so a load balancer that names itself only through a regex cannot be selected
+   this way.
 3. Only one listener is on the port, in which case it answers any Host header.
 
 If none of those resolve, and in particular when two load balancers declare the same hostname or

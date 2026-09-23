@@ -120,17 +120,28 @@ class ElbV2SamePortHostDispatchIntegrationTest {
 
         assertHostResponse("app.example.test", "second-rule");
         assertHostResponse("api.wild.example.test", "second-rule");
+        assertHostResponse("APP.EXAMPLE.TEST", "second-rule");
+    }
+
+    /**
+     * AWS states that the rule {@code *.example.com} matches {@code test.example.com} but not
+     * {@code example.com}, so a wildcard must not let a listener claim the bare domain either.
+     */
+    @Test
+    @Order(7)
+    void aWildcardRuleDoesNotClaimTheBareDomain() {
+        assertNoListenerForHost("wild.example.test");
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void aDeclaredHostDoesNotDisplaceTheLoadBalancerDnsName() {
         assertHostResponse(firstDnsName, "first");
         assertHostResponse(secondDnsName, "second");
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void aHostBothListenersDeclareStaysUnclaimed() {
         firstRuleArn = createHostHeaderRule(firstListenerArn, 10,
                 List.of("app.example.test"), "first-rule");
