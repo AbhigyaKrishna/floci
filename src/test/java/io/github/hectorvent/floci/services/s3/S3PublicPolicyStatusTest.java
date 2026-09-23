@@ -86,6 +86,37 @@ class S3PublicPolicyStatusTest {
     }
 
     @Test
+    void accessPointNameWildcardWithFixedAccountIsNotPublic() {
+        assertFalse(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"arn:aws:s3:::b/*",
+                "Action":"s3:GetObject","Effect":"Allow",
+                "Condition":{"ArnLike":{"s3:DataAccessPointArn":
+                "arn:aws:s3:us-west-2:123456789012:accesspoint/*"}}}]}
+                """));
+    }
+
+    @Test
+    void accessPointArnWithWildcardAccountIsPublic() {
+        assertTrue(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"arn:aws:s3:::b/*",
+                "Action":"s3:GetObject","Effect":"Allow",
+                "Condition":{"ArnLike":{"s3:DataAccessPointArn":
+                "arn:aws:s3:us-west-2:*:accesspoint/*"}}}]}
+                """));
+    }
+
+    @Test
+    void negatedOrOptionalConditionDoesNotMakePolicyNonPublic() {
+        for (String operator : new String[] {"StringNotEquals", "StringEqualsIfExists", "IpAddress"}) {
+            assertTrue(isPublic("""
+                    {"Statement":[{"Principal":"*","Resource":"*",
+                    "Action":"s3:GetObject","Effect":"Allow",
+                    "Condition":{"%s":{"aws:SourceAccount":"123456789012"}}}]}
+                    """.formatted(operator)));
+        }
+    }
+
+    @Test
     void anUnrecognisedConditionKeyDoesNotMakeAWildcardPrincipalPrivate() {
         assertTrue(isPublic("""
                 {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",

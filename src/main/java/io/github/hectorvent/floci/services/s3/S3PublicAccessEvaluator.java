@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 final class S3PublicAccessEvaluator {
 
@@ -36,6 +38,9 @@ final class S3PublicAccessEvaluator {
 
     /** Recognised like the keys above, but the value additionally has to be a narrow range. */
     private static final String SOURCE_IP_CONDITION_KEY = "aws:sourceip";
+    private static final String DATA_ACCESS_POINT_ARN_CONDITION_KEY = "s3:dataaccesspointarn";
+    private static final Pattern BUCKET_POLICY_ACCESS_POINT_ARN = Pattern.compile(
+            "arn:[a-z0-9-]+:s3:[a-z0-9-]+:[0-9]{12}:accesspoint/[a-zA-Z0-9*?._-]+");
 
     enum PublicAccessDecision {
         ALLOW,
@@ -151,8 +156,8 @@ final class S3PublicAccessEvaluator {
      * containing neither a wildcard nor an IAM policy variable. A single public statement makes
      * the whole policy public, which is what {@code RestrictPublicBuckets} keys off.
      *
-     * <p>Floci does not model access points, so the access-point rules for
-     * {@code s3:DataAccessPointArn} do not apply here.
+     * <p>Bucket policies can use a wildcard in the access point name when the account is fixed.
+     * Floci does not model access points, so the different access-point-policy rule does not apply.
      */
     static boolean policyIsPublic(ObjectMapper objectMapper, String policy) {
         if (policy == null || policy.isBlank()) {
@@ -201,17 +206,25 @@ final class S3PublicAccessEvaluator {
         Iterator<Map.Entry<String, JsonNode>> operators = conditions.fields();
         while (operators.hasNext()) {
             Map.Entry<String, JsonNode> operator = operators.next();
-            if (!operator.getValue().isObject()) {
+            if (!operator.getValue().isObject() || !operatorNarrowsAccess(operator.getKey())) {
                 continue;
             }
             Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
                 String key = entry.getKey().toLowerCase(Locale.ROOT);
-                if (NON_PUBLIC_CONDITION_KEYS.contains(key) && allValuesFixed(entry.getValue())) {
+                if (DATA_ACCESS_POINT_ARN_CONDITION_KEY.equals(key)
+                        && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedAccountAccessPointArn)) {
                     return true;
                 }
-                if (SOURCE_IP_CONDITION_KEY.equals(key) && allSourceIpRangesNarrow(entry.getValue())) {
+                if (NON_PUBLIC_CONDITION_KEYS.contains(key)
+                        && !operator.getKey().equalsIgnoreCase("IpAddress")
+                        && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedValue)) {
+                    return true;
+                }
+                if (SOURCE_IP_CONDITION_KEY.equals(key)
+                        && operator.getKey().equalsIgnoreCase("IpAddress")
+                        && allSourceIpRangesNarrow(entry.getValue())) {
                     return true;
                 }
             }
@@ -219,16 +232,23 @@ final class S3PublicAccessEvaluator {
         return false;
     }
 
-    private static boolean allValuesFixed(JsonNode value) {
+    private static boolean operatorNarrowsAccess(String operator) {
+        return switch (operator.toLowerCase(Locale.ROOT)) {
+            case "stringequals", "stringlike", "arnequals", "arnlike", "ipaddress" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean allValuesFixed(JsonNode value, Predicate<String> isFixed) {
         if (value == null || value.isNull()) {
             return false;
         }
         if (value.isTextual()) {
-            return isFixedValue(value.asText());
+            return isFixed.test(value.asText());
         }
         if (value.isArray() && !value.isEmpty()) {
             for (JsonNode item : value) {
-                if (!item.isTextual() || !isFixedValue(item.asText())) {
+                if (!item.isTextual() || !isFixed.test(item.asText())) {
                     return false;
                 }
             }
@@ -242,6 +262,10 @@ final class S3PublicAccessEvaluator {
                 && value.indexOf('*') < 0
                 && value.indexOf('?') < 0
                 && !value.contains("${");
+    }
+
+    private static boolean isFixedAccountAccessPointArn(String value) {
+        return BUCKET_POLICY_ACCESS_POINT_ARN.matcher(value).matches();
     }
 
     private static boolean allSourceIpRangesNarrow(JsonNode value) {

@@ -54,6 +54,22 @@ class S3BlockPublicAccessIntegrationTest {
     }
 
     @Test
+    void blockPublicPolicyAcceptsFixedAccountAccessPointWildcard() {
+        String bucket = createBucket();
+        putBucketPublicAccessBlock(bucket, false, false, true, false);
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*",
+                "Condition":{"ArnLike":{"s3:DataAccessPointArn":
+                "arn:aws:s3:us-west-2:123456789012:accesspoint/*"}}}]}
+                """.formatted(bucket);
+
+        given().body(policy)
+                .when().put("/" + bucket + "?policy")
+                .then().statusCode(200);
+    }
+
+    @Test
     void aPublicBucketPolicyIsAcceptedWithoutBlockPublicPolicy() {
         String bucket = createBucket();
 
