@@ -75,6 +75,7 @@ public class SnsService implements Resettable, ResourceProvider {
     private static final int LARGE_PAYLOAD_SUBSCRIPTION_LIMIT = 100;
     private static final String MAXIMUM_MESSAGE_SIZE = "MaximumMessageSize";
     private static final int PUSH_CAPTURE_LIMIT = 1000;
+    private static final int MAX_SUBJECT_LENGTH = 100;
     private static final String CONTROL_TOWER_AGGREGATE_SECURITY_TOPIC =
             "aws-controltower-AggregateSecurityNotifications";
     private static final List<String> PENDING_CONFIRMATION_PROTOCOLS =
@@ -550,6 +551,7 @@ public class SnsService implements Resettable, ResourceProvider {
         // The limit is a per-topic attribute, so it cannot be applied until the topic is in
         // hand. SMS and mobile-push publishes never reach a topic and keep the AWS default.
         int payloadSize = computePublishSize(messageBytes, messageAttributes);
+        validateSubject(subject);
 
         // Send SMS
         if (phoneNumber != null) {
@@ -909,6 +911,23 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Subjects must be UTF-8 text with no line breaks or control characters and at most 100
+     * characters long. A null or empty subject is the absent optional parameter and is accepted.
+     */
+    static void validateSubject(String subject) {
+        if (subject == null || subject.isEmpty()) {
+            return;
+        }
+        if (subject.length() > MAX_SUBJECT_LENGTH
+                || subject.chars().anyMatch(Character::isISOControl)) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Subject Reason: Subjects must be UTF-8 text with no line"
+                            + " breaks or control characters, and at most 100 characters long.",
+                    400);
+        }
+    }
+
     private void recordPushNotification(PushNotification notification) {
         pushCapture.addFirst(notification);
         while (pushCapture.size() > PUSH_CAPTURE_LIMIT) {
@@ -1023,6 +1042,7 @@ public class SnsService implements Resettable, ResourceProvider {
             String messageDeduplicationId = (String) entry.get("MessageDeduplicationId");
 
             try {
+                validateSubject(subject);
                 validateTopicMessageStructure(message, messageStructure);
             } catch (AwsException e) {
                 failed.add(new String[]{id, e.getErrorCode(), e.getMessage(), "true"});
