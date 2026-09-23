@@ -261,6 +261,40 @@ new scaling configuration instead of assuming that the cluster is Aurora.
 This is control-plane compatibility: Floci persists and returns the scaling configuration, but it
 does not resize or automatically pause the backing Docker container.
 
+## Modifying a DB instance
+
+`ModifyDBInstance` applies `DBInstanceClass`, `AllocatedStorage` and `EngineVersion`, and
+`DescribeDBInstances` reports the new values. Members the request leaves out keep their current
+value, so a partial modify does not reset anything.
+
+`AllocatedStorage` follows the AWS rules for the member:
+
+- A size smaller than the current one fails with `InvalidParameterCombination`. RDS storage never
+  shrinks.
+- On PostgreSQL, MySQL and MariaDB, an increase of less than 10% is rounded up to 10% greater
+  rather than refused, which is what AWS does. SQL Server takes the size it is given.
+- The same size is not a change and is left alone.
+
+`EngineVersion` accepts a minor upgrade on its own. A different major version needs
+`AllowMajorVersionUpgrade`, without which the request fails with `InvalidParameterCombination`.
+Major versions are compared on the leading version component, so a MySQL 8.0 to 8.4 upgrade reads
+as a minor one here while AWS treats it as major.
+
+Two deviations are worth knowing:
+
+- **Changes apply immediately.** AWS defers a class, storage or engine-version change to the
+  preferred maintenance window unless `ApplyImmediately` is set, and reports it under
+  `PendingModifiedValues` until then. Floci runs no maintenance window and does not model
+  `PendingModifiedValues`, so it applies the change as soon as the request lands whatever
+  `ApplyImmediately` says. Without this a deferred change would never be applied at all, and every
+  read-back would report the same drift.
+- **The backing container is not re-imaged.** An engine-version change is recorded on the instance
+  and reported on read, but the container started at create time keeps running the image it was
+  started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
+
+`StorageType`, `MultiAZ` and `Iops` are not read on a modify yet. Floci reports every instance as
+`gp2`.
+
 ## Examples
 
 ```bash

@@ -309,10 +309,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
         // provision() is re-invoked on every UpdateStack for every resource, so a same-id instance
         // already on file must be reconciled rather than re-created (createDbInstance throws
-        // DBInstanceAlreadyExists). Only the properties RdsService.modifyDbInstance actually supports
-        // (password, IAM auth, subnet group) are reconciled here; other property changes (engine,
-        // instance class, allocated storage, ...) are a pre-existing gap in that method, not addressed
-        // by this fix.
+        // DBInstanceAlreadyExists). Only password, IAM auth and subnet group are reconciled here.
+        // modifyDbInstance also takes DBInstanceClass, AllocatedStorage and EngineVersion now, but
+        // threading them through an UpdateStack is a separate change: DBInstanceClass and
+        // AllocatedStorage are update-in-place on the AWS::RDS::DBInstance schema while Engine is
+        // create-only, so passing them needs the replacement handling the DB cluster arm has.
         DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
         if (instance != null) {
             instance = rdsService.modifyDbInstance(

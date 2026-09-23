@@ -31,6 +31,7 @@ import software.amazon.awssdk.services.rds.model.ModifyOptionGroupResponse;
 import software.amazon.awssdk.services.rds.model.OptionConfiguration;
 import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
 import software.amazon.awssdk.services.rds.model.OptionSetting;
+import software.amazon.awssdk.services.rds.model.RdsException;
 import software.amazon.awssdk.services.rds.model.Tag;
 
 import java.util.List;
@@ -428,6 +429,49 @@ class RdsControlPlaneTest {
                     .dbInstances().get(0);
             assertThat(started.dbInstanceStatus()).isEqualTo("available");
             assertThat(started.endpoint().address()).isEqualTo(endpoint);
+        } finally {
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
+    @DisplayName("ModifyDBInstance resizes and upgrades an instance, and Describe reports it")
+    void sdkResizesAndUpgradesAStandaloneInstance() {
+        String instanceName = TestFixtures.uniqueName("rds-resize-db");
+        try {
+            createDbInstance(rds, instanceName, "resize-secret");
+
+            DBInstance modified = rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .dbInstanceClass("db.t3.large")
+                    .allocatedStorage(100)
+                    .engineVersion("16.4")).dbInstance();
+
+            assertThat(modified.dbInstanceClass()).isEqualTo("db.t3.large");
+            assertThat(modified.allocatedStorage()).isEqualTo(100);
+            assertThat(modified.engineVersion()).isEqualTo("16.4");
+
+            DBInstance described = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(described.dbInstanceClass()).isEqualTo("db.t3.large");
+            assertThat(described.allocatedStorage()).isEqualTo(100);
+            assertThat(described.engineVersion()).isEqualTo("16.4");
+
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).allocatedStorage(50)))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName).engineVersion("17.2")))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            DBInstance upgraded = rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .engineVersion("17.2")
+                    .allowMajorVersionUpgrade(true)).dbInstance();
+            assertThat(upgraded.engineVersion()).isEqualTo("17.2");
         } finally {
             deleteDbInstance(rds, instanceName);
         }

@@ -11,6 +11,9 @@ import java.util.Map;
 @RegisterForReflection
 public class DbInstance {
 
+    /** The only storage type Floci models, and the one DescribeDBInstances reports. */
+    public static final String DEFAULT_STORAGE_TYPE = "gp2";
+
     private String dbInstanceIdentifier;
     private DatabaseEngine engine;
     // the engine name the request gave (aurora-postgresql, postgres, ...): the enum collapses the
