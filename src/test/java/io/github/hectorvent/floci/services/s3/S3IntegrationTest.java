@@ -512,6 +512,117 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(208)
+    void createBucketRejectsMalformedCreateBucketConfigurationAndCreatesNoBucket() {
+        String bucket = "malformed-config-bucket";
+        given()
+            .contentType("application/xml")
+            .body("<CreateBucketConfiguration><LocationConstraint>eu-central-1</LocationConstraint>")
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(209)
+    void createBucketRejectsUnknownCreateBucketConfigurationFieldAndCreatesNoBucket() {
+        String bucket = "unknown-config-field-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Foo>bar</Foo>
+                </CreateBucketConfiguration>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(210)
+    void createBucketRejectsWrongCreateBucketConfigurationRootAndCreatesNoBucket() {
+        String bucket = "wrong-config-root-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfigurationFoo xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>eu-central-1</LocationConstraint>
+                </CreateBucketConfigurationFoo>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(211)
+    void createBucketRejectsInvalidLocationConstraintAndCreatesNoBucket() {
+        String bucket = "invalid-constraint-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>not-a-region</LocationConstraint>
+                </CreateBucketConfiguration>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidLocationConstraint"));
+
+        assertBucketDoesNotExist(bucket);
+    }
+
+    @Test
+    @Order(212)
+    void createBucketAcceptsDirectoryBucketConfiguration() {
+        String bucket = "directory-config-bucket";
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <Location>us-west-2</Location>
+                    <Bucket>
+                        <Type>Directory</Type>
+                    </Bucket>
+                </CreateBucketConfiguration>
+                """)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + bucket)
+        .then()
+            .statusCode(200);
+    }
+
+    private static void assertBucketDoesNotExist(String bucket) {
+        given()
+        .when()
+            .get("/" + bucket)
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchBucket"));
+    }
+
+    @Test
     void createBucketReroutesMisplacedVirtualHostedPutObject() {
         String targetBucket = "reroute-target-bucket";
         String objectKey = "misplaced-file.json";

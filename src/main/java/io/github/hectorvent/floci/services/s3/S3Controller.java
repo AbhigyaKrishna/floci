@@ -60,6 +60,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -84,6 +85,7 @@ public class S3Controller {
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final Pattern LOCATION_CONSTRAINT_PATTERN = Pattern.compile("[a-z]{2}(-[a-z]+)+-\\d+");
 
     private final S3Service s3Service;
     private final S3SelectService s3SelectService;
@@ -400,29 +402,29 @@ public class S3Controller {
 
             s3Service.authorizeCreateBucket(authorization);
             String locationConstraint = null;
+            Map<String, String> creationTags = Map.of();
             if (body != null && body.length > 0) {
-                locationConstraint = XmlParser.extractFirst(new String(body, StandardCharsets.UTF_8),
-                        "LocationConstraint", null);
-            }
-            if (locationConstraint != null) {
-                locationConstraint = locationConstraint.trim();
-                if (locationConstraint.isEmpty()) {
-                    locationConstraint = null;
-                } else if ("us-east-1".equalsIgnoreCase(locationConstraint)) {
-                    throw new AwsException("InvalidLocationConstraint",
-                            "The specified location-constraint is not valid.", 400);
+                XmlParser.XmlElement configuration = parseCreateBucketConfiguration(body);
+                XmlParser.XmlElement locationNode = configuration.child("LocationConstraint");
+                if (locationNode != null) {
+                    locationConstraint = locationNode.text().trim();
+                    if (locationConstraint.isEmpty()) {
+                        locationConstraint = null;
+                    } else if ("us-east-1".equalsIgnoreCase(locationConstraint)
+                            || !isValidLocationConstraint(locationConstraint)) {
+                        throw new AwsException("InvalidLocationConstraint",
+                                "The specified location-constraint is not valid.", 400);
+                    }
                 }
+                creationTags = XmlParser.extractPairs(
+                        new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
             }
             String region = locationConstraint != null ? locationConstraint : regionResolver.resolveRegion(httpHeaders);
             s3Service.createBucket(bucket, region);
             // CreateBucketConfiguration may carry a <Tags> array; AWS applies those tags to the
             // new bucket, so a follow-up GetBucketTagging / ListTagsForResource must return them.
-            if (body != null && body.length > 0) {
-                Map<String, String> creationTags = XmlParser.extractPairs(
-                        new String(body, StandardCharsets.UTF_8), "Tag", "Key", "Value");
-                if (!creationTags.isEmpty()) {
-                    s3Service.putBucketTagging(bucket, creationTags);
-                }
+            if (!creationTags.isEmpty()) {
+                s3Service.putBucketTagging(bucket, creationTags);
             }
             String lockEnabled = httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled");
             if ("true".equalsIgnoreCase(lockEnabled)) {
@@ -4118,5 +4120,38 @@ public class S3Controller {
         }
         String text = new String(body, StandardCharsets.UTF_8).trim();
         return text.startsWith("<") && text.contains("CreateBucketConfiguration");
+    }
+
+    /**
+     * Validates a non-empty CreateBucket body before any bucket state is created. A malformed
+     * document, a root other than {@code CreateBucketConfiguration}, or an unknown root child is a
+     * {@code MalformedXML} error.
+     */
+    private static XmlParser.XmlElement parseCreateBucketConfiguration(byte[] body) {
+        String xml = new String(body, StandardCharsets.UTF_8);
+        if (!"CreateBucketConfiguration".equals(XmlParser.rootElementName(xml))) {
+            throw malformedXml();
+        }
+        XmlParser.XmlElement configuration = XmlParser.extractElementTree(xml, "CreateBucketConfiguration");
+        if (configuration == null) {
+            throw malformedXml();
+        }
+        for (XmlParser.XmlElement child : configuration.children()) {
+            String name = child.name();
+            if (!"LocationConstraint".equals(name) && !"Location".equals(name)
+                    && !"Bucket".equals(name) && !"Tags".equals(name)) {
+                throw malformedXml();
+            }
+        }
+        return configuration;
+    }
+
+    private static AwsException malformedXml() {
+        return new AwsException("MalformedXML",
+                "The XML you provided was not well-formed or did not validate against our published schema", 400);
+    }
+
+    private static boolean isValidLocationConstraint(String value) {
+        return "EU".equalsIgnoreCase(value) || LOCATION_CONSTRAINT_PATTERN.matcher(value).matches();
     }
 }
