@@ -58,6 +58,7 @@ final class SesServiceTestBuilder {
     private SesSuppressionService suppressionService;
     private SesConfigurationSetService configSetService;
     private SesIdentityService identityService;
+    private SesCvetService cvetService;
     private SesSentEmailService sentEmailService;
 
     static SesServiceTestBuilder create() {
@@ -142,6 +143,13 @@ final class SesServiceTestBuilder {
         return sentEmailService;
     }
 
+    SesCvetService cvetService() {
+        if (cvetService == null) {
+            throw new IllegalStateException("call build() first");
+        }
+        return cvetService;
+    }
+
     SesIdentityService identityService() {
         if (identityService == null) {
             throw new IllegalStateException("call build() first");
@@ -156,6 +164,7 @@ final class SesServiceTestBuilder {
         configSetService = new SesConfigurationSetService(configSetStore);
         identityService = new SesIdentityService(identityStore, route53Service, clock);
         sentEmailService = new SesSentEmailService(emailStore);
+        cvetService = new SesCvetService(cvetStore);
         return new SesService(
                 identityService,
                 sentEmailService,
@@ -165,7 +174,7 @@ final class SesServiceTestBuilder {
                 new SesDedicatedIpService(dedicatedIpPoolStore),
                 contactService,
                 new SesPolicyService(policyStore, objectMapper),
-                new SesCvetService(cvetStore),
+                cvetService,
                 new SesTenantService(tenantStore, tenantAssociationStore, clock, new SecureRandom()),
                 smtpRelay);
     }
