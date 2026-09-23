@@ -36,7 +36,7 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
  * ({@code RestrictPublicBuckets}, {@code IgnorePublicAcls}) need anonymous authorization to be
  * running and are covered by the in-tree integration tests instead.
  */
-@DisplayName("S3 Block Public Access — BlockPublicPolicy / BlockPublicAcls")
+@DisplayName("S3 Block Public Access: BlockPublicPolicy / BlockPublicAcls")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3BlockPublicAccessTest {
 
