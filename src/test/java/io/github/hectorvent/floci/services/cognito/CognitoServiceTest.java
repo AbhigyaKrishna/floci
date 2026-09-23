@@ -136,15 +136,14 @@ class CognitoServiceTest {
                 List.of(Map.of("Name", "custom:my-attr", "AttributeDataType", "String")),
                 pool.getSchemaAttributes(),
                 "a non-standard Schema attribute is stored under the custom: namespace");
-        // A supplied PasswordPolicy is normalized with AWS's defaults for the fields left unset
-        // (MinimumLength here was explicit; the rest were not), matching what DescribeUserPool
-        // returns on real Cognito for a policy submitted this way.
+        // A supplied PasswordPolicy only picks up the two defaults the API reference documents,
+        // TemporaryPasswordValidityDays 7 and MinimumLength (explicit here). The four Require*
+        // members carry no documented default and must stay unset: they are unboxed booleans in
+        // the Cognito model, so an SDK asked for false omits them from the wire entirely, and
+        // filling them in with true is what made a pool created with require_symbols = false
+        // read back as true.
         Map<String, Object> expectedPasswordPolicy = new HashMap<>();
         expectedPasswordPolicy.put("MinimumLength", 12);
-        expectedPasswordPolicy.put("RequireUppercase", true);
-        expectedPasswordPolicy.put("RequireLowercase", true);
-        expectedPasswordPolicy.put("RequireNumbers", true);
-        expectedPasswordPolicy.put("RequireSymbols", true);
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
         assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
@@ -499,8 +498,9 @@ class CognitoServiceTest {
     @Test
     void createUserPoolDefaultsAnUnsetMinimumLengthToEight() {
         // A policy present but silent on MinimumLength gets AWS's default (8), not policyInt's
-        // fallback of 0 for an absent key — and the unset RequireUppercase/Lowercase/Numbers
-        // default to enabled too, the same "Cognito defaults" a console-created pool gets.
+        // fallback of 0 for an absent key. The character classes the policy did not ask for are
+        // not enforced: only RequireSymbols was set, so a password with no uppercase and no
+        // digit is accepted once it is long enough.
         UserPool pool = service.createUserPool(Map.of(
                 "PoolName", "SymbolsOnlyPool",
                 "Policies", Map.of("PasswordPolicy", Map.of("RequireSymbols", true))
@@ -514,8 +514,57 @@ class CognitoServiceTest {
         assertEquals("InvalidPasswordException", exception.getErrorCode());
 
         assertDoesNotThrow(() -> service.signUp(
-                client.getClientId(), "bob@example.com", "Eightplus1!", Map.of(
+                client.getClientId(), "bob@example.com", "lowercase!", Map.of(
                         "email", "bob@example.com", "phone_number", "+4915112345679")));
+    }
+
+    @Test
+    void createUserPoolLeavesPasswordRequirementsTheRequestOmittedUnset() {
+        // The four Require* members are unboxed booleans in the Cognito model, so an SDK told to
+        // require nothing sends a PasswordPolicy carrying only the members it can express -
+        // aws-sdk-go-v2 emits `if v.RequireLowercase != false`. Treating their absence as
+        // "enabled" turned Terraform's require_lowercase = false into permanent drift on the
+        // first plan after create, because UpdateUserPool (which does not normalize) reported
+        // them absent while CreateUserPool reported them true.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "NoRequirementsPool",
+                "Policies", Map.of("PasswordPolicy", Map.of("MinimumLength", 7))
+        ), "us-east-1");
+
+        Map<String, Object> expectedPasswordPolicy = new HashMap<>();
+        expectedPasswordPolicy.put("MinimumLength", 7);
+        expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "no-requirements-client", false, false, List.of(), List.of());
+        assertDoesNotThrow(() -> service.signUp(
+                client.getClientId(), "alice@example.com", "abcdefg", Map.of(
+                        "email", "alice@example.com", "phone_number", "+4915112345678")));
+    }
+
+    @Test
+    void createUserPoolKeepsPasswordRequirementsTheRequestDisabledExplicitly() {
+        // A caller that can express false - the Java SDK boxes these members, and so does a
+        // hand-written JSON 1.1 request - must have it stored as false, not overwritten.
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "ExplicitFalsePool",
+                "Policies", Map.of("PasswordPolicy", Map.of(
+                        "MinimumLength", 10,
+                        "RequireUppercase", false,
+                        "RequireLowercase", true,
+                        "RequireNumbers", false,
+                        "RequireSymbols", false))
+        ), "us-east-1");
+
+        Map<String, Object> expectedPasswordPolicy = new HashMap<>();
+        expectedPasswordPolicy.put("MinimumLength", 10);
+        expectedPasswordPolicy.put("RequireUppercase", false);
+        expectedPasswordPolicy.put("RequireLowercase", true);
+        expectedPasswordPolicy.put("RequireNumbers", false);
+        expectedPasswordPolicy.put("RequireSymbols", false);
+        expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
+        assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
     }
 
     @Test

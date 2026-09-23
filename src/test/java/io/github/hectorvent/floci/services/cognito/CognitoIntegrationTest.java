@@ -480,6 +480,66 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void createUserPoolDoesNotEnablePasswordRequirementsTheRequestOmitted() throws Exception {
+        // RequireUppercase and its three siblings are unboxed booleans in the Cognito model, so a
+        // client that wants them off omits them: this body is what aws-sdk-go-v2 puts on the wire
+        // for a policy with every require_* set to false. Answering it with the members enabled
+        // made Terraform report drift on all four in the first plan after a create.
+        JsonNode created = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "NoPasswordRequirementsPool",
+                  "Policies": {
+                    "PasswordPolicy": {
+                      "MinimumLength": 7
+                    }
+                  }
+                }
+                """);
+        String pool = created.path("UserPool").path("Id").asText();
+
+        JsonNode described = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(pool));
+
+        JsonNode policy = described.path("UserPool").path("Policies").path("PasswordPolicy");
+        assertEquals(7, policy.path("MinimumLength").asInt());
+        assertEquals(7, policy.path("TemporaryPasswordValidityDays").asInt());
+        assertFalse(policy.has("RequireUppercase"), "RequireUppercase must not be defaulted on");
+        assertFalse(policy.has("RequireLowercase"), "RequireLowercase must not be defaulted on");
+        assertFalse(policy.has("RequireNumbers"), "RequireNumbers must not be defaulted on");
+        assertFalse(policy.has("RequireSymbols"), "RequireSymbols must not be defaulted on");
+    }
+
+    @Test
+    void createUserPoolKeepsPasswordRequirementsTheRequestDisabledExplicitly() throws Exception {
+        // The Java SDK boxes these members, so it can say false where the Go SDK cannot. That
+        // false must be stored and echoed rather than replaced.
+        JsonNode created = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ExplicitlyDisabledRequirementsPool",
+                  "Policies": {
+                    "PasswordPolicy": {
+                      "MinimumLength": 10,
+                      "RequireUppercase": false,
+                      "RequireLowercase": true,
+                      "RequireNumbers": false,
+                      "RequireSymbols": false
+                    }
+                  }
+                }
+                """);
+
+        JsonNode policy = created.path("UserPool").path("Policies").path("PasswordPolicy");
+        assertEquals(10, policy.path("MinimumLength").asInt());
+        assertFalse(policy.path("RequireUppercase").asBoolean());
+        assertTrue(policy.path("RequireLowercase").asBoolean());
+        assertFalse(policy.path("RequireNumbers").asBoolean());
+        assertFalse(policy.path("RequireSymbols").asBoolean());
+    }
+
+    @Test
     @Order(7)
     void confirmSignUpRequiresValidConfirmationCode() throws Exception {
         given().delete("/_aws/ses").then().statusCode(200);
