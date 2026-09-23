@@ -9,7 +9,9 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
+import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import org.junit.jupiter.api.Test;
 
@@ -17,12 +19,18 @@ import java.io.Closeable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -37,6 +45,132 @@ import static org.mockito.Mockito.when;
 class EcsServiceTeardownTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void stopDuringContainerStartupCompletesAfterTheHandleArrives() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch finishStart = new CountDownLatch(1);
+        AtomicReference<String> taskArn = new AtomicReference<>();
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            taskArn.set(task.getTaskArn());
+            startEntered.countDown();
+            if (!finishStart.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("container startup was not released");
+            }
+            Container container = new Container();
+            container.setName("app");
+            container.setRuntimeId("docker-id");
+            task.setContainers(List.of(container));
+            return handle;
+        });
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenReturn(Map.of("app", 0));
+
+        EcsService service = new EcsService(
+                new RegionResolver(REGION, "000000000000"), containerManager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("nginx:alpine");
+        service.registerTaskDefinition("startup-stop", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+
+        CompletableFuture<List<EcsTask>> launch = CompletableFuture.supplyAsync(() ->
+                service.runTask(null, "startup-stop", 1, LaunchType.FARGATE, null, null,
+                        List.of(), null, REGION));
+        try {
+            assertTrue(startEntered.await(5, TimeUnit.SECONDS));
+            assertEquals("STOPPING", service.stopTask(null, taskArn.get(), null, REGION).getLastStatus());
+        } finally {
+            finishStart.countDown();
+        }
+
+        launch.get(5, TimeUnit.SECONDS);
+        assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn.get()), REGION).getFirst().getLastStatus());
+        verify(containerManager).stopTaskAndCollectExitCodes(handle);
+        service.stopManagedContainers();
+    }
+
+    @Test
+    void stopTaskRecoversContainerIdsWhenTheRuntimeHandleIsMissing() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        EcsTaskHandle original = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            Container container = new Container();
+            container.setName("app");
+            container.setDockerId("docker-id");
+            task.setContainers(List.of(container));
+            return original;
+        });
+        when(containerManager.stopTaskAndCollectExitCodes(any())).thenReturn(Map.of("app", 0));
+
+        EcsService service = new EcsService(
+                new RegionResolver(REGION, "000000000000"), containerManager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("nginx:alpine");
+        service.registerTaskDefinition("recover-handle", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "recover-handle", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        // A no-op Docker test double leaves the container alive while shutdown drops its handle.
+        service.stopManagedContainers();
+        service.afterReset();
+        service.stopTask(null, taskArn, null, REGION);
+
+        verify(containerManager).stopTaskAndCollectExitCodes(argThat(
+                handle -> "docker-id".equals(handle.getContainerIds().get("app"))));
+        assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
+        service.stopManagedContainers();
+    }
+
+    @Test
+    void failedContainerRemovalKeepsTaskStoppingUntilReconciliationRetries() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        Map<String, Integer> failed = new HashMap<>();
+        failed.put("app", null);
+        when(containerManager.stopTaskAndCollectExitCodes(handle))
+                .thenReturn(failed, Map.of("app", 0));
+
+        EcsService service = new EcsService(
+                new RegionResolver(REGION, "000000000000"), containerManager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("nginx:alpine");
+        service.registerTaskDefinition("retry-removal", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "retry-removal", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        service.stopTask(null, taskArn, null, REGION);
+        assertEquals("STOPPING", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
+
+        service.reconcile();
+        assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
+        verify(containerManager, times(2)).stopTaskAndCollectExitCodes(handle);
+    }
 
     @Test
     void stopManagedContainersStopsEachRunningTaskOnce() {
@@ -121,7 +255,7 @@ class EcsServiceTeardownTest {
             if (teardownAttempts.incrementAndGet() == 2) {
                 handle.removeLogStream("docker-id");
             }
-            return Map.of();
+            return Map.of("app", 0);
         });
 
         EcsService service = new EcsService(

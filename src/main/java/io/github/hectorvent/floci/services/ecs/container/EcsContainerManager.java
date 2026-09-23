@@ -74,6 +74,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -1127,7 +1128,12 @@ public class EcsContainerManager {
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
             String name = entry.getKey();
             String dockerId = entry.getValue();
-            exitCodes.put(name, getExitCodeIfStopped(dockerId));
+            Integer exitCode = handle.getRecordedExitCode(name);
+            if (exitCode == null) {
+                exitCode = getExitCodeIfStopped(dockerId);
+                handle.recordExitCode(name, exitCode);
+            }
+            exitCodes.put(name, exitCode);
             // Read before the removal below, which is the last moment the daemon still knows it.
             handle.recordFinishedAt(name, getFinishedAtIfStopped(dockerId));
             try {
@@ -1137,13 +1143,16 @@ public class EcsContainerManager {
                 terminatedContainerIds.add(dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
+                exitCodes.put(name, null);
             }
         }
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
-        cleanupProtectedNetwork(handle);
-        removeFirelensVolume(handle);
+        if (exitCodes.values().stream().allMatch(Objects::nonNull)) {
+            cleanupProtectedNetwork(handle);
+            removeFirelensVolume(handle);
+        }
         return exitCodes;
     }
 

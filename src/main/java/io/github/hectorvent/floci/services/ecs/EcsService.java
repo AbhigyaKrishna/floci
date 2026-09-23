@@ -1294,9 +1294,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     markTaskRunning(task);
                     cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
                     LOG.infov("Started ECS task (docker): {0}", taskArn);
-                    registerTaskWithLoadBalancers(task, cluster, region);
+                    boolean stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
+                    if (!stopRequested) {
+                        registerTaskWithLoadBalancers(task, cluster, region);
+                    }
                     if (eventPublisher != null) {
                         eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                    }
+                    if (stopRequested) {
+                        stopTask(cluster.getClusterName(), taskArn, task.getStoppedReason(), task.getStopCode(), region);
                     }
                 } catch (Exception e) {
                     LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
@@ -1662,27 +1668,43 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
             return task;
         }
-        task.setDesiredStatus(TaskStatus.STOPPED.name());
-        task.setLastStatus(TaskStatus.STOPPING.name());
-        task.setStoppingAt(Instant.now());
-        task.setStoppedReason(reason != null ? reason : "Stopped by user");
-        task.setStopCode(stopCode);
-        task.bumpVersion();
-
-        deregisterTaskFromLoadBalancers(task, region);
+        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+            task.setDesiredStatus(TaskStatus.STOPPED.name());
+            task.setLastStatus(TaskStatus.STOPPING.name());
+            task.setStoppingAt(Instant.now());
+            task.setStoppedReason(reason != null ? reason : "Stopped by user");
+            task.setStopCode(stopCode);
+            task.bumpVersion();
+            deregisterTaskFromLoadBalancers(task, region);
+        }
 
         Map<String, Integer> exitCodes = Map.of();
         Map<String, Instant> finishedAt = Map.of();
         if (dockerMode) {
-            EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
+            EcsTaskHandle handle = taskHandles.get(task.getTaskArn());
+            if (handle == null) {
+                handle = recoverTaskHandle(task, region);
+                if (handle == null) {
+                    LOG.warnv("Cannot stop ECS task {0}: no Docker container IDs are available", task.getTaskArn());
+                    return task;
+                }
+            }
             try {
                 exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
-            } finally {
-                retainUnresolvedLogHandle(task.getTaskArn(), handle);
+            } catch (Exception e) {
+                LOG.warnv(e, "Could not stop ECS task {0}; retrying on the next reconciliation tick",
+                        task.getTaskArn());
+                return task;
             }
-            if (handle != null) {
-                finishedAt = handle.getFinishedAt();
+            if (exitCodes.size() != handle.getContainerIds().size()
+                    || exitCodes.values().stream().anyMatch(Objects::isNull)) {
+                LOG.warnv("ECS task {0} still has containers pending removal; retrying on the next reconciliation tick",
+                        task.getTaskArn());
+                return task;
             }
+            taskHandles.remove(task.getTaskArn(), handle);
+            retainUnresolvedLogHandle(task.getTaskArn(), handle);
+            finishedAt = handle.getFinishedAt();
         }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
@@ -3901,6 +3923,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return;
         }
 
+        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+            stopTask(task.getClusterArn(), taskArn, task.getStoppedReason(), task.getStopCode(), taskRegion(task));
+            return;
+        }
+
         if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
             reconcileStoppedTask(taskArn);
             return;
@@ -4043,6 +4070,37 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (handle != null && handle.hasOpenLogStreams()) {
             taskHandles.put(taskArn, handle);
         }
+    }
+
+    private EcsTaskHandle recoverTaskHandle(EcsTask task, String region) {
+        if (task.getContainers() == null || task.getContainers().isEmpty()) {
+            return null;
+        }
+        Map<String, String> containerIds = new LinkedHashMap<>();
+        for (Container container : task.getContainers()) {
+            String dockerId = container.getDockerId() != null
+                    ? container.getDockerId() : container.getRuntimeId();
+            if (dockerId == null) {
+                return null;
+            }
+            containerIds.put(container.getName(), dockerId);
+        }
+        Map<String, Integer> stopTimeouts = new LinkedHashMap<>();
+        try {
+            TaskDefinition definition = resolveTaskDefinitionOrThrow(task.getTaskDefinitionArn(), region);
+            for (ContainerDefinition container : definition.getContainerDefinitions()) {
+                if (container.getStopTimeout() != null) {
+                    stopTimeouts.put(container.getName(), container.getStopTimeout());
+                }
+            }
+        } catch (AwsException e) {
+            LOG.warnv(e, "Could not load task definition for {0}; using the default container stop timeout",
+                    task.getTaskArn());
+        }
+        EcsTaskHandle recovered = new EcsTaskHandle(task.getTaskArn(), containerIds, Map.of(),
+                null, task.getNetworkInterfaceId(), region, stopTimeouts);
+        EcsTaskHandle existing = taskHandles.putIfAbsent(task.getTaskArn(), recovered);
+        return existing != null ? existing : recovered;
     }
 
     /**
