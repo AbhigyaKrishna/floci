@@ -282,6 +282,7 @@ class CloudFormationBatchIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         // Both entities are gone. Under the legacy switch these describes still returned them.
         givenBatchJson("{\"jobQueues\":[\"%s\"]}".formatted(queueName))

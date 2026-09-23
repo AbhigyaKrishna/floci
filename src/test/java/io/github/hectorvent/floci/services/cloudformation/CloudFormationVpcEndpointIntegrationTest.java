@@ -84,6 +84,7 @@ class CloudFormationVpcEndpointIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
 
         String endpointsAfterDelete = given()
             .formParam("Action", "DescribeVpcEndpoints")

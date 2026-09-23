@@ -592,6 +592,7 @@ class CloudFormationPipesCleanupIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStackDeleted(stackName);
     }
 
     private static void assertPipe(String pipeName) {
