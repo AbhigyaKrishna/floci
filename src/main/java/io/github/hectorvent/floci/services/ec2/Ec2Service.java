@@ -33,6 +33,7 @@ import org.jboss.logging.Logger;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -3123,6 +3124,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     public List<Map<String, String>> terminateInstances(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
         List<Map<String, String>> result = new ArrayList<>();
+        // Every instance named here is going away, so none of them counts as a live dependant of
+        // a capture -- not the ones already processed, which linger as shutting-down while their
+        // containers are torn down asynchronously, and not the ones still waiting their turn.
+        Set<String> terminating = new LinkedHashSet<>(instanceIds);
+        // Captured HERE, on the request thread, because the post-teardown hook below runs on the
+        // teardown executor where no request context is active and every account-aware store
+        // would silently fall back to the default account.
+        String owner = callerAccountId();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
 
@@ -3134,7 +3143,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setState(InstanceState.terminated());
                 inst.setTerminatedAt(System.currentTimeMillis());
             } else {
-                containerManager.terminate(inst);
+                // Also attempt the reclaim once this container is really gone. The synchronous
+                // attempt below runs while teardown is still scheduled, so for a batch whose
+                // containers all tear down slowly every in-loop attempt can be refused by the
+                // daemon and, without this, nothing would try again.
+                containerManager.terminate(inst, () ->
+                        RequestScopes.runAs(owner, () -> reclaimCapturesPinnedBy(region, inst, terminating)));
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
@@ -3143,7 +3157,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             releaseStandaloneInterfacesOnTermination(region, inst);
             instances.put(key(region, id), inst);
             // The last instance depending on a deregistered AMI's capture has just gone away.
-            reclaimCapturesPinnedBy(region, inst);
+            // Cheap and usually sufficient: by here the container is often already removed.
+            reclaimCapturesPinnedBy(region, inst, terminating);
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
             entry.put("previousState", prev.getName());
@@ -5510,13 +5525,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      *
      * <p>Callers must hold {@link #imageRegistryLock}.
      *
-     * @param excludedInstanceId an instance not to count as a live dependant, used by the
-     *                           terminate path where the store still reads the instance as
-     *                           running while its container is being torn down; null to count
-     *                           every live instance
+     * @param excludedInstanceIds the instances not to count as live dependants, used by the
+     *                            terminate path where the store still reads every instance of the
+     *                            request as running or shutting-down while their containers are
+     *                            being torn down; null or empty to count every live instance
      * @return true when the reference was released, so the caller knows to store the change
      */
-    private boolean reclaimCapturedImage(Image image, String excludedInstanceId) {
+    private boolean reclaimCapturedImage(Image image, Set<String> excludedInstanceIds) {
         String captured = image.getDockerImage();
         if (captured == null || config.services().ec2().mock()) {
             return false;
@@ -5530,7 +5545,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return false;
         }
         boolean stillLaunchable = instances.scan(i -> true).stream()
-                .filter(i -> i.getRegion() != null && !i.getInstanceId().equals(excludedInstanceId))
+                .filter(i -> i.getRegion() != null
+                        && (excludedInstanceIds == null || !excludedInstanceIds.contains(i.getInstanceId())))
                 .filter(i -> i.getState() != null && !"terminated".equals(i.getState().getName()))
                 .anyMatch(i -> captured.equals(capturedImageFor(i.getRegion(), i.getImageId())));
         if (stillLaunchable) {
@@ -5554,8 +5570,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      *
      * <p>Only tombstoned AMIs are considered: while the AMI is still registered its capture is
      * needed for the next launch.
+     *
+     * <p>{@code terminating} is the whole batch of the current request, not just this instance.
+     * A reclaim attempted for the first of them can be refused by the daemon while the other
+     * containers still exist, and {@link #reclaimCapturedImage} only clears the reference on
+     * success, so the attempt comes round again on each remaining instance of the batch.
      */
-    private void reclaimCapturesPinnedBy(String region, Instance terminated) {
+    private void reclaimCapturesPinnedBy(String region, Instance terminated, Set<String> terminating) {
         if (config.services().ec2().mock()) {
             return;
         }
@@ -5569,7 +5590,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     .filter(img -> DEREGISTERED_STATE.equals(img.getState()))
                     .findFirst()
                     .orElse(null);
-            if (holder != null && reclaimCapturedImage(holder, terminated.getInstanceId())) {
+            if (holder != null && reclaimCapturedImage(holder, terminating)) {
                 registeredImages.put(key(holder.getRegion(), holder.getImageId()), holder);
             }
         }
