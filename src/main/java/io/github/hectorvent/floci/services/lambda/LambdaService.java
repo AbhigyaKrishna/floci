@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -1046,11 +1047,23 @@ public class LambdaService implements ResourceProvider {
 
     /** Invokes a Lambda target ARN using the account encoded in that ARN. */
     public InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type) {
+        return invokeArn(functionArn, payload, type, 0);
+    }
+
+    /**
+     * Invokes a Lambda destination, carrying the number of destination deliveries that reached it
+     * so {@link AsyncInvokeDestinationRouter} can bound a chain that leads back into itself.
+     */
+    InvokeResult invokeArnFromDestination(String functionArn, byte[] payload, int chainDepth) {
+        return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);
+    }
+
+    private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
-        InvokeResult result = executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type, chainDepth);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -3290,6 +3303,38 @@ public class LambdaService implements ResourceProvider {
             }
         }
         return result;
+    }
+
+    /**
+     * The event invoke configuration that applies to an invocation of {@code fn}, or empty when
+     * the function has none. Unlike {@link #getEventInvokeConfig} this answers a background
+     * worker rather than an API caller, so an absent configuration is a result and not a fault.
+     *
+     * <p>The lookup key is the unqualified function ARN plus the version the invocation actually
+     * ran, which is where a function-level {@code PutFunctionEventInvokeConfig} stores its
+     * settings: that call names {@code $LATEST}, and so does a resolved unpublished function.
+     *
+     * <p>The read runs as the function's owning account. {@code PutFunctionEventInvokeConfig}
+     * stored the configuration in that account's partition of the account-aware backend, and the
+     * background worker calling this carries no request context, so without re-establishing the
+     * account the read would land in the default partition and a function in any other account
+     * would look as though it had no configuration at all.
+     */
+    public Optional<FunctionEventInvokeConfig> findEventInvokeConfig(LambdaFunction fn) {
+        if (fn == null || fn.getFunctionArn() == null) {
+            return Optional.empty();
+        }
+        String qualifier = fn.getVersion() != null ? fn.getVersion() : "$LATEST";
+        String functionArn = fn.getFunctionArn();
+        if (functionArn.endsWith(":" + qualifier)) {
+            functionArn = functionArn.substring(0, functionArn.length() - qualifier.length() - 1);
+        }
+        String region = AwsArnUtils.regionOrDefault(functionArn, null);
+        String key = eventInvokeKey(region, functionArn, qualifier);
+        String owner = fn.getAccountId() != null
+                ? fn.getAccountId()
+                : AwsArnUtils.accountOrDefault(functionArn, null);
+        return RequestScopes.callAs(owner, () -> Optional.ofNullable(eventInvokeConfigs.get(key)));
     }
 
     private String eventInvokeKey(String region, String functionArn, String qualifier) {

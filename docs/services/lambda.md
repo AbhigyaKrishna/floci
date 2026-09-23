@@ -52,8 +52,63 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `ListFunctionEventInvokeConfigs` | List the asynchronous invocation settings of every version and alias of a function |
 
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
-provisions it from a stack. Asynchronous invocations do not yet apply its retry, event age or
-destination settings.
+provisions it from a stack. Asynchronous invocations do not yet apply its retry or event age
+settings.
+
+### Asynchronous Invocation Destinations
+
+An asynchronous invocation (`InvocationType: Event`) delivers its result to the `OnSuccess` or
+`OnFailure` destination the configuration names. Four of AWS's five destination kinds are
+supported, routed by the service in the destination ARN: an EventBridge event bus, an SQS queue,
+an SNS topic, and another Lambda function. A function with no destination configured is unaffected, and delivery
+never changes what the caller sees: the invoke still answers `202` immediately, and a destination
+that rejects the record is logged rather than reported back.
+
+Every destination receives the same invocation record AWS sends:
+
+```json
+{
+  "version": "1.0",
+  "timestamp": "2026-09-22T10:15:31.123Z",
+  "requestContext": {
+    "requestId": "8ea123e4-1db7-4aba-9559-05a9a25c8b78",
+    "functionArn": "arn:aws:lambda:us-east-1:000000000000:function:bank-pawnshop:$LATEST",
+    "condition": "Success",
+    "approximateInvokeCount": 1
+  },
+  "requestPayload": { "bankId": "BANK-PawnShop" },
+  "responseContext": { "statusCode": 200, "executedVersion": "$LATEST" },
+  "responsePayload": { "bankId": "PawnShop", "rate": 3.5 }
+}
+```
+
+On an EventBridge destination the record is the event `detail`, under the source `lambda` and the
+detail type `Lambda Function Invocation Result - Success`, so a rule can match a field of the
+function's own response at `detail.responsePayload.<field>`. A failed invocation carries the detail
+type `Lambda Function Invocation Result - Failure`, a `condition` of `RetriesExhausted`, a
+`responseContext.functionError` of `Unhandled`, and the error as its `responsePayload`. That
+`functionError` member is present only on a failure record. Since retries are not applied, a
+failure reaches its destination once and `approximateInvokeCount` is always 1.
+
+Three limits are worth knowing:
+
+- **A destination configured on an alias does not fire.** The configuration is matched against the
+  version the invocation actually ran, so one stored for `$LATEST` or for an explicit version is
+  found, while one stored for an alias (`Qualifier: prod`) is not, and nothing is delivered. The
+  CDK `onSuccess` and `onFailure` properties store theirs under `$LATEST`, so a destination
+  declared that way is unaffected.
+- **An S3 `OnFailure` destination is not delivered.** AWS added an S3 bucket as a fifth
+  destination kind, on failure only. Floci routes on the service in the destination ARN and has
+  no `s3` arm, so such a record is dropped with a warning rather than written to the bucket. The
+  configuration is still stored and read back, so Terraform and CloudFormation converge; only the
+  delivery is missing.
+- **A chain of Lambda destinations stops at 16 hops, but only a chain of Lambda destinations.** A
+  function whose `OnSuccess` names another function would otherwise invoke forever; AWS halts such
+  a chain at about the same depth through recursive loop detection, and here the record at the
+  sixteenth hop is dropped with a warning. The bound is keyed on the destination being a Lambda
+  ARN, so a cycle that leaves and re-enters Lambda by another route is **not** bounded: a topic
+  that fans back to the function, or a bus rule targeting it, each start a fresh chain at zero.
+  Avoid configuring one until this is closed.
 
 ## Hot-Reloading via Reactive S3 Sync
 
