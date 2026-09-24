@@ -221,11 +221,26 @@ class EcsOneShotTaskLifecycleTest {
                 .count(1)
                 .build()).tasks().get(0).taskArn();
 
-        Task stopped = ecs.stopTask(StopTaskRequest.builder()
+        ecs.stopTask(StopTaskRequest.builder()
                 .cluster(clusterName)
                 .task(explicitTaskArn)
                 .reason("test-explicit-stop")
-                .build()).task();
+                .build());
+
+        WaiterOverrideConfiguration overrides = WaiterOverrideConfiguration.builder()
+                .waitTimeout(Duration.ofSeconds(60))
+                .build();
+        Task stopped;
+        try (EcsWaiter waiter = EcsWaiter.builder().client(ecs).build()) {
+            WaiterResponse<DescribeTasksResponse> response = waiter.waitUntilTasksStopped(
+                    DescribeTasksRequest.builder()
+                            .cluster(clusterName)
+                            .tasks(explicitTaskArn)
+                            .build(),
+                    overrides);
+            assertThat(response.matched().response()).isPresent();
+            stopped = response.matched().response().get().tasks().get(0);
+        }
 
         assertThat(stopped.lastStatus()).isEqualTo("STOPPED");
         assertThat(stopped.stoppedAt()).isNotNull();
