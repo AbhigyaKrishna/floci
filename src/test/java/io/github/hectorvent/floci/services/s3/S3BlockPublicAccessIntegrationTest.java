@@ -70,6 +70,22 @@ class S3BlockPublicAccessIntegrationTest {
     }
 
     @Test
+    void blockPublicPolicyAcceptsForAnyValueWithFixedPrincipalOrgPath() {
+        String bucket = createBucket();
+        putBucketPublicAccessBlock(bucket, false, false, true, false);
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*",
+                "Condition":{"ForAnyValue:StringLike":{"aws:PrincipalOrgPaths":
+                ["o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/"]}}}]}
+                """.formatted(bucket);
+
+        given().body(policy)
+                .when().put("/" + bucket + "?policy")
+                .then().statusCode(200);
+    }
+
+    @Test
     void aPublicBucketPolicyIsAcceptedWithoutBlockPublicPolicy() {
         String bucket = createBucket();
 

@@ -86,6 +86,28 @@ class S3PublicPolicyStatusTest {
     }
 
     @Test
+    void forAnyValueWithFixedPrincipalOrgPathIsNotPublic() {
+        assertFalse(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
+                "Condition":{"ForAnyValue:StringLike":{"aws:PrincipalOrgPaths":
+                ["o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/"]}}}]}
+                """));
+    }
+
+    @Test
+    void forAllValuesOrWildcardOrgPathDoesNotNarrowPublicAccess() {
+        for (String operator : new String[] {"ForAllValues:StringLike", "ForAnyValue:StringLike"}) {
+            String path = operator.startsWith("ForAllValues")
+                    ? "o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/"
+                    : "o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/*";
+            assertTrue(isPublic("""
+                    {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
+                    "Condition":{"%s":{"aws:PrincipalOrgPaths":["%s"]}}}]}
+                    """.formatted(operator, path)));
+        }
+    }
+
+    @Test
     void accessPointNameWildcardWithFixedAccountIsNotPublic() {
         assertFalse(isPublic("""
                 {"Statement":[{"Principal":"*","Resource":"arn:aws:s3:::b/*",

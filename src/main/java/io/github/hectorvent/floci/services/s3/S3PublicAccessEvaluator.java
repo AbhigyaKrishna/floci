@@ -206,7 +206,11 @@ final class S3PublicAccessEvaluator {
         Iterator<Map.Entry<String, JsonNode>> operators = conditions.fields();
         while (operators.hasNext()) {
             Map.Entry<String, JsonNode> operator = operators.next();
-            if (!operator.getValue().isObject() || !operatorNarrowsAccess(operator.getKey())) {
+            String operatorName = operator.getKey();
+            if (operatorName.regionMatches(true, 0, "ForAnyValue:", 0, "ForAnyValue:".length())) {
+                operatorName = operatorName.substring("ForAnyValue:".length());
+            }
+            if (!operator.getValue().isObject() || !operatorNarrowsAccess(operatorName)) {
                 continue;
             }
             Iterator<Map.Entry<String, JsonNode>> entries = operator.getValue().fields();
@@ -218,12 +222,12 @@ final class S3PublicAccessEvaluator {
                     return true;
                 }
                 if (NON_PUBLIC_CONDITION_KEYS.contains(key)
-                        && !operator.getKey().equalsIgnoreCase("IpAddress")
+                        && !operatorName.equalsIgnoreCase("IpAddress")
                         && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedValue)) {
                     return true;
                 }
                 if (SOURCE_IP_CONDITION_KEY.equals(key)
-                        && operator.getKey().equalsIgnoreCase("IpAddress")
+                        && operatorName.equalsIgnoreCase("IpAddress")
                         && allSourceIpRangesNarrow(entry.getValue())) {
                     return true;
                 }
