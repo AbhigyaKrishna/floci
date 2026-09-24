@@ -180,6 +180,11 @@ Critical areas:
     ./mvnw clean package
     ./mvnw clean package -DskipTests
 
+`make help` lists the Makefile shortcuts. The native binary and image: `make native`
+then `make native-image` (CI's flags, staged in `native/<arch>/`), `make native-host` for a
+binary built on this machine with the installed GraalVM, `make native-up` to run the image,
+`make compat SUITES="sdk-test-java compat-cdk"` for compatibility suites against it.
+
 ### Focused tests
 
     ./mvnw test -Dtest=SsmIntegrationTest

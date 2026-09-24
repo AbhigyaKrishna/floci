@@ -39,6 +39,12 @@ cd floci
 
 If you prefer to use your own Maven installation (3.9+), you can use `mvn` instead of `./mvnw`.
 
+`make help` lists the repository's shortcuts: `make dev`, `make test T=SsmIntegrationTest`,
+`make native` and `make native-image` for the native binary and its Docker image with the flags CI
+uses, `make native-host` and `make run-native` for a binary built and run on your machine without
+Docker, `make native-up` to run the image, and `make compat SUITES="sdk-test-java"` to run compatibility
+suites in Docker against it.
+
 ### Run Tests
 
 ```bash

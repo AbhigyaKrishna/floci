@@ -174,3 +174,12 @@ build:
   context: .
   dockerfile: docker/Dockerfile.native   # or docker/Dockerfile for fast JVM dev build
 ```
+
+Faster for iteration: `make native native-image` builds the binary once and packages it as
+`floci:local-native`, and `make native-up` runs that image through the `docker/compose.native.yml`
+overlay, which also sets the variables the compatibility workflow passes. `make compat
+SUITES="sdk-test-java compat-cdk"` then runs the named suites from `compatibility-tests/` in Docker
+against it. The suites expect a fresh emulator: `make clean-sidecars clean-volumes` first removes
+the containers and named volumes Floci left behind (the ECR registry's volume in particular, whose
+repositories Floci re-adopts on the next start), and `make native-down` removes the containers
+after a run.
