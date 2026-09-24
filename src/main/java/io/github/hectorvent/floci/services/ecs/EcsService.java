@@ -1290,16 +1290,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     task.setPullStartedAt(Instant.now());
                     EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
                     task.setPullStoppedAt(Instant.now());
-                    taskHandles.put(taskArn, handle);
-                    markTaskRunning(task);
-                    cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
-                    LOG.infov("Started ECS task (docker): {0}", taskArn);
-                    boolean stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
-                    if (!stopRequested) {
-                        registerTaskWithLoadBalancers(task, cluster, region);
-                    }
-                    if (eventPublisher != null) {
-                        eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                    boolean stopRequested;
+                    synchronized (task) {
+                        taskHandles.put(taskArn, handle);
+                        markTaskRunning(task);
+                        cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
+                        LOG.infov("Started ECS task (docker): {0}", taskArn);
+                        stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
+                        if (!stopRequested) {
+                            registerTaskWithLoadBalancers(task, cluster, region);
+                        }
+                        if (eventPublisher != null) {
+                            eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                        }
                     }
                     if (stopRequested) {
                         stopTask(cluster.getClusterName(), taskArn, task.getStoppedReason(), task.getStopCode(), region);
@@ -1703,7 +1706,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 return task;
             }
             if (exitCodes.size() != handle.getContainerIds().size()
-                    || exitCodes.values().stream().anyMatch(Objects::isNull)) {
+                    || !handle.allContainersRemoved()) {
                 LOG.warnv("ECS task {0} still has containers pending removal; retrying on the next reconciliation tick",
                         task.getTaskArn());
                 return task;

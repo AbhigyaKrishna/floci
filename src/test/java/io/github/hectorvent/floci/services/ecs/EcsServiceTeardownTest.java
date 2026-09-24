@@ -48,6 +48,64 @@ class EcsServiceTeardownTest {
     private static final String REGION = "us-east-1";
 
     @Test
+    void startupTransitionWaitsForTheTaskLock() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch finishStart = new CountDownLatch(1);
+        AtomicReference<EcsTask> startingTask = new AtomicReference<>();
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            startingTask.set(task);
+            startEntered.countDown();
+            if (!finishStart.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("container startup was not released");
+            }
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("app", "docker-id"), Map.of());
+        });
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"),
+                containerManager, config, mock(EcsLoadBalancerRegistrar.class),
+                new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("nginx:alpine");
+        service.registerTaskDefinition("locked-start", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        AtomicReference<Throwable> launchFailure = new AtomicReference<>();
+        Thread launch = new Thread(() -> {
+            try {
+                service.runTask(null, "locked-start", 1, LaunchType.FARGATE, null, null,
+                        List.of(), null, REGION);
+            } catch (Throwable failure) {
+                launchFailure.set(failure);
+            }
+        });
+        launch.start();
+        try {
+            assertTrue(startEntered.await(5, TimeUnit.SECONDS));
+            synchronized (startingTask.get()) {
+                finishStart.countDown();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (launch.getState() != Thread.State.BLOCKED) {
+                    assertTrue(launch.isAlive(), "startup finished without acquiring the task lock");
+                    assertTrue(System.nanoTime() < deadline, "startup did not wait for the task lock");
+                    Thread.onSpinWait();
+                }
+            }
+            launch.join(5000);
+            assertFalse(launch.isAlive());
+            assertNull(launchFailure.get());
+            assertEquals("RUNNING", startingTask.get().getLastStatus());
+        } finally {
+            finishStart.countDown();
+            service.stopManagedContainers();
+        }
+    }
+
+    @Test
     void stopDuringContainerStartupCompletesAfterTheHandleArrives() throws Exception {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
@@ -70,7 +128,10 @@ class EcsServiceTeardownTest {
             task.setContainers(List.of(container));
             return handle;
         });
-        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenReturn(Map.of("app", 0));
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
+            return Map.of("app", 0);
+        });
 
         EcsService service = new EcsService(
                 new RegionResolver(REGION, "000000000000"), containerManager, config,
@@ -114,7 +175,11 @@ class EcsServiceTeardownTest {
             task.setContainers(List.of(container));
             return original;
         });
-        when(containerManager.stopTaskAndCollectExitCodes(any())).thenReturn(Map.of("app", 0));
+        when(containerManager.stopTaskAndCollectExitCodes(any())).thenAnswer(invocation -> {
+            EcsTaskHandle stoppingHandle = invocation.getArgument(0);
+            stoppingHandle.recordContainerRemoved("app");
+            return Map.of("app", 0);
+        });
 
         EcsService service = new EcsService(
                 new RegionResolver(REGION, "000000000000"), containerManager, config,
@@ -150,8 +215,14 @@ class EcsServiceTeardownTest {
         when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
         Map<String, Integer> failed = new HashMap<>();
         failed.put("app", null);
-        when(containerManager.stopTaskAndCollectExitCodes(handle))
-                .thenReturn(failed, Map.of("app", 0));
+        AtomicInteger attempts = new AtomicInteger();
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            if (attempts.incrementAndGet() == 1) {
+                return failed;
+            }
+            handle.recordContainerRemoved("app");
+            return Map.of("app", 0);
+        });
 
         EcsService service = new EcsService(
                 new RegionResolver(REGION, "000000000000"), containerManager, config,
@@ -174,6 +245,47 @@ class EcsServiceTeardownTest {
     }
 
     @Test
+    void removedContainerWithUnknownExitCodeStopsWithoutInventingSuccess() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            Container container = new Container();
+            container.setName("app");
+            task.setContainers(List.of(container));
+            return handle;
+        });
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
+            Map<String, Integer> codes = new HashMap<>();
+            codes.put("app", null);
+            return codes;
+        });
+
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"),
+                containerManager, config, mock(EcsLoadBalancerRegistrar.class),
+                new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("nginx:alpine");
+        service.registerTaskDefinition("unknown-exit", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "unknown-exit", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        EcsTask stopped = service.stopTask(null, taskArn, null, REGION);
+        assertEquals("STOPPED", stopped.getLastStatus());
+        assertNull(stopped.getContainers().getFirst().getExitCode());
+        service.reconcile();
+        verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handle);
+        service.stopManagedContainers();
+    }
+
+    @Test
     void concurrentStopsTeardownTheTaskOnlyOnce() throws Exception {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
@@ -188,6 +300,7 @@ class EcsServiceTeardownTest {
             if (!finishTeardown.await(5, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("teardown was not released");
             }
+            handle.recordContainerRemoved("app");
             return Map.of("app", 0);
         });
 
@@ -316,6 +429,7 @@ class EcsServiceTeardownTest {
         when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
         AtomicInteger teardownAttempts = new AtomicInteger();
         when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
             if (teardownAttempts.incrementAndGet() == 2) {
                 handle.removeLogStream("docker-id");
             }

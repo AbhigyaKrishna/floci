@@ -25,15 +25,44 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EcsContainerManagerLifecycleTest {
+
+    @Test
+    void forceRemovalWithUnknownExitCodeDoesNotBecomeSuccessOnRetry() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        DockerClient dockerClient = mock(DockerClient.class);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(dockerClient.stopContainerCmd("docker-id")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("docker-id")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+
+        EcsContainerManager manager = spy(manager(lifecycleManager));
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        doAnswer(ignored -> handle.allContainersRemoved() ? 0 : null)
+                .when(manager).getExitCodeIfStopped("docker-id");
+
+        Map<String, Integer> firstAttempt = manager.stopTaskAndCollectExitCodes(handle);
+        Map<String, Integer> retry = manager.stopTaskAndCollectExitCodes(handle);
+
+        assertTrue(handle.allContainersRemoved());
+        assertTrue(firstAttempt.containsKey("app"));
+        assertNull(firstAttempt.get("app"));
+        assertNull(retry.get("app"));
+        verify(remove, times(1)).exec();
+    }
 
     @Test
     void failedRemovalLeavesTheTaskContainerUnresolvedForRetry() {

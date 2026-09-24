@@ -74,7 +74,6 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -1111,6 +1110,9 @@ public class EcsContainerManager {
         // period its container definition asked for.
         Set<String> terminatedContainerIds = new HashSet<>();
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
+            if (handle.isContainerRemoved(entry.getKey())) {
+                continue;
+            }
             String dockerId = entry.getValue();
             try {
                 lifecycleManager.getDockerClient().stopContainerCmd(dockerId)
@@ -1127,6 +1129,10 @@ public class EcsContainerManager {
         // Phase 2: inspect exit codes, then remove.
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
             String name = entry.getKey();
+            if (handle.isContainerRemoved(name)) {
+                exitCodes.put(name, handle.getRecordedExitCode(name));
+                continue;
+            }
             String dockerId = entry.getValue();
             Integer exitCode = handle.getRecordedExitCode(name);
             if (exitCode == null) {
@@ -1139,8 +1145,10 @@ public class EcsContainerManager {
             try {
                 lifecycleManager.getDockerClient().removeContainerCmd(dockerId).withForce(true).exec();
                 terminatedContainerIds.add(dockerId);
+                handle.recordContainerRemoved(name);
             } catch (NotFoundException ignored) {
                 terminatedContainerIds.add(dockerId);
+                handle.recordContainerRemoved(name);
             } catch (Exception e) {
                 LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
                 exitCodes.put(name, null);
@@ -1149,7 +1157,7 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
-        if (exitCodes.values().stream().allMatch(Objects::nonNull)) {
+        if (handle.allContainersRemoved()) {
             cleanupProtectedNetwork(handle);
             removeFirelensVolume(handle);
         }
