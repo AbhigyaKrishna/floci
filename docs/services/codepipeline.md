@@ -39,6 +39,14 @@ A retried execution counts toward the `QUEUED`/`PARALLEL` active-execution limit
 the same execution while it is still running, including while sibling actions of a failed action
 finish, returns `ConflictException`.
 
+S3 source actions resolve `sourceRevisions` from the object actually consumed by the execution.
+Unversioned objects report their ETag as the revision ID; versioned objects report the version ID.
+`StartPipelineExecution.sourceRevisions` is treated as an override, including supported S3 object-key
+and version-ID overrides, rather than being copied directly into execution history.
+Resolved revisions appear in `ListPipelineExecutions` summaries, as on AWS. `RollbackStage` reruns
+with the object key and version ID the target execution consumed, so rolling back redeploys that
+version rather than the latest upload.
+
 The following providers execute against local Floci services:
 
 | Category | Provider | Behavior |

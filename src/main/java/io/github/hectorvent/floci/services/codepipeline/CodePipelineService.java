@@ -34,6 +34,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -466,7 +467,8 @@ public class CodePipelineService {
         execution.setStatusSummary("Pipeline execution started.");
         execution.setStartTime(now());
         execution.setLastUpdateTime(execution.getStartTime());
-        execution.setSourceRevisions(objectList(request.path("sourceRevisions")));
+        execution.setSourceRevisions(new ArrayList<>());
+        execution.setSourceRevisionOverrides(sourceRevisionOverrides(request, pipeline));
         execution.setVariables(variableList(request.path("variables")));
         Map<String, String> trigger = new LinkedHashMap<>();
         trigger.put("triggerType", triggerType);
@@ -832,7 +834,9 @@ public class CodePipelineService {
     private ObjectNode startExecutionFrom(CodePipelineExecution source, String region, String account) {
         ObjectNode start = mapper.createObjectNode();
         start.put("name", source.getPipelineName());
-        start.set("sourceRevisions", mapper.valueToTree(source.getSourceRevisions()));
+        synchronized (source) {
+            start.set("sourceRevisions", mapper.valueToTree(source.getSourceRevisionOverrides()));
+        }
         ArrayNode vars = start.putArray("variables");
         source.getVariables().forEach(v -> vars.addObject()
                 .put("name", v.get("name"))
@@ -1316,20 +1320,28 @@ public class CodePipelineService {
         JsonNode config = action.path("configuration");
         if ("Source".equals(state.getCategory())) {
             String bucket = config.path("S3Bucket").asText(config.path("BucketName").asText(null));
-            String key = config.path("S3ObjectKey").asText(config.path("ObjectKey").asText(null));
-            S3Object object = s3Service.getObject(bucket, key);
+            String key = effectiveS3SourceKey(execution, state.getActionName(), config);
+            String versionId = sourceRevisionOverride(
+                    execution, state.getActionName(), "S3_OBJECT_VERSION_ID");
+            S3Object object = s3Service.getObject(bucket, key, versionId);
             for (JsonNode artifact : action.path("outputArtifacts")) {
                 runtimeArtifacts.put(artifactKey(execution, artifact.path("name").asText()), object.getData());
             }
-            Map<String, Object> revision = new LinkedHashMap<>();
-            revision.put("name", state.getActionName());
-            revision.put("revisionId", object.getVersionId() != null ? object.getVersionId() : object.getETag());
-            revision.put("revisionChangeIdentifier", object.getETag());
-            revision.put("revisionSummary", bucket + "/" + key);
-            revision.put("revisionUrl", "s3://" + bucket + "/" + key);
-            revision.put("created", object.getLastModified().toEpochMilli() / 1000.0);
-            execution.getArtifactRevisions().add(revision);
-            state.setExternalExecutionId(revision.get("revisionId").toString());
+            String revisionId = object.getVersionId() != null
+                    ? object.getVersionId() : unquoteETag(object.getETag());
+            synchronized (execution) {
+                Map<String, Object> revision = new LinkedHashMap<>();
+                revision.put("name", state.getActionName());
+                revision.put("revisionId", revisionId);
+                revision.put("revisionChangeIdentifier", unquoteETag(object.getETag()));
+                revision.put("revisionSummary", bucket + "/" + key);
+                revision.put("revisionUrl", "s3://" + bucket + "/" + key);
+                revision.put("created", object.getLastModified().toEpochMilli() / 1000.0);
+                execution.getArtifactRevisions().add(revision);
+                upsertSourceRevision(execution, state.getActionName(), revisionId, bucket, key, object);
+                pinResolvedS3Version(execution, state.getActionName(), object.getVersionId());
+            }
+            state.setExternalExecutionId(revisionId);
             return;
         }
         String bucket = config.path("BucketName").asText(config.path("S3Bucket").asText(null));
@@ -1762,10 +1774,14 @@ public class CodePipelineService {
     }
 
     private ObjectNode executionNode(CodePipelineExecution execution) {
-        ObjectNode node = mapper.valueToTree(execution);
+        ObjectNode node;
+        synchronized (execution) {
+            node = mapper.valueToTree(execution);
+        }
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
-                "sourceRevisions", "actionExecutions", "currentStage", "stopRequested", "abandon",
-                "rollbackTargetPipelineExecutionId", "stageExecutionStatuses", "artifactsReleased"));
+                "sourceRevisions", "sourceRevisionOverrides", "actionExecutions", "currentStage",
+                "stopRequested", "abandon", "rollbackTargetPipelineExecutionId", "stageExecutionStatuses",
+                "artifactsReleased"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
                     "rollbackTargetPipelineExecutionId", execution.getRollbackTargetPipelineExecutionId());
@@ -1782,7 +1798,9 @@ public class CodePipelineService {
         putIfNotNull(node, "lastUpdateTime", execution.getLastUpdateTime());
         node.put("executionMode", execution.getExecutionMode());
         node.put("executionType", execution.getExecutionType());
-        node.set("sourceRevisions", mapper.valueToTree(execution.getSourceRevisions()));
+        synchronized (execution) {
+            node.set("sourceRevisions", mapper.valueToTree(execution.getSourceRevisions()));
+        }
         node.set("trigger", mapper.valueToTree(execution.getTrigger()));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
@@ -1875,11 +1893,107 @@ public class CodePipelineService {
         return "Failed";
     }
 
-    private List<Map<String, Object>> objectList(JsonNode node) {
-        if (node == null || !node.isArray()) {
+    private List<Map<String, Object>> sourceRevisionOverrides(JsonNode request, CodePipelinePipeline pipeline) {
+        JsonNode overridesNode = request.get("sourceRevisions");
+        if (overridesNode == null || overridesNode.isNull()) {
             return new ArrayList<>();
         }
-        return mapper.convertValue(node, new TypeReference<List<Map<String, Object>>>() {});
+        if (!overridesNode.isArray()) {
+            throw new AwsException("ValidationException", "sourceRevisions must be an array", 400);
+        }
+        List<Map<String, Object>> overrides = new ArrayList<>();
+        Set<String> seenOverrides = new HashSet<>();
+        for (JsonNode override : overridesNode) {
+            if (!override.isObject()) {
+                throw new AwsException("ValidationException", "sourceRevisions entries must be objects", 400);
+            }
+            requireOnlyMembers(override, "sourceRevisions entry",
+                    Set.of("actionName", "revisionType", "revisionValue"));
+            String actionName = text(override, "actionName");
+            String revisionType = text(override, "revisionType");
+            String revisionValue = text(override, "revisionValue");
+            if (!seenOverrides.add(actionName + "\0" + revisionType)) {
+                throw new AwsException("ValidationException",
+                        "Duplicate " + revisionType + " override for source action " + actionName, 400);
+            }
+            JsonNode action = sourceActionByName(pipeline, actionName);
+            String provider = action.path("actionTypeId").path("provider").asText();
+            if (!"S3".equals(provider)) {
+                throw new AwsException("ValidationException",
+                        "Source revision overrides are not supported for provider " + provider, 400);
+            }
+            if (!List.of("S3_OBJECT_KEY", "S3_OBJECT_VERSION_ID").contains(revisionType)) {
+                throw new AwsException("ValidationException",
+                        "Invalid S3 source revision type: " + revisionType, 400);
+            }
+            if ("S3_OBJECT_KEY".equals(revisionType)
+                    && !Boolean.parseBoolean(action.path("configuration")
+                            .path("AllowOverrideForS3ObjectKey").asText("false"))) {
+                throw new AwsException("ValidationException",
+                        "S3_OBJECT_KEY override requires AllowOverrideForS3ObjectKey=true", 400);
+            }
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("actionName", actionName);
+            value.put("revisionType", revisionType);
+            value.put("revisionValue", revisionValue);
+            overrides.add(value);
+        }
+        return overrides;
+    }
+
+    private JsonNode sourceActionByName(CodePipelinePipeline pipeline, String actionName) {
+        for (JsonNode stage : pipeline.getDeclaration().path("stages")) {
+            for (JsonNode action : stage.path("actions")) {
+                if ("Source".equals(action.path("actionTypeId").path("category").asText())
+                        && actionName.equals(action.path("name").asText())) {
+                    return action;
+                }
+            }
+        }
+        throw new AwsException("ValidationException", "Source action not found: " + actionName, 400);
+    }
+
+    private String effectiveS3SourceKey(CodePipelineExecution execution, String actionName, JsonNode config) {
+        String override = sourceRevisionOverride(execution, actionName, "S3_OBJECT_KEY");
+        return override != null
+                ? override : config.path("S3ObjectKey").asText(config.path("ObjectKey").asText(null));
+    }
+
+    private String sourceRevisionOverride(CodePipelineExecution execution, String actionName, String revisionType) {
+        synchronized (execution) {
+            for (Map<String, Object> override : execution.getSourceRevisionOverrides()) {
+                if (actionName.equals(override.get("actionName"))
+                        && revisionType.equals(override.get("revisionType"))) {
+                    return Objects.toString(override.get("revisionValue"), null);
+                }
+            }
+            return null;
+        }
+    }
+
+    private void pinResolvedS3Version(CodePipelineExecution execution, String actionName, String versionId) {
+        if (versionId == null || sourceRevisionOverride(execution, actionName, "S3_OBJECT_VERSION_ID") != null) {
+            return;
+        }
+        Map<String, Object> pin = new LinkedHashMap<>();
+        pin.put("actionName", actionName);
+        pin.put("revisionType", "S3_OBJECT_VERSION_ID");
+        pin.put("revisionValue", versionId);
+        execution.getSourceRevisionOverrides().add(pin);
+    }
+
+    private void upsertSourceRevision(CodePipelineExecution execution, String actionName, String revisionId,
+                                      String bucket, String key, S3Object object) {
+        Map<String, Object> sourceRevision = new LinkedHashMap<>();
+        sourceRevision.put("actionName", actionName);
+        sourceRevision.put("revisionId", revisionId);
+        String summary = object.getMetadata().get("codepipeline-artifact-revision-summary");
+        if (summary != null && !summary.isBlank()) {
+            sourceRevision.put("revisionSummary", summary);
+        }
+        sourceRevision.put("revisionUrl", "s3://" + bucket + "/" + key);
+        execution.getSourceRevisions().removeIf(existing -> actionName.equals(existing.get("actionName")));
+        execution.getSourceRevisions().add(sourceRevision);
     }
 
     private List<Map<String, String>> variableList(JsonNode node) {
