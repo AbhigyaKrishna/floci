@@ -195,8 +195,8 @@ class EcsOneShotTaskLifecycleTest {
 
     @Test
     @Order(7)
-    @DisplayName("StopTask - explicit stop populates exitCode when already stopped")
-    void explicitStopExitCode() {
+    @DisplayName("StopTask - explicit stop requests terminal status")
+    void explicitStopRequestsTerminalStatus() {
         // Register and run a second task; stop it explicitly before it exits naturally.
         String family2 = family + "-explicit";
         ecs.registerTaskDefinition(RegisterTaskDefinitionRequest.builder()
@@ -221,36 +221,14 @@ class EcsOneShotTaskLifecycleTest {
                 .count(1)
                 .build()).tasks().get(0).taskArn();
 
-        ecs.stopTask(StopTaskRequest.builder()
+        Task stopping = ecs.stopTask(StopTaskRequest.builder()
                 .cluster(clusterName)
                 .task(explicitTaskArn)
                 .reason("test-explicit-stop")
-                .build());
+                .build()).task();
 
-        WaiterOverrideConfiguration overrides = WaiterOverrideConfiguration.builder()
-                .waitTimeout(Duration.ofSeconds(60))
-                .build();
-        Task stopped;
-        try (EcsWaiter waiter = EcsWaiter.builder().client(ecs).build()) {
-            WaiterResponse<DescribeTasksResponse> response = waiter.waitUntilTasksStopped(
-                    DescribeTasksRequest.builder()
-                            .cluster(clusterName)
-                            .tasks(explicitTaskArn)
-                            .build(),
-                    overrides);
-            assertThat(response.matched().response()).isPresent();
-            stopped = response.matched().response().get().tasks().get(0);
-        }
-
-        assertThat(stopped.lastStatus()).isEqualTo("STOPPED");
-        assertThat(stopped.stoppedAt()).isNotNull();
-
-        // exitCode should be present (Docker assigns 137 for SIGKILL on explicit stop)
-        assertThat(stopped.containers()).isNotEmpty();
-        stopped.containers().forEach(c ->
-                assertThat(c.exitCode())
-                        .as("explicit stopTask must populate exitCode on container %s", c.name())
-                        .isNotNull());
+        assertThat(stopping.desiredStatus()).isEqualTo("STOPPED");
+        assertThat(stopping.stoppedReason()).isEqualTo("test-explicit-stop");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

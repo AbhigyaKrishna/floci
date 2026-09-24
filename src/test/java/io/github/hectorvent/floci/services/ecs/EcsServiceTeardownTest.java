@@ -173,6 +173,62 @@ class EcsServiceTeardownTest {
     }
 
     @Test
+    void concurrentStopsTeardownTheTaskOnlyOnce() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        CountDownLatch teardownEntered = new CountDownLatch(1);
+        CountDownLatch finishTeardown = new CountDownLatch(1);
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            teardownEntered.countDown();
+            if (!finishTeardown.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("teardown was not released");
+            }
+            return Map.of("app", 0);
+        });
+
+        EcsService service = new EcsService(
+                new RegionResolver(REGION, "000000000000"), containerManager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("nginx:alpine");
+        service.registerTaskDefinition("concurrent-stop", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "concurrent-stop", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        CompletableFuture<EcsTask> first = CompletableFuture.supplyAsync(() ->
+                service.stopTask(null, taskArn, null, REGION));
+        try {
+            assertTrue(teardownEntered.await(5, TimeUnit.SECONDS));
+            CountDownLatch secondStarted = new CountDownLatch(1);
+            CountDownLatch secondCompleted = new CountDownLatch(1);
+            CompletableFuture<EcsTask> second = CompletableFuture.supplyAsync(() -> {
+                secondStarted.countDown();
+                try {
+                    return service.stopTask(null, taskArn, null, REGION);
+                } finally {
+                    secondCompleted.countDown();
+                }
+            });
+            assertTrue(secondStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(secondCompleted.await(200, TimeUnit.MILLISECONDS));
+            finishTeardown.countDown();
+            first.get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS);
+            verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handle);
+            assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
+        } finally {
+            finishTeardown.countDown();
+        }
+    }
+
+    @Test
     void stopManagedContainersStopsEachRunningTaskOnce() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false); // docker mode

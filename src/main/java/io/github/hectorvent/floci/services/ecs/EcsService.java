@@ -1665,6 +1665,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     private EcsTask stopTask(String clusterRef, String taskRef, String reason, String stopCode, String region) {
         EcsTask task = resolveTaskOrThrow(taskRef, region);
+        synchronized (task) {
+            return stopTaskLocked(task, reason, stopCode, region);
+        }
+    }
+
+    private EcsTask stopTaskLocked(EcsTask task, String reason, String stopCode, String region) {
         if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
             return task;
         }
@@ -3922,7 +3928,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (task == null) {
             return;
         }
+        synchronized (task) {
+            reconcileTaskLocked(taskArn, task);
+        }
+    }
 
+    private void reconcileTaskLocked(String taskArn, EcsTask task) {
         if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
             stopTask(task.getClusterArn(), taskArn, task.getStoppedReason(), task.getStopCode(), taskRegion(task));
             return;
