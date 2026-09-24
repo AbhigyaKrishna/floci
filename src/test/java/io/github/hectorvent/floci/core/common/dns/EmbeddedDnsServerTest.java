@@ -8,6 +8,7 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -132,6 +133,28 @@ class EmbeddedDnsServerTest {
                 List.of(source("valkey.sapphire.internal", List.of("172.31.0.6"))));
 
         assertTrue(withSource.resolveARecord("example.com", "172.31.0.2").isEmpty());
+        assertTrue(withSource.resolveARecordWithOwnership("example.com", "172.31.0.2").isEmpty());
+    }
+
+    @Test
+    void ownedNameWithNoAddressesDoesNotFallThrough() {
+        EmbeddedDnsServer withSource = new EmbeddedDnsServer(
+                List.of(), List.of(source("empty.sapphire.internal", List.of())));
+
+        assertEquals(Optional.of(List.of()),
+                withSource.resolveARecordWithOwnership("empty.sapphire.internal", "172.31.0.2"));
+    }
+
+    @Test
+    void emptyOwnedNameProducesAuthoritativeNegativeResponse() {
+        byte[] query = buildQuery("empty.sapphire.internal", (short) 0x1234);
+        byte[] response = dns.buildEmptyResponse(query, (short) 0x1234, 12, query.length, 3);
+        ByteBuffer header = ByteBuffer.wrap(response);
+
+        assertEquals((short) 0x1234, header.getShort(0));
+        assertEquals(3, header.getShort(2) & 0x000F);
+        assertTrue((header.getShort(2) & 0x0400) != 0, "the answer must be authoritative");
+        assertEquals(0, header.getShort(6));
     }
 
     @Test
@@ -156,7 +179,7 @@ class EmbeddedDnsServerTest {
     }
 
     private static DnsRecordSource source(String owned, List<String> addresses) {
-        return name -> owned.equals(name) ? addresses : List.of();
+        return name -> owned.equals(name) ? Optional.of(addresses) : Optional.empty();
     }
 
     // ── matchesSuffix — built-in emulator domains ─────────────────────────────

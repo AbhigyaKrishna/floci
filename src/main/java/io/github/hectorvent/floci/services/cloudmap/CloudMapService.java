@@ -356,8 +356,9 @@ public class CloudMapService {
 
     /**
      * Resolves {@code <service>.<namespace>} to the IPv4 addresses registered under it, so the
-     * embedded DNS server can answer for a DNS namespace. Returns an empty list for a name that
-     * names no Cloud Map service, which leaves the query to the upstream resolvers.
+     * embedded DNS server can answer for a DNS namespace. The DNS server forwards names outside
+     * every DNS namespace upstream, while a name inside a namespace remains owned even when no
+     * usable A records exist.
      *
      * <p>Only DNS namespaces answer. An HTTP namespace is discoverable through DiscoverInstances
      * and has no DNS records on AWS, so giving it any here would invent behaviour callers cannot
@@ -376,8 +377,13 @@ public class CloudMapService {
      * either way.
      */
     public List<String> resolveDnsName(String queryName) {
+        return resolveDnsNameIfOwned(queryName).orElse(List.of());
+    }
+
+    /** Keeps zone ownership distinct from the list of A records. */
+    public Optional<List<String>> resolveDnsNameIfOwned(String queryName) {
         if (queryName == null || queryName.isBlank()) {
-            return List.of();
+            return Optional.empty();
         }
         String name = queryName.toLowerCase();
         if (name.endsWith(".")) {
@@ -385,11 +391,13 @@ public class CloudMapService {
         }
 
         List<String> addresses = new ArrayList<>();
+        boolean owned = false;
         for (Namespace namespace : dnsNamespacesByLongestName()) {
             String suffix = "." + namespace.getName().toLowerCase();
             if (!name.endsWith(suffix)) {
                 continue;
             }
+            owned = true;
             String serviceName = name.substring(0, name.length() - suffix.length());
             for (Service service : scan(serviceStore)) {
                 if (!namespace.getId().equals(service.getNamespaceId())
@@ -404,17 +412,18 @@ public class CloudMapService {
                 }
             }
             if (!addresses.isEmpty()) {
-                return addresses.size() > MAX_DNS_ANSWERS ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses;
+                return Optional.of(addresses.size() > MAX_DNS_ANSWERS
+                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses);
             }
         }
-        return addresses;
+        return owned ? Optional.of(List.of()) : Optional.empty();
     }
 
     /**
      * Whether the attribute is a dotted-quad the DNS server can put in an A record's rdata.
      * AWS rejects anything else at {@code RegisterInstance}; Floci stores it, so a name whose
-     * only instance carries a bad value falls through to the upstream resolvers rather than
-     * failing to build a response and leaving the query unanswered.
+     * only instance carries a bad value receives a negative response rather than an invalid A
+     * record or an answer from an unrelated upstream resolver.
      */
     private static boolean isIpv4(String value) {
         if (value == null || value.isBlank()) {

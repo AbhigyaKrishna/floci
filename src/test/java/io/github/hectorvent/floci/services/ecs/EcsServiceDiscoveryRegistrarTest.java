@@ -60,10 +60,29 @@ class EcsServiceDiscoveryRegistrarTest {
         EcsServiceModel svc = serviceWithRegistry(cloudMapSvc.getArn(), "auth", 8080);
         registrar.registerTask(task, svc, REGION);
 
-        registrar.deregisterTask(task, svc, REGION);
+        registrar.deregisterTask(task, REGION);
 
         assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty());
         assertTrue(cloudMapService.resolveDnsName("auth." + namespace).isEmpty());
+    }
+
+    @Test
+    void deregisterTaskUsesItsRegisteredServiceAfterTheEcsServiceChanges() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service original = createDnsService(namespace, "original");
+        Service replacement = cloudMapService.createService("replacement", original.getNamespaceId(),
+                null, null, null, null, null, null, Map.of(), REGION);
+        EcsTask task = task("172.31.0.7", "app", 8080, 8080);
+        EcsServiceModel svc = serviceWithRegistry(original.getArn(), "app", 8080);
+        registrar.registerTask(task, svc, REGION);
+        assertEquals(List.of(original.getId()), task.getServiceDiscoveryServiceIds());
+
+        svc.setServiceRegistries(List.of(Map.of("registryArn", replacement.getArn())));
+        registrar.deregisterTask(task, REGION);
+
+        assertTrue(cloudMapService.listInstances(original.getId()).isEmpty());
+        assertTrue(cloudMapService.listInstances(replacement.getId()).isEmpty());
+        assertTrue(task.getServiceDiscoveryServiceIds().isEmpty());
     }
 
     @Test
@@ -108,7 +127,7 @@ class EcsServiceDiscoveryRegistrarTest {
         EcsServiceModel svc = serviceWithRegistry("not-an-arn", "orphan", 80);
 
         registrar.registerTask(task, svc, REGION);
-        registrar.deregisterTask(task, svc, REGION);
+        registrar.deregisterTask(task, REGION);
     }
 
     @Test

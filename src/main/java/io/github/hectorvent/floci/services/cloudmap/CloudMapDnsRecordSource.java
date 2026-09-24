@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Backs a Cloud Map DNS namespace with real DNS answers.
@@ -26,7 +27,7 @@ public class CloudMapDnsRecordSource implements DnsRecordSource {
     }
 
     @Override
-    public List<String> resolveIpv4(String name) {
-        return cloudMapService.resolveDnsName(name);
+    public Optional<List<String>> resolveIpv4(String name) {
+        return cloudMapService.resolveDnsNameIfOwned(name);
     }
 }

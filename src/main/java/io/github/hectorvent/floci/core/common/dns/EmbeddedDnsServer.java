@@ -149,13 +149,20 @@ public class EmbeddedDnsServer {
             buf.getShort(); // qclass
             int questionEnd = buf.position();
 
-            List<String> resolvedAddresses = qtype == 1 ? resolveARecord(qname, myIp) : List.of();
-            if (!resolvedAddresses.isEmpty()) {
-                byte[] response = buildAResponse(data, txId, questionOffset, questionEnd, resolvedAddresses);
-                socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
-            } else {
-                forwardAsync(vertx, socket, data, senderHost, senderPort);
-            }
+            vertx.<Optional<List<String>>>executeBlocking(() -> resolveARecordWithOwnership(qname, myIp), false)
+                    .onSuccess(answer -> {
+                        if (answer.isEmpty()) {
+                            forwardAsync(vertx, socket, data, senderHost, senderPort);
+                            return;
+                        }
+                        List<String> addresses = answer.orElseThrow();
+                        byte[] response = qtype == 1 && !addresses.isEmpty()
+                                ? buildAResponse(data, txId, questionOffset, questionEnd, addresses)
+                                : buildEmptyResponse(data, txId, questionOffset, questionEnd,
+                                        addresses.isEmpty() ? 3 : 0);
+                        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
+                    })
+                    .onFailure(e -> LOG.warnv("DNS record lookup failed for {0}: {1}", qname, e.getMessage()));
         } catch (Exception e) {
             LOG.debugv("DNS packet error: {0}", e.getMessage());
         }
@@ -178,11 +185,16 @@ public class EmbeddedDnsServer {
     }
 
     List<String> resolveARecord(String name, String myIp) {
+        return resolveARecordWithOwnership(name, myIp).orElse(List.of());
+    }
+
+    Optional<List<String>> resolveARecordWithOwnership(String name, String myIp) {
         if (matchesSuffix(name)) {
-            return List.of(myIp);
+            return Optional.of(List.of(myIp));
         }
         Optional<String> ec2PrivateDnsName = resolveEc2PrivateDnsName(name);
-        return ec2PrivateDnsName.map(List::of).orElseGet(() -> resolveFromRecordSources(name));
+        return ec2PrivateDnsName.<List<String>>map(List::of)
+                .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name));
     }
 
     /**
@@ -190,14 +202,14 @@ public class EmbeddedDnsServer {
      * today. A source that throws must not take the DNS server down with it: the query falls
      * through to the upstream resolvers, which is what happened before any source existed.
      */
-    private List<String> resolveFromRecordSources(String name) {
+    private Optional<List<String>> resolveFromRecordSources(String name) {
         if (recordSources == null) {
-            return List.of();
+            return Optional.empty();
         }
         for (DnsRecordSource source : recordSources) {
             try {
-                List<String> addresses = source.resolveIpv4(name);
-                if (addresses != null && !addresses.isEmpty()) {
+                Optional<List<String>> addresses = source.resolveIpv4(name);
+                if (addresses != null && addresses.isPresent()) {
                     return addresses;
                 }
             } catch (Exception e) {
@@ -205,7 +217,19 @@ public class EmbeddedDnsServer {
                         source.getClass().getSimpleName(), name, e.getMessage());
             }
         }
-        return List.of();
+        return Optional.empty();
+    }
+
+    byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd, int responseCode) {
+        ByteBuffer response = ByteBuffer.allocate(12 + questionEnd - questionOffset);
+        response.putShort(txId);
+        response.putShort((short) (0x8580 | responseCode));
+        response.putShort((short) 1);
+        response.putShort((short) 0);
+        response.putShort((short) 0);
+        response.putShort((short) 0);
+        response.put(query, questionOffset, questionEnd - questionOffset);
+        return response.array();
     }
 
     Optional<String> resolveEc2PrivateDnsName(String name) {

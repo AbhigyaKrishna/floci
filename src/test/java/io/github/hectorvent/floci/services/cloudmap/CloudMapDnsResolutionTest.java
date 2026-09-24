@@ -109,11 +109,13 @@ class CloudMapDnsResolutionTest {
         createService(privateDnsNamespace(namespace), "empty");
 
         assertTrue(cloudMapService.resolveDnsName("empty." + namespace).isEmpty());
+        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned("empty." + namespace).orElseThrow());
     }
 
     @Test
     void doesNotResolveANameOutsideAnyNamespace() {
         assertTrue(cloudMapService.resolveDnsName("example.com").isEmpty());
+        assertTrue(cloudMapService.resolveDnsNameIfOwned("example.com").isEmpty());
         assertTrue(cloudMapService.resolveDnsName("").isEmpty());
         assertTrue(cloudMapService.resolveDnsName(null).isEmpty());
     }

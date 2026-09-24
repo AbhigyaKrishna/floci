@@ -11,8 +11,10 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Bridges ECS services to Cloud Map: when an ECS service declares a {@code serviceRegistries}
@@ -43,6 +45,7 @@ public class EcsServiceDiscoveryRegistrar {
     /** Registers the task as a Cloud Map instance of every service registry the ECS service declares. */
     public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
         String instanceId = instanceId(task);
+        Set<String> registered = new LinkedHashSet<>();
         for (Map<String, Object> registry : registries(svc)) {
             String cloudMapServiceId = cloudMapServiceId(registry);
             if (cloudMapServiceId == null) {
@@ -56,6 +59,7 @@ public class EcsServiceDiscoveryRegistrar {
             }
             try {
                 cloudMapService.registerInstance(cloudMapServiceId, instanceId, null, attributes, region);
+                registered.add(cloudMapServiceId);
                 LOG.infov("Registered ECS task {0} as a Cloud Map instance of {1} at {2}",
                         task.getTaskArn(), cloudMapServiceId, attributes.get("AWS_INSTANCE_IPV4"));
             } catch (Exception e) {
@@ -63,16 +67,13 @@ public class EcsServiceDiscoveryRegistrar {
                         task.getTaskArn(), cloudMapServiceId, e.getMessage());
             }
         }
+        task.setServiceDiscoveryServiceIds(List.copyOf(registered));
     }
 
-    /** Deregisters the task from every Cloud Map service the ECS service declared. */
-    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+    /** Deregisters the task from the Cloud Map services it actually registered in. */
+    public void deregisterTask(EcsTask task, String region) {
         String instanceId = instanceId(task);
-        for (Map<String, Object> registry : registries(svc)) {
-            String cloudMapServiceId = cloudMapServiceId(registry);
-            if (cloudMapServiceId == null) {
-                continue;
-            }
+        for (String cloudMapServiceId : task.getServiceDiscoveryServiceIds()) {
             try {
                 cloudMapService.deregisterInstance(cloudMapServiceId, instanceId, region);
                 LOG.infov("Deregistered ECS task {0} from Cloud Map service {1}",
@@ -84,6 +85,7 @@ public class EcsServiceDiscoveryRegistrar {
                         task.getTaskArn(), cloudMapServiceId, e.getMessage());
             }
         }
+        task.setServiceDiscoveryServiceIds(List.of());
     }
 
     public boolean hasRegistries(EcsServiceModel svc) {
@@ -190,7 +192,7 @@ public class EcsServiceDiscoveryRegistrar {
 
     /**
      * The Cloud Map service id inside a registry ARN
-     * ({@code arn:aws:servicediscovery:<region>:<account>:service/srv-xxxxxxxx}). Returns
+     * ({@code arn:<partition>:servicediscovery:<region>:<account>:service/srv-xxxxxxxx}). Returns
      * {@code null} for an entry that names no service, which leaves it unregistered rather than
      * failing the task the caller asked for.
      */

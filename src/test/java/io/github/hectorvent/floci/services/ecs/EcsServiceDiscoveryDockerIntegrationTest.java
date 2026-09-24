@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -77,10 +78,12 @@ class EcsServiceDiscoveryDockerIntegrationTest {
     }
 
     @Test
-    void aServiceWithServiceRegistriesResolvesUntilItsTaskStops() {
+    void changingAServiceRegistryLeavesNoStaleDnsRecordWhenItsTaskStops() {
         String namespaceName = unique("ecsdisc") + ".internal";
         String dnsName = CLOUD_MAP_SERVICE_NAME + "." + namespaceName;
         Service cloudMapSvc = createDnsService(namespaceName);
+        Service replacementRegistry = cloudMapService.createService("replacement", cloudMapSvc.getNamespaceId(),
+                null, null, null, null, null, null, Map.of(), REGION);
         String clusterName = unique("disc-cluster");
         ecsService.createCluster(clusterName, REGION);
         TaskDefinition taskDef = registerTaskDefinition(unique("disc-td"));
@@ -103,9 +106,22 @@ class EcsServiceDiscoveryDockerIntegrationTest {
             assertEquals(List.of(task.getPrivateIpAddress()), cloudMapService.resolveDnsName(dnsName),
                     "starting the task must register it, so the Cloud Map name resolves to it");
 
-            // Scaled to zero first, so the reconciler cannot replace the task between the stop
-            // and the assertion that its instance is gone.
-            ecsService.updateService(clusterName, ECS_SERVICE_NAME, null, 0, null, REGION);
+            // Updating the registry moves the running task to the replacement. Scaling to zero
+            // keeps the reconciler from replacing it between the stop and the final assertions.
+            UpdateServiceRequest update = new UpdateServiceRequest();
+            update.setCluster(clusterName);
+            update.setService(ECS_SERVICE_NAME);
+            update.setDesiredCount(0);
+            update.setServiceRegistries(List.of(Map.of(
+                    "registryArn", replacementRegistry.getArn(),
+                    "containerName", CONTAINER_NAME,
+                    "containerPort", 6379)));
+            ecsService.updateService(update, REGION);
+            assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty(),
+                    "updating the registry must remove the old Cloud Map instance");
+            assertEquals(List.of(task.getPrivateIpAddress()),
+                    cloudMapService.resolveDnsName("replacement." + namespaceName),
+                    "updating the registry must register the running task in the new service");
             ecsService.stopTask(clusterName, taskArn, "service discovery test", REGION);
             taskArn = null;
 
@@ -113,6 +129,8 @@ class EcsServiceDiscoveryDockerIntegrationTest {
                     "stopping the task must deregister its Cloud Map instance");
             assertTrue(cloudMapService.resolveDnsName(dnsName).isEmpty(),
                     "a stopped task must not keep answering DNS");
+            assertTrue(cloudMapService.listInstances(replacementRegistry.getId()).isEmpty(),
+                    "stopping the task must remove its replacement registry instance");
         } finally {
             if (taskArn != null) {
                 ecsService.stopTask(clusterName, taskArn, "test teardown", REGION);

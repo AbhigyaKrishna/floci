@@ -30,6 +30,8 @@ Which instances answer follows Route 53: the healthy ones while any instance is
 healthy, and all of them when none is, so a service whose instances have all gone
 unhealthy still resolves rather than disappearing from DNS. At most eight records
 go back either way, as Route 53 answers a service discovery query.
+Names inside a DNS namespace stay local when no instance has a usable address:
+the resolver answers negatively instead of forwarding them to upstream DNS.
 
 Three limits are worth knowing. `HTTP` namespaces do not resolve, matching AWS,
 where they are reachable only through `DiscoverInstances`. Only A records are

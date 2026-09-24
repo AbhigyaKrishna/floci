@@ -474,7 +474,8 @@ task supersedes its predecessor.
 Combined with [Cloud Map answering DNS](cloudmap.md#dns-resolution) for its namespaces, that
 is what makes `<cloud-map-service>.<namespace>` resolve to a running task from another
 container. Registration is best effort: a registry entry Floci cannot place is logged and
-skipped rather than failing the task.
+skipped rather than failing the task. `UpdateService` moves running task registrations to
+replacement registries; stopping a task removes the registrations it actually created.
 
 Known differences from AWS:
 

@@ -1809,21 +1809,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /** Deregisters a stopping task from any Cloud Map services its ECS service declared. */
+    /** Deregisters a stopping task from the Cloud Map services it actually joined. */
     private void deregisterTaskFromServiceDiscovery(EcsTask task, String region) {
-        // Gated on dockerMode for symmetry with the register hook (inside launchTasks'
-        // dockerMode branch): mock-mode tasks have no containers and never registered.
-        if (discoveryRegistrar == null || !dockerMode || task.getOwningServiceArn() == null) {
+        if (discoveryRegistrar == null || !dockerMode || task.getServiceDiscoveryServiceIds().isEmpty()) {
             return;
         }
-        EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
-        if (cluster == null) {
-            return;
-        }
-        EcsServiceModel svc = owningService(task, cluster);
-        if (svc != null && discoveryRegistrar.hasRegistries(svc)) {
-            discoveryRegistrar.deregisterTask(task, svc, region);
-        }
+        discoveryRegistrar.deregisterTask(task, region);
     }
 
     // ── ECS Exec ──────────────────────────────────────────────────────────────
@@ -2377,8 +2368,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setLoadBalancers(request.getLoadBalancers());
         }
         if (request.getServiceRegistries() != null) {
-            rollingChange |= !request.getServiceRegistries().equals(svc.getServiceRegistries());
+            boolean registriesChanged = !request.getServiceRegistries().equals(svc.getServiceRegistries());
+            rollingChange |= registriesChanged;
             svc.setServiceRegistries(request.getServiceRegistries());
+            if (registriesChanged) {
+                reconcileServiceDiscoveryRegistries(svc, cluster, region);
+            }
         }
         if (request.getUnparsed() != null) {
             svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
@@ -2419,6 +2414,24 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         services.put(key, svc);
         return svc;
+    }
+
+    private void reconcileServiceDiscoveryRegistries(EcsServiceModel svc, EcsCluster cluster, String region) {
+        if (!dockerMode || discoveryRegistrar == null) {
+            return;
+        }
+        for (EcsTask task : tasks.values()) {
+            if (!ownedBy(task, svc, cluster)) {
+                continue;
+            }
+            synchronized (task) {
+                if (!TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                    continue;
+                }
+                discoveryRegistrar.deregisterTask(task, region);
+                discoveryRegistrar.registerTask(task, svc, region);
+            }
+        }
     }
 
     /**
