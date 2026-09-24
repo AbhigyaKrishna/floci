@@ -570,10 +570,18 @@ public class S3Service implements Resettable, ResourceProvider {
             object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
             object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
         }
-        object.setAcl(resolveObjectAclXml(bucketOwnerAccount,
+        String objectAcl = resolveObjectAclXml(bucketOwnerAccount,
                 effectiveOptions.getAcl(), effectiveOptions.getGrantRead(),
                 effectiveOptions.getGrantWrite(), effectiveOptions.getGrantFullControl(),
-                effectiveOptions.getGrantReadAcp(), effectiveOptions.getGrantWriteAcp()));
+                effectiveOptions.getGrantReadAcp(), effectiveOptions.getGrantWriteAcp());
+        // BlockPublicAcls fails a PutObject that carries a public ACL. The bucket and its owner
+        // are already resolved here, so the settings are read without a second lookup.
+        if (objectAcl != null && S3AclPublicAccessEvaluator.aclIsPublic(objectAcl)
+                && blockPublicAccessFor(bucket, bucketOwnerAccount).blockPublicAcls()) {
+            LOG.debugv("BlockPublicAcls rejected a public ACL on PutObject {0}/{1}", bucketName, key);
+            throw accessDeniedException(bucketName, key);
+        }
+        object.setAcl(objectAcl);
         if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
             object.setTags(new HashMap<>(effectiveOptions.getTagging()));
         }
@@ -919,8 +927,11 @@ public class S3Service implements Resettable, ResourceProvider {
             return;
         }
 
-        Bucket bucket = resolveBucket(bucketName)
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        Bucket bucket = ownedBucket.value();
+        S3BlockPublicAccessSettings blockPublicAccess =
+                blockPublicAccessFor(bucket, ownedBucket.account());
 
         String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
@@ -929,10 +940,14 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, key);
         }
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.ALLOW) {
+            if (restrictsPublicPolicy(blockPublicAccess, bucket)) {
+                LOG.debugv("RestrictPublicBuckets withheld anonymous {0} on bucket {1}", action, bucketName);
+                throw accessDeniedException(bucketName, key);
+            }
             return;
         }
-        if (isObjectCreationAction(action) && !readableObjectExists(bucketName, key)
-                && publicBucketAclAllowsWrite(bucket)) {
+        if (!blockPublicAccess.ignorePublicAcls() && isObjectCreationAction(action)
+                && !readableObjectExists(bucketName, key) && publicBucketAclAllowsWrite(bucket)) {
             return;
         }
 
@@ -981,8 +996,11 @@ public class S3Service implements Resettable, ResourceProvider {
             return;
         }
 
-        Bucket bucket = resolveBucket(bucketName)
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        Bucket bucket = ownedBucket.value();
+        S3BlockPublicAccessSettings blockPublicAccess =
+                blockPublicAccessFor(bucket, ownedBucket.account());
 
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, resourceArn);
@@ -990,16 +1008,33 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, key);
         }
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.ALLOW) {
+            if (restrictsPublicPolicy(blockPublicAccess, bucket)) {
+                LOG.debugv("RestrictPublicBuckets withheld anonymous {0} on bucket {1}", action, bucketName);
+                throw accessDeniedException(bucketName, key);
+            }
             return;
         }
-        if (key != null && isObjectDataReadAction(action) && publicObjectAclAllowsRead(bucketName, key, versionId)) {
-            return;
-        }
-        if (key == null && "s3:ListBucket".equals(action) && publicBucketAclAllowsRead(bucket)) {
-            return;
+        if (!blockPublicAccess.ignorePublicAcls()) {
+            if (key != null && isObjectDataReadAction(action) && publicObjectAclAllowsRead(bucketName, key, versionId)) {
+                return;
+            }
+            if (key == null && "s3:ListBucket".equals(action) && publicBucketAclAllowsRead(bucket)) {
+                return;
+            }
         }
 
         throw accessDeniedException(bucketName, key);
+    }
+
+    /**
+     * {@code RestrictPublicBuckets} confines a bucket whose policy is public to the owner
+     * account, so the public statement stops granting anything to an anonymous or cross-account
+     * caller. One public statement makes the whole policy public, which is why the status is
+     * evaluated over the policy rather than over the statement that happened to match.
+     */
+    private boolean restrictsPublicPolicy(S3BlockPublicAccessSettings settings, Bucket bucket) {
+        return settings.restrictPublicBuckets()
+                && S3PublicAccessEvaluator.policyIsPublic(objectMapper, bucket.getPolicy());
     }
 
     private void authorizeSignedBucketPolicy(
@@ -1023,6 +1058,15 @@ public class S3Service implements Resettable, ResourceProvider {
         boolean sameAccountAsOwner = isSameAccountAsBucketOwner(authorization.accessKeyId(), principalArn, bucketOwner);
 
         if (isBucketPolicyAction(action) && !sameAccountAsOwner) {
+            throw accessDeniedException(bucketName, key);
+        }
+
+        // RestrictPublicBuckets blocks cross-account access derived from a public bucket policy,
+        // including the non-public delegation a statement naming a specific account would grant.
+        // AWS exempts AWS service principals; this path is only ever reached by an IAM principal,
+        // so there is nothing to exempt here.
+        if (!sameAccountAsOwner && restrictsPublicPolicy(blockPublicAccessFor(bucket, bucketOwner), bucket)) {
+            LOG.debugv("RestrictPublicBuckets withheld cross-account {0} on bucket {1}", action, bucketName);
             throw accessDeniedException(bucketName, key);
         }
 
@@ -3501,7 +3545,17 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucket.getPolicy();
     }
 
+    /**
+     * {@code BlockPublicPolicy} rejects a bucket policy that grants public access. As on AWS the
+     * check runs whoever the caller is, so it does not sit behind {@code enforce-auth}, and it
+     * leaves an already-stored public policy alone: the setting blocks the write, not the read.
+     */
     public void putBucketPolicy(String bucketName, String policy) {
+        if (effectiveBlockPublicAccess(bucketName).blockPublicPolicy()
+                && S3PublicAccessEvaluator.policyIsPublic(objectMapper, policy)) {
+            LOG.debugv("BlockPublicPolicy rejected a public bucket policy on bucket {0}", bucketName);
+            throw accessDeniedException(bucketName, null);
+        }
         mutateBucket(bucketName, bucket -> bucket.setPolicy(policy));
     }
 
@@ -3671,7 +3725,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         String resolvedAcl = resolveObjectAclXml(
                 cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
-        bucket.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
+        String newAcl = resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl);
+        rejectPublicAclWhenBlocked(bucketName, newAcl);
+        bucket.setAcl(newAcl);
         bucketStore.put(bucketName, bucket);
     }
 
@@ -3692,7 +3748,9 @@ public class S3Service implements Resettable, ResourceProvider {
         S3Object obj = ownedObject.value();
         String resolvedAcl = resolveObjectAclXml(ownedObject.account(), cannedAcl, grantRead,
                 grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
-        obj.setAcl(resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl));
+        String newAcl = resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl);
+        rejectPublicAclWhenBlocked(bucketName, newAcl);
+        obj.setAcl(newAcl);
         String storeKey = (versionId != null) ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
         putObjectForAccount(ownedObject.account(), storeKey, obj);
     }
@@ -3759,6 +3817,47 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setPublicAccessBlockConfiguration(null);
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * The Block Public Access settings in force for a bucket: its own configuration combined with
+     * the bucket owner account's, most restrictive wins. A bucket that does not resolve blocks
+     * nothing; the caller is about to fail on NoSuchBucket anyway.
+     */
+    private S3BlockPublicAccessSettings effectiveBlockPublicAccess(String bucketName) {
+        return resolveBucketEntry(bucketName)
+                .map(owned -> blockPublicAccessFor(owned.value(), owned.account()))
+                .orElse(S3BlockPublicAccessSettings.NONE);
+    }
+
+    private S3BlockPublicAccessSettings blockPublicAccessFor(Bucket bucket, String bucketOwnerAccount) {
+        return S3BlockPublicAccessSettings.parse(bucket.getPublicAccessBlockConfiguration())
+                .mostRestrictive(accountBlockPublicAccess(bucketOwnerAccount));
+    }
+
+    private S3BlockPublicAccessSettings accountBlockPublicAccess(String accountId) {
+        if (accountId == null || accountId.isBlank()) {
+            return S3BlockPublicAccessSettings.NONE;
+        }
+        return accountPublicAccessBlockStore
+                .getForAccount(accountId, ACCOUNT_PUBLIC_ACCESS_BLOCK_KEY)
+                .map(S3BlockPublicAccessSettings::parse)
+                .orElse(S3BlockPublicAccessSettings.NONE);
+    }
+
+    /**
+     * {@code BlockPublicAcls} rejects the write that would store a public ACL. AWS applies this
+     * whoever the caller is, so it does not sit behind {@code enforce-auth}: the call fails the
+     * same way for a signed and an unsigned caller.
+     */
+    private void rejectPublicAclWhenBlocked(String bucketName, String acl) {
+        if (acl == null || !S3AclPublicAccessEvaluator.aclIsPublic(acl)) {
+            return;
+        }
+        if (effectiveBlockPublicAccess(bucketName).blockPublicAcls()) {
+            LOG.debugv("BlockPublicAcls rejected a public ACL on bucket {0}", bucketName);
+            throw accessDeniedException(bucketName, null);
+        }
     }
 
     // --- Account-level (S3 Control) Public Access Block ---
