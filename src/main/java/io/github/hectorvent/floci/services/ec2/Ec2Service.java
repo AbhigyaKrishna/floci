@@ -3137,6 +3137,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return new ArrayList<>(reservationMap.values());
     }
 
+    public String platformDetailsForInstance(Instance instance) {
+        Image image = findImageForCapture(instance.getRegion(), instance.getImageId());
+        return image != null && "windows".equalsIgnoreCase(image.getPlatform())
+                ? "Windows" : "Linux/UNIX";
+    }
+
     public List<Map<String, String>> terminateInstances(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
         List<Map<String, String>> result = new ArrayList<>();
