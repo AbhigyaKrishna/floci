@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -206,21 +207,28 @@ class EcsServiceTeardownTest {
                 service.stopTask(null, taskArn, null, REGION));
         try {
             assertTrue(teardownEntered.await(5, TimeUnit.SECONDS));
-            CountDownLatch secondStarted = new CountDownLatch(1);
-            CountDownLatch secondCompleted = new CountDownLatch(1);
-            CompletableFuture<EcsTask> second = CompletableFuture.supplyAsync(() -> {
-                secondStarted.countDown();
+            AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+            Thread second = new Thread(() -> {
                 try {
-                    return service.stopTask(null, taskArn, null, REGION);
-                } finally {
-                    secondCompleted.countDown();
+                    service.stopTask(null, taskArn, null, REGION);
+                } catch (Throwable failure) {
+                    secondFailure.set(failure);
                 }
             });
-            assertTrue(secondStarted.await(5, TimeUnit.SECONDS));
-            assertFalse(secondCompleted.await(200, TimeUnit.MILLISECONDS));
+            second.start();
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (second.getState() != Thread.State.BLOCKED) {
+                assertTrue(second.isAlive(), "second stop finished without waiting for the first");
+                assertTrue(System.nanoTime() < deadline, "second stop never queued on the task");
+                Thread.onSpinWait();
+            }
+
             finishTeardown.countDown();
             first.get(5, TimeUnit.SECONDS);
-            second.get(5, TimeUnit.SECONDS);
+            second.join(5000);
+            assertFalse(second.isAlive(), "second stop did not finish");
+            assertNull(secondFailure.get());
             verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handle);
             assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
         } finally {
