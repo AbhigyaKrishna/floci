@@ -30,6 +30,15 @@ omitted or set to `true`. Floci establishes a baseline for the configured object
 execution when its version ID or ETag changes, recording `PollForSourceChanges` as the execution
 trigger. Set `PollForSourceChanges` to `false` to disable this polling path.
 
+`RetryStageExecution` resumes the same pipeline execution at a failed stage. `FAILED_ACTIONS`
+reruns failed or not-yet-started actions while preserving successful actions; `ALL_ACTIONS` reruns
+the complete stage. Runtime artifacts from failed executions are retained for the retry until a newer
+execution fails the same stage, and a successful retry continues with the stages that follow rather
+than restarting from the source.
+A retried execution counts toward the `QUEUED`/`PARALLEL` active-execution limit, and a second retry of
+the same execution while it is still running, including while sibling actions of a failed action
+finish, returns `ConflictException`.
+
 The following providers execute against local Floci services:
 
 | Category | Provider | Behavior |

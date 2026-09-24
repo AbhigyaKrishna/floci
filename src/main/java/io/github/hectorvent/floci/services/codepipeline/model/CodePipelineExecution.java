@@ -34,6 +34,7 @@ public class CodePipelineExecution {
     private String currentStage;
     private volatile boolean stopRequested;
     private volatile boolean abandon;
+    private volatile boolean artifactsReleased;
     private String rollbackTargetPipelineExecutionId;
 
     public String getAccountId() {
@@ -195,6 +196,14 @@ public class CodePipelineExecution {
 
     public void setAbandon(boolean abandon) {
         this.abandon = abandon;
+    }
+
+    public boolean isArtifactsReleased() {
+        return artifactsReleased;
+    }
+
+    public void setArtifactsReleased(boolean artifactsReleased) {
+        this.artifactsReleased = artifactsReleased;
     }
 
     public String getRollbackTargetPipelineExecutionId() {
