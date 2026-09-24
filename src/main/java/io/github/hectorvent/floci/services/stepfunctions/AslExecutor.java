@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
+import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -232,7 +233,7 @@ public class AslExecutor {
             "warning");
 
     private final LambdaExecutorService lambdaExecutor;
-    private final LambdaFunctionStore functionStore;
+    private final LambdaTargetResolver targetResolver;
     private final DynamoDbService dynamoDbService;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
@@ -265,7 +266,7 @@ public class AslExecutor {
     });
 
     @Inject
-    public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+    public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
                        SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                        CloudFormationQueryHandler cloudFormationHandler,
@@ -276,7 +277,7 @@ public class AslExecutor {
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                        CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, targetResolver, dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
@@ -284,7 +285,7 @@ public class AslExecutor {
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null);
     }
 
-    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+    AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
                 DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
                 SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                 CloudFormationQueryHandler cloudFormationHandler,
@@ -298,7 +299,7 @@ public class AslExecutor {
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
         this.customResourceLiveness = customResourceLiveness;
         this.lambdaExecutor = lambdaExecutor;
-        this.functionStore = functionStore;
+        this.targetResolver = targetResolver;
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
@@ -346,7 +347,7 @@ public class AslExecutor {
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness,
                 Clock clock, Sleeper sleeper, Integer maxWaitSecondsOverride) {
-        this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -370,7 +371,7 @@ public class AslExecutor {
                 ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                 Instance<StepFunctionsService> sfnService, EmulatorConfig config, Vertx vertx,
                 CustomResourceLiveness customResourceLiveness) {
-        this(lambdaExecutor, functionStore, dynamoDbService, dynamoDbJsonHandler,
+        this(lambdaExecutor, new LambdaTargetResolver(functionStore, null), dynamoDbService, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler, ec2Service, s3Service,
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
@@ -978,7 +979,7 @@ public class AslExecutor {
      * Extracts the Lambda function name from a reference that may be a bare name, a name with a
      * version/alias qualifier (e.g. "name:$LATEST"), or a full/partial function ARN
      * (e.g. "arn:aws:lambda:region:acct:function:name[:qualifier]"). The qualifier is dropped
-     * because the function store is keyed by name. Taking the last ':'-segment is wrong for a
+     * here and read by {@link #extractLambdaQualifier}. Taking the last ':'-segment is wrong for a
      * qualified ARN — it yields the qualifier (e.g. "$LATEST") instead of the function name.
      */
     static String extractLambdaFunctionName(String ref) {
@@ -996,6 +997,27 @@ public class AslExecutor {
             fn = fn.substring(0, colon);
         }
         return fn;
+    }
+
+    static String extractLambdaQualifier(String ref) {
+        if (ref == null) {
+            return null;
+        }
+        int fi = ref.indexOf(":function:");
+        String fn = fi >= 0 ? ref.substring(fi + ":function:".length()) : ref;
+        int colon = fn.indexOf(':');
+        return colon >= 0 ? fn.substring(colon + 1) : null;
+    }
+
+    private LambdaFunction resolveLambdaFunction(String region, String name, String qualifier) {
+        try {
+            return targetResolver.resolveInvokeTarget(region, name, qualifier);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
     }
 
     /**
@@ -1042,17 +1064,20 @@ public class AslExecutor {
                                     long executionDeadlineNanos, JsonNode rawParameters) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
+        String functionRef = null;
         JsonNode lambdaPayload = input;
         boolean optimizedLambdaInvoke = false;
 
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
             // Direct Lambda ARN: arn:aws:lambda:region:account:function:name[:qualifier]
+            functionRef = resource;
             functionName = extractLambdaFunctionName(resource);
         } else if (resource.equals("arn:aws:states:::lambda:invoke")) {
             // Optimized Lambda integration — function name and payload come from resolved input
             optimizedLambdaInvoke = true;
             String fnRef = input.path("FunctionName").asText(null);
             if (fnRef != null) {
+                functionRef = fnRef;
                 functionName = extractLambdaFunctionName(fnRef);
             }
             JsonNode payload = input.path("Payload");
@@ -1064,7 +1089,7 @@ public class AslExecutor {
         if (functionName != null) {
             // Extract region from the state machine ARN: arn:aws:states:REGION:...
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            LambdaFunction fn = functionStore.get(region, functionName).orElse(null);
+            LambdaFunction fn = resolveLambdaFunction(region, functionName, extractLambdaQualifier(functionRef));
             if (fn == null) {
                 // A missing function is a task failure on AWS, so it must stay reachable for
                 // Retry and Catch instead of surfacing as States.Runtime.
