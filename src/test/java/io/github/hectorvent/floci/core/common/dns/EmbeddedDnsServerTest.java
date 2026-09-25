@@ -141,8 +141,8 @@ class EmbeddedDnsServerTest {
         EmbeddedDnsServer withSource = new EmbeddedDnsServer(
                 List.of(), List.of(source("empty.sapphire.internal", List.of())));
 
-        assertEquals(Optional.of(List.of()),
-                withSource.resolveARecordWithOwnership("empty.sapphire.internal", "172.31.0.2"));
+        assertEquals(List.of(), withSource.resolveARecordWithOwnership(
+                "empty.sapphire.internal", "172.31.0.2").orElseThrow().addresses());
     }
 
     @Test
@@ -179,7 +179,38 @@ class EmbeddedDnsServerTest {
     }
 
     private static DnsRecordSource source(String owned, List<String> addresses) {
-        return name -> owned.equals(name) ? Optional.of(addresses) : Optional.empty();
+        return source(owned, addresses, DnsAnswer.DEFAULT_TTL_SECONDS);
+    }
+
+    private static DnsRecordSource source(String owned, List<String> addresses, int ttlSeconds) {
+        return name -> owned.equals(name)
+                ? Optional.of(new DnsAnswer(addresses, ttlSeconds)) : Optional.empty();
+    }
+
+    @Test
+    void buildAResponse_usesTheDefaultTtlForFlociNames() {
+        DnsAnswer answer = dns.resolveARecordWithOwnership(
+                "bucket.localhost.floci.io", "172.31.0.2").orElseThrow();
+        byte[] query = buildQuery("bucket.localhost.floci.io", (short) 10);
+        byte[] response = dns.buildAResponse(query, (short) 10, 12, query.length, answer);
+
+        assertEquals(DnsAnswer.DEFAULT_TTL_SECONDS,
+                ByteBuffer.wrap(response).getInt(query.length + 6));
+    }
+
+    @Test
+    void buildAResponse_writesTheAnswerTtlOnEveryRecord() {
+        EmbeddedDnsServer withSource = new EmbeddedDnsServer(List.of(),
+                List.of(source("api.sapphire.internal", List.of("172.31.0.6", "172.31.0.7"), 15)));
+        DnsAnswer answer = withSource.resolveARecordWithOwnership(
+                "api.sapphire.internal", "172.31.0.2").orElseThrow();
+        byte[] query = buildQuery("api.sapphire.internal", (short) 9);
+        byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length, answer);
+        int firstTtl = 12 + (query.length - 12) + 6;
+        ByteBuffer buffer = ByteBuffer.wrap(response);
+
+        assertEquals(15, buffer.getInt(firstTtl));
+        assertEquals(15, buffer.getInt(firstTtl + 16));
     }
 
     // ── matchesSuffix — built-in emulator domains ─────────────────────────────

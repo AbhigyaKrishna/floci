@@ -33,12 +33,17 @@ go back either way, as Route 53 answers a service discovery query.
 Names inside a DNS namespace stay local when no instance has a usable address:
 the resolver answers negatively instead of forwarding them to upstream DNS.
 
+A records carry the TTL of the service's `A` entry in `DnsConfig.DnsRecords`.
+A service that declares only other record types has no A answer. Floci uses a
+60-second fallback for older stored services without a usable A record TTL.
+New `CreateService` requests reject TTL values outside AWS's 0 to 2147483647
+range. Names owned by Floci's embedded DNS server also use 60 seconds.
+
 Three limits are worth knowing. `HTTP` namespaces do not resolve, matching AWS,
 where they are reachable only through `DiscoverInstances`. Only A records are
-served, so a name that AWS would answer with an `SRV` record answers with the
-address alone. And the embedded DNS server only runs when Floci itself runs
-inside Docker, so name resolution is available to containers, not to processes on
-the host.
+served, so Floci does not answer SRV-only service names with a fabricated A
+record. The embedded DNS server only runs when Floci itself runs inside Docker,
+so name resolution is available to containers, not to processes on the host.
 
 ## Supported Operations
 
