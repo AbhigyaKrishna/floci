@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.services.cloudmap;
 
+import com.fasterxml.jackson.core.JacksonException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -50,12 +55,13 @@ public class CloudMapService {
     private final StorageBackend<String, Instance> instanceStore;
     private final StorageBackend<String, Operation> operationStore;
     private final RegionResolver regionResolver;
+    private final ObjectMapper objectMapper;
     private final int completionDelaySeconds;
     private final ScheduledExecutorService scheduler;
 
     @Inject
     public CloudMapService(StorageFactory storageFactory, EmulatorConfig config,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.namespaceStore = storageFactory.create("cloudmap", "cloudmap-namespaces.json",
                 new TypeReference<Map<String, Namespace>>() {});
         this.serviceStore = storageFactory.create("cloudmap", "cloudmap-services.json",
@@ -65,6 +71,7 @@ public class CloudMapService {
         this.operationStore = storageFactory.create("cloudmap", "cloudmap-operations.json",
                 new TypeReference<Map<String, Operation>>() {});
         this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
         this.completionDelaySeconds = config.services().cloudmap().operationCompletionDelaySeconds();
         this.scheduler = completionDelaySeconds > 0
                 ? Executors.newSingleThreadScheduledExecutor(r -> {
@@ -172,6 +179,9 @@ public class CloudMapService {
                                  Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidInput", "Service name is required.", 400);
+        }
+        if (dnsConfig != null) {
+            validateDnsRecordTtls(dnsConfig);
         }
         String resolvedNamespaceId = namespaceId;
         if (dnsConfig != null && resolvedNamespaceId == null) {
@@ -377,11 +387,12 @@ public class CloudMapService {
      * either way.
      */
     public List<String> resolveDnsName(String queryName) {
-        return resolveDnsNameIfOwned(queryName).orElse(List.of());
+        return resolveDnsNameIfOwned(queryName)
+                .map(DnsAnswer::addresses).orElse(List.of());
     }
 
-    /** Keeps zone ownership distinct from the list of A records. */
-    public Optional<List<String>> resolveDnsNameIfOwned(String queryName) {
+    /** Keeps zone ownership distinct from the A records and their TTL. */
+    public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName) {
         if (queryName == null || queryName.isBlank()) {
             return Optional.empty();
         }
@@ -392,6 +403,7 @@ public class CloudMapService {
 
         List<String> addresses = new ArrayList<>();
         String matchedNamespaceName = null;
+        int answerTtl = DnsAnswer.DEFAULT_TTL_SECONDS;
         for (Namespace namespace : dnsNamespacesByLongestName()) {
             String namespaceName = namespace.getName().toLowerCase();
             String suffix = "." + namespaceName;
@@ -412,19 +424,82 @@ public class CloudMapService {
                         || !serviceName.equalsIgnoreCase(service.getName())) {
                     continue;
                 }
+                int serviceTtl = dnsRecordTtl(service);
+                if (serviceTtl < 0) {
+                    continue;
+                }
                 for (Instance instance : applyHealthFilter(scanInstances(service.getId()), "HEALTHY_OR_ELSE_ALL")) {
                     String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
                     if (isIpv4(ipv4)) {
+                        if (addresses.isEmpty()) {
+                            answerTtl = serviceTtl;
+                        }
                         addresses.add(ipv4);
                     }
                 }
             }
             if (!addresses.isEmpty()) {
-                return Optional.of(addresses.size() > MAX_DNS_ANSWERS
-                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses);
+                return Optional.of(new DnsAnswer(addresses.size() > MAX_DNS_ANSWERS
+                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, answerTtl));
             }
         }
-        return matchedNamespaceName != null ? Optional.of(List.of()) : Optional.empty();
+        return matchedNamespaceName != null ? Optional.of(DnsAnswer.none()) : Optional.empty();
+    }
+
+    private void validateDnsRecordTtls(String dnsConfig) {
+        JsonNode config;
+        try {
+            config = objectMapper.readTree(dnsConfig);
+        } catch (JacksonException e) {
+            throw new AwsException("InvalidInput", "DnsConfig must be valid JSON.", 400);
+        }
+        JsonNode records = config == null ? MissingNode.getInstance() : config.path("DnsRecords");
+        if (!records.isArray()) {
+            throw new AwsException("InvalidInput", "DnsConfig.DnsRecords is required.", 400);
+        }
+        for (JsonNode record : records) {
+            if (ttlSeconds(record.path("TTL")) < 0) {
+                throw new AwsException("InvalidInput",
+                        "DnsRecords TTL must be an integer from 0 to 2147483647.", 400);
+            }
+        }
+    }
+
+    /** Returns -1 when the service explicitly has no A record. */
+    private int dnsRecordTtl(Service service) {
+        JsonNode records = dnsConfigNode(service).path("DnsRecords");
+        if (!records.isArray()) {
+            return DnsAnswer.DEFAULT_TTL_SECONDS;
+        }
+        for (JsonNode record : records) {
+            if ("A".equalsIgnoreCase(record.path("Type").asText())) {
+                int ttl = ttlSeconds(record.path("TTL"));
+                return ttl >= 0 ? ttl : DnsAnswer.DEFAULT_TTL_SECONDS;
+            }
+        }
+        return -1;
+    }
+
+    private static int ttlSeconds(JsonNode ttl) {
+        if (!ttl.isIntegralNumber() || !ttl.canConvertToInt()) {
+            return -1;
+        }
+        int value = ttl.intValue();
+        return value >= 0 ? value : -1;
+    }
+
+    private JsonNode dnsConfigNode(Service service) {
+        String dnsConfig = service.getDnsConfig();
+        if (dnsConfig == null || dnsConfig.isBlank()) {
+            return MissingNode.getInstance();
+        }
+        try {
+            return objectMapper.readTree(dnsConfig);
+        } catch (JacksonException e) {
+            LOG.debugv("Could not read the DnsConfig of Cloud Map service {0}: {1}",
+                    service.getId(), e.getMessage());
+            return MissingNode.getInstance();
+        }
     }
 
     /**

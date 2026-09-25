@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudmap;
 
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
 import io.quarkus.test.junit.QuarkusTest;
@@ -12,6 +14,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Cloud Map's control plane always accepted namespaces, services and instances, but nothing
@@ -109,7 +112,7 @@ class CloudMapDnsResolutionTest {
         createService(privateDnsNamespace(namespace), "empty");
 
         assertTrue(cloudMapService.resolveDnsName("empty." + namespace).isEmpty());
-        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned("empty." + namespace).orElseThrow());
+        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned("empty." + namespace).orElseThrow().addresses());
     }
 
     @Test
@@ -127,7 +130,7 @@ class CloudMapDnsResolutionTest {
         registerInstance(service.getId(), "task-1", "172.31.0.6");
 
         assertTrue(cloudMapService.resolveDnsName(namespace).isEmpty());
-        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned(namespace).orElseThrow());
+        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned(namespace).orElseThrow().addresses());
     }
 
     @Test
@@ -139,8 +142,104 @@ class CloudMapDnsResolutionTest {
         Service parentService = createService(parentId, "nested");
         registerInstance(parentService.getId(), "task-1", "172.31.0.6");
 
-        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned(childName).orElseThrow());
+        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned(childName).orElseThrow().addresses());
         assertTrue(cloudMapService.resolveDnsName(childName).isEmpty());
+    }
+
+    // ── TTL ───────────────────────────────────────────────────────────────────
+
+    @Test
+    void answersWithTheTtlTheServicesARecordDeclares() {
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "valkey",
+                dnsConfig("{\"Type\":\"A\",\"TTL\":15}"));
+        registerInstance(service.getId(), "task-1", "172.31.0.6");
+
+        assertEquals(15, cloudMapService.resolveDnsNameIfOwned("valkey." + namespace).orElseThrow().ttlSeconds());
+    }
+
+    @Test
+    void prefersTheARecordsTtlOverAnotherRecordTypes() {
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "api",
+                dnsConfig("{\"Type\":\"AAAA\",\"TTL\":300}", "{\"Type\":\"A\",\"TTL\":15}"));
+        registerInstance(service.getId(), "task-1", "172.31.0.6");
+
+        assertEquals(15, cloudMapService.resolveDnsNameIfOwned("api." + namespace).orElseThrow().ttlSeconds());
+    }
+
+    @Test
+    void srvOnlyServiceDoesNotPublishAnARecord() {
+        // Cloud Map creates SRV records for the service name, not an A record there.
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "srvonly",
+                dnsConfig("{\"Type\":\"SRV\",\"TTL\":300}"));
+        registerInstance(service.getId(), "task-1", "172.31.0.6");
+
+        assertTrue(cloudMapService.resolveDnsName("srvonly." + namespace).isEmpty());
+        assertTrue(cloudMapService.resolveDnsNameIfOwned("srvonly." + namespace).orElseThrow().isEmpty());
+    }
+
+    @Test
+    void fallsBackToTheDefaultTtlWhenTheServiceHasNoDnsConfig() {
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "plain");
+        registerInstance(service.getId(), "task-1", "172.31.0.6");
+
+        assertEquals(DnsAnswer.DEFAULT_TTL_SECONDS,
+                cloudMapService.resolveDnsNameIfOwned("plain." + namespace).orElseThrow().ttlSeconds());
+    }
+
+    @Test
+    void rejectsTtlValuesOutsideTheAwsRange() {
+        String namespaceId = privateDnsNamespace(uniqueNamespace());
+        for (String ttl : List.of("-1", "2147483648", "1.5", "\"15\"")) {
+            AwsException error = assertThrows(AwsException.class, () -> createService(
+                    namespaceId, "invalid", dnsConfig("{\"Type\":\"A\",\"TTL\":" + ttl + "}")));
+            assertEquals("InvalidInput", error.getErrorCode());
+        }
+    }
+
+    @Test
+    void rejectsDnsRecordsWithoutATtl() {
+        String namespaceId = privateDnsNamespace(uniqueNamespace());
+        AwsException error = assertThrows(AwsException.class, () -> createService(
+                namespaceId, "missing", dnsConfig("{\"Type\":\"A\"}")));
+        assertEquals("InvalidInput", error.getErrorCode());
+    }
+
+    @Test
+    void acceptsATtlOfZero() {
+        // Cloud Map's range starts at 0, and a resolver told 0 must not cache the answer at all.
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "nocache",
+                dnsConfig("{\"Type\":\"A\",\"TTL\":0}"));
+        registerInstance(service.getId(), "task-1", "172.31.0.6");
+
+        assertEquals(0, cloudMapService.resolveDnsNameIfOwned("nocache." + namespace).orElseThrow().ttlSeconds());
+    }
+
+    @Test
+    void acceptsTheMaximumAwsTtl() {
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "longcache",
+                dnsConfig("{\"Type\":\"A\",\"TTL\":2147483647}"));
+        registerInstance(service.getId(), "task-1", "172.31.0.6");
+
+        assertEquals(Integer.MAX_VALUE,
+                cloudMapService.resolveDnsNameIfOwned("longcache." + namespace).orElseThrow().ttlSeconds());
+    }
+
+    @Test
+    void rejectsMalformedDnsConfig() {
+        String namespaceId = privateDnsNamespace(uniqueNamespace());
+        AwsException error = assertThrows(AwsException.class,
+                () -> createService(namespaceId, "malformed", "{not json"));
+        assertEquals("InvalidInput", error.getErrorCode());
+    }
+
+    private static String dnsConfig(String... records) {
+        return "{\"DnsRecords\":[" + String.join(",", records) + "]}";
     }
 
     private String privateDnsNamespace(String name) {
@@ -149,8 +248,12 @@ class CloudMapDnsResolutionTest {
     }
 
     private Service createService(String namespaceId, String serviceName) {
+        return createService(namespaceId, serviceName, null);
+    }
+
+    private Service createService(String namespaceId, String serviceName, String dnsConfig) {
         return cloudMapService.createService(serviceName, namespaceId, null, null,
-                null, null, null, null, Map.of(), REGION);
+                dnsConfig, null, null, null, Map.of(), REGION);
     }
 
     private void registerInstance(String serviceId, String instanceId, String ipv4) {
