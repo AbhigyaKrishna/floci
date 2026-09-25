@@ -8588,6 +8588,59 @@ public class RdsService implements Resettable, ResourceProvider {
         return subscription;
     }
 
+    /**
+     * AddSourceIdentifierToSubscription. The list is otherwise write-once, because
+     * ModifyEventSubscription carries no SourceIds member.
+     *
+     * <p>Adding an id the subscription already carries is a no-op rather than an error. The model
+     * declares only SourceNotFoundFault and SubscriptionNotFoundFault for this operation, so there
+     * is no fault to raise for a duplicate.
+     */
+    public synchronized EventSubscription addSourceIdentifierToSubscription(
+            String region, String subscriptionName, String sourceIdentifier) {
+        requireSourceIdentifierRequest(subscriptionName, sourceIdentifier);
+        EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        List<String> ids = new ArrayList<>(subscription.getSourceIdsList());
+        if (!ids.contains(sourceIdentifier)) {
+            ids.add(sourceIdentifier);
+            subscription.setSourceIdsList(ids);
+            eventSubscriptions.put(eventSubscriptionKey(region, subscriptionName), subscription);
+        }
+        return subscription;
+    }
+
+    /**
+     * RemoveSourceIdentifierFromSubscription. An id the subscription does not carry is
+     * SourceNotFound, which is the fault the model declares and the only one that fits.
+     */
+    public synchronized EventSubscription removeSourceIdentifierFromSubscription(
+            String region, String subscriptionName, String sourceIdentifier) {
+        requireSourceIdentifierRequest(subscriptionName, sourceIdentifier);
+        EventSubscription subscription = requireEventSubscription(region, subscriptionName);
+        List<String> ids = new ArrayList<>(subscription.getSourceIdsList());
+        if (!ids.remove(sourceIdentifier)) {
+            throw new AwsException("SourceNotFound",
+                    "Source " + sourceIdentifier + " not found in subscription " + subscriptionName + ".", 404);
+        }
+        subscription.setSourceIdsList(ids);
+        eventSubscriptions.put(eventSubscriptionKey(region, subscriptionName), subscription);
+        return subscription;
+    }
+
+    /**
+     * Both members are required by the model, so both fail the same way. Letting a missing
+     * SubscriptionName fall through to the lookup would answer SubscriptionNotFound, which tells
+     * the caller the subscription does not exist when the request simply did not name one.
+     */
+    private static void requireSourceIdentifierRequest(String subscriptionName, String sourceIdentifier) {
+        if (subscriptionName == null || subscriptionName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SubscriptionName is required.", 400);
+        }
+        if (sourceIdentifier == null || sourceIdentifier.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SourceIdentifier is required.", 400);
+        }
+    }
+
     public synchronized EventSubscription deleteEventSubscription(String region, String subscriptionName) {
         EventSubscription subscription = requireEventSubscription(region, subscriptionName);
         eventSubscriptions.delete(eventSubscriptionKey(region, subscriptionName));
