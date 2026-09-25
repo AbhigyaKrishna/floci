@@ -391,13 +391,21 @@ public class CloudMapService {
         }
 
         List<String> addresses = new ArrayList<>();
-        boolean owned = false;
+        String matchedNamespaceName = null;
         for (Namespace namespace : dnsNamespacesByLongestName()) {
-            String suffix = "." + namespace.getName().toLowerCase();
-            if (!name.endsWith(suffix)) {
+            String namespaceName = namespace.getName().toLowerCase();
+            String suffix = "." + namespaceName;
+            boolean apex = name.equals(namespaceName);
+            if (!apex && !name.endsWith(suffix)) {
                 continue;
             }
-            owned = true;
+            if (matchedNamespaceName != null && !matchedNamespaceName.equals(namespaceName)) {
+                break;
+            }
+            matchedNamespaceName = namespaceName;
+            if (apex) {
+                continue;
+            }
             String serviceName = name.substring(0, name.length() - suffix.length());
             for (Service service : scan(serviceStore)) {
                 if (!namespace.getId().equals(service.getNamespaceId())
@@ -416,7 +424,7 @@ public class CloudMapService {
                         ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses);
             }
         }
-        return owned ? Optional.of(List.of()) : Optional.empty();
+        return matchedNamespaceName != null ? Optional.of(List.of()) : Optional.empty();
     }
 
     /**

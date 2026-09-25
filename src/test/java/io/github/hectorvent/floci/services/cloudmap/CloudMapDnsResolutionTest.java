@@ -127,6 +127,20 @@ class CloudMapDnsResolutionTest {
         registerInstance(service.getId(), "task-1", "172.31.0.6");
 
         assertTrue(cloudMapService.resolveDnsName(namespace).isEmpty());
+        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned(namespace).orElseThrow());
+    }
+
+    @Test
+    void nestedNamespaceApexDoesNotResolveThroughTheParentNamespace() {
+        String parentName = uniqueNamespace();
+        String childName = "nested." + parentName;
+        String parentId = privateDnsNamespace(parentName);
+        privateDnsNamespace(childName);
+        Service parentService = createService(parentId, "nested");
+        registerInstance(parentService.getId(), "task-1", "172.31.0.6");
+
+        assertEquals(List.of(), cloudMapService.resolveDnsNameIfOwned(childName).orElseThrow());
+        assertTrue(cloudMapService.resolveDnsName(childName).isEmpty());
     }
 
     private String privateDnsNamespace(String name) {
