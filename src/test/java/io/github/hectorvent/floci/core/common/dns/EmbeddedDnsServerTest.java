@@ -104,7 +104,7 @@ class EmbeddedDnsServerTest {
                 dns.resolveARecord("ip-172-16-128-9.ec2.internal", "172.16.128.5").getFirst());
     }
 
-    // ── resolveARecord — DnsRecordSource ──────────────────────────────────────
+    // ── resolveARecord: DnsRecordSource ───────────────────────────────────────
 
     @Test
     void resolveARecord_answersFromARecordSource() {
