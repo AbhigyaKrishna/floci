@@ -65,7 +65,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Manages the Docker lifecycle of k3s containers for real-mode EKS clusters.
@@ -133,6 +135,11 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
     private final ContainerLogStreamer logStreamer;
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Closeable> clusterLogHandles = new ConcurrentHashMap<>();
+    private final List<Consumer<Instance>> nodeRegistrationListeners = new CopyOnWriteArrayList<>();
+
+    public void addNodeRegistrationListener(Consumer<Instance> listener) {
+        this.nodeRegistrationListeners.add(listener);
+    }
 
     record ClusterNodeRecord(String accountId, String region, Instance instance) {}
 
@@ -1644,7 +1651,16 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
             String region = clusterRegion(cluster);
             ContainerIps containerIps = resolveContainerIps(containerId);
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+            nodeInstance.setDockerContainerId(containerId);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            for (Consumer<Instance> listener : nodeRegistrationListeners) {
+                try {
+                    listener.accept(nodeInstance);
+                } catch (Exception e) {
+                    LOG.warnv("Node registration listener failed for cluster {0}: {1}",
+                            cluster.getName(), e.getMessage());
+                }
+            }
         } catch (Exception e) {
             LOG.warnv("Could not register cluster node instance for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
@@ -1663,7 +1679,10 @@ public class EksClusterManager implements ClusterNodeInstanceProvider {
                 String accountId = resolveClusterAccountId(cluster);
                 String region = clusterRegion(cluster);
                 nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
+                nodeInstance.setDockerContainerId(containerId);
                 clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
+            } else if (nodeInstance.getDockerContainerId() == null) {
+                nodeInstance.setDockerContainerId(containerId);
             }
 
             if (metadataServer != null) {

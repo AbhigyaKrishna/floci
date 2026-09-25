@@ -145,6 +145,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
     // The ASN AWS assigns when CreateTransitGateway omits Options.AmazonSideAsn.
     private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
+    private static final Pattern DEVICE_NAME_PATTERN = Pattern.compile("^(/dev/)?[a-zA-Z0-9/_-]+$");
     private static final Pattern TRANSIT_GATEWAY_ID_PATTERN = Pattern.compile("^tgw-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ROUTE_TABLE_ID_PATTERN =
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
@@ -234,9 +235,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private VpcNetworkManager vpcNetworkManager;
     private jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders;
     private ClusterNodeInstanceProvider testClusterNodeInstanceProvider;
+    private final Ec2VolumeBlockDeviceManager volumeBlockDeviceManager;
 
     void setClusterNodeInstanceProvider(ClusterNodeInstanceProvider provider) {
         this.testClusterNodeInstanceProvider = provider;
+    }
+
+    void putInstanceForTest(Instance instance) {
+        instances.put(key(instance.getRegion(), instance.getInstanceId()), instance);
     }
 
     // Public, no request context - for callers (and tests) that construct this service directly
@@ -267,9 +273,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                       VpcNetworkManager vpcNetworkManager, IamService iamService,
-                      jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders) {
+                      jakarta.enterprise.inject.Instance<ClusterNodeInstanceProvider> clusterNodeInstanceProviders,
+                      Ec2VolumeBlockDeviceManager volumeBlockDeviceManager) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
-                instanceTypeCatalog, storageFactory, requestContextInstance, iamService);
+                instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
         this.clusterNodeInstanceProviders = clusterNodeInstanceProviders;
     }
@@ -289,6 +296,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                       IamService iamService) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, requestContextInstance, iamService, null);
+    }
+
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+                      IamService iamService,
+                      Ec2VolumeBlockDeviceManager volumeBlockDeviceManager) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
@@ -326,7 +344,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, CapacityReservation>>() {}),
                 storageFactory.create("ec2", "ec2-volume-modifications.json",
                         new TypeReference<Map<String, VolumeModification>>() {}),
-                requestContextInstance, iamService);
+                requestContextInstance, iamService, volumeBlockDeviceManager);
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -479,7 +497,54 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, VolumeModification> volumeModifications,
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                IamService iamService) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, vpcs, subnets, securityGroups, securityGroupRules,
+                internetGateways, routeTables, keyPairs, addresses, instances,
+                volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
+                networkInterfaces, capacityReservations, volumeModifications,
+                requestContextInstance, iamService, null);
+    }
+
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               StorageBackend<String, CapacityReservation> capacityReservations,
+               StorageBackend<String, VolumeModification> volumeModifications,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+               IamService iamService,
+               Ec2VolumeBlockDeviceManager volumeBlockDeviceManager) {
         this.iamService = iamService;
+        this.volumeBlockDeviceManager = volumeBlockDeviceManager;
         this.defaultAccountId = config.defaultAccountId();
         this.requestContextInstance = requestContextInstance;
         this.config = config;
@@ -560,10 +625,83 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (restored > 0) {
             LOG.infov("Restored IMDS metadata registration for {0} EC2 container(s)", restored);
         }
+        if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
+            restoreAttachedVolumesOnStartup();
+        }
 
         // Runs after the restore loop, so anything legitimately revived above is already
         // accounted for and only genuine leftovers are left to collect.
         containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    private void restoreAttachedVolumesOnStartup() {
+        Map<String, Volume> allVolumes;
+        if (volumes instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Volume> accountAware = (AccountAwareStorageBackend<Volume>) rawAccountAware;
+            allVolumes = accountAware.scanAllAccountsAsMap();
+        } else {
+            allVolumes = new LinkedHashMap<>();
+            for (String k : volumes.keys()) {
+                volumes.get(k).ifPresent(v -> allVolumes.put(k, v));
+            }
+        }
+
+        for (Volume vol : allVolumes.values()) {
+            if (vol == null || !"in-use".equals(vol.getState()) || vol.getAttachments().isEmpty()) {
+                continue;
+            }
+            for (VolumeAttachment att : vol.getAttachments()) {
+                String reg = vol.getRegion() != null ? vol.getRegion() : config.defaultRegion();
+                Instance inst = findAnyInstance(key(reg, att.getInstanceId())).orElse(null);
+                if (inst == null) {
+                    inst = findExternalInstance(defaultAccountId, reg, att.getInstanceId()).orElse(null);
+                }
+                if (inst == null) {
+                    continue;
+                }
+                // Root volume backing is purely logical (Docker container rootfs overlayfs)
+                if (vol.getVolumeId().equals(inst.getRootVolumeId())
+                        || att.getDevice().equals(inst.getRootDeviceName())) {
+                    continue;
+                }
+                if (inst.getDockerContainerId() != null
+                        && containerManager.isContainerRunning(inst.getDockerContainerId())) {
+                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                }
+            }
+        }
+    }
+
+    public void restoreAttachedVolumesForInstance(String region, Instance inst) {
+        if (volumeBlockDeviceManager == null || inst == null) {
+            return;
+        }
+        Map<String, Volume> allVolumes;
+        if (volumes instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Volume> accountAware = (AccountAwareStorageBackend<Volume>) rawAccountAware;
+            allVolumes = accountAware.scanAllAccountsAsMap();
+        } else {
+            allVolumes = new LinkedHashMap<>();
+            for (String k : volumes.keys()) {
+                volumes.get(k).ifPresent(v -> allVolumes.put(k, v));
+            }
+        }
+        for (Volume vol : allVolumes.values()) {
+            if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
+                continue;
+            }
+            if (vol.getVolumeId().equals(inst.getRootVolumeId())) {
+                continue;
+            }
+            for (VolumeAttachment att : vol.getAttachments()) {
+                if (inst.getInstanceId().equals(att.getInstanceId())
+                        && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
+                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                }
+            }
+        }
     }
 
     /**
@@ -3186,8 +3324,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
-                volumes.delete(key(region, inst.getRootVolumeId()));
+                Volume rootVol = volumes.get(key(region, inst.getRootVolumeId())).orElse(null);
+                if (rootVol != null) {
+                    boolean attachedElsewhere = rootVol.getAttachments().stream()
+                            .anyMatch(a -> !inst.getInstanceId().equals(a.getInstanceId()));
+                    if (!attachedElsewhere) {
+                        if (volumeBlockDeviceManager != null) {
+                            volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
+                        }
+                        volumes.delete(key(region, inst.getRootVolumeId()));
+                    }
+                }
             }
+            detachAttachedVolumesOnTermination(region, inst);
             releaseStandaloneInterfacesOnTermination(region, inst);
             instances.put(key(region, id), inst);
             // The last instance depending on a deregistered AMI's capture has just gone away.
@@ -3310,7 +3459,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setState(InstanceState.running());
             } else {
                 restoreInstanceFirewall(inst);
-                containerManager.start(inst);
+                String accountId = callerAccountId();
+                containerManager.start(inst, () ->
+                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -3766,6 +3917,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         copy.setStateReasonCode(source.getStateReasonCode());
         copy.setStateReasonMessage(source.getStateReasonMessage());
         copy.setRegion(source.getRegion());
+        copy.setDockerContainerId(source.getDockerContainerId());
         copy.setRootVolumeId(source.getRootVolumeId());
         copy.setDisableApiStop(source.isDisableApiStop());
         copy.setDisableApiTermination(source.isDisableApiTermination());
@@ -8350,6 +8502,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         vol.setRegion(region);
         if (volumeTags != null) vol.setTags(new ArrayList<>(volumeTags));
         volumes.put(key(region, volumeId), vol);
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
+        }
         return vol;
     }
 
@@ -8371,9 +8526,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public void deleteVolume(String region, String volumeId) {
-        if (volumes.get(key(region, volumeId)).isEmpty()) {
-            throw new AwsException("InvalidVolume.NotFound",
-                    "The volume '" + volumeId + "' does not exist.", 400);
+        Volume volume = volumes.get(key(region, volumeId)).orElseThrow(() ->
+                new AwsException("InvalidVolume.NotFound",
+                        "The volume '" + volumeId + "' does not exist.", 400));
+        if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
+            throw new AwsException("VolumeInUse",
+                    "Volume " + volumeId + " is currently attached to an instance", 400);
+        }
+        if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
+            if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
+                throw new AwsException("InternalError",
+                        "Failed to delete backing storage for volume " + volumeId, 500);
+            }
         }
         volumes.delete(key(region, volumeId));
     }
@@ -8511,6 +8675,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("MissingParameter",
                     "The parameter Device is missing", 400);
         }
+        if (!DEVICE_NAME_PATTERN.matcher(device).matches() || device.contains("..")) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value '" + device + "' for parameter device is invalid.", 400);
+        }
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -8528,6 +8696,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("VolumeInUse",
                     "Volume '" + volumeId + "' is already attached", 400);
         }
+        // Check if instance already has an attached volume using this device name
+        String normalizedReqDev = device.startsWith("/") ? device : "/dev/" + device;
+        for (String k : volumes.keys()) {
+            Volume v = volumes.get(k).orElse(null);
+            if (v == null || !region.equals(v.getRegion()) || v.getAttachments().isEmpty()) {
+                continue;
+            }
+            for (VolumeAttachment existingAtt : v.getAttachments()) {
+                if (inst.getInstanceId().equals(existingAtt.getInstanceId())) {
+                    String existingDev = existingAtt.getDevice() != null && existingAtt.getDevice().startsWith("/")
+                            ? existingAtt.getDevice() : "/dev/" + existingAtt.getDevice();
+                    if (normalizedReqDev.equals(existingDev)) {
+                        throw new AwsException("InvalidParameterValue",
+                                "The device '" + device + "' is already in use by volume '" + v.getVolumeId() + "'", 400);
+                    }
+                }
+            }
+        }
 
         VolumeAttachment attachment = new VolumeAttachment();
         attachment.setVolumeId(volumeId);
@@ -8540,6 +8726,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         volume.getAttachments().add(attachment);
         volume.setState("in-use");
         volumes.put(key(region, volumeId), volume);
+
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.attachVolume(volume, inst, device);
+        }
+
         return attachment;
     }
 
@@ -8577,6 +8768,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         volume.getAttachments().clear();
         volume.setState("available");
         volumes.put(key(region, volumeId), volume);
+
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.detachVolume(volume, inst, target.getDevice());
+        }
+
         return target;
     }
 
@@ -8991,6 +9187,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             ni.setAttachment(null);
             ni.setStatus("available");
             networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
+    }
+
+    private void detachAttachedVolumesOnTermination(String region, Instance inst) {
+        for (String k : volumes.keys()) {
+            Volume vol = volumes.get(k).orElse(null);
+            if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
+                continue;
+            }
+            boolean modified = false;
+            for (VolumeAttachment att : new ArrayList<>(vol.getAttachments())) {
+                if (inst.getInstanceId().equals(att.getInstanceId())) {
+                    if (volumeBlockDeviceManager != null) {
+                        volumeBlockDeviceManager.detachVolume(vol, inst, att.getDevice());
+                    }
+                    if (att.isDeleteOnTermination()) {
+                        if (volumeBlockDeviceManager != null) {
+                            volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
+                        }
+                        volumes.delete(k);
+                        modified = false;
+                        break;
+                    } else {
+                        vol.getAttachments().remove(att);
+                        modified = true;
+                    }
+                }
+            }
+            if (modified) {
+                vol.setState(vol.getAttachments().isEmpty() ? "available" : "in-use");
+                volumes.put(k, vol);
+            }
         }
     }
 
