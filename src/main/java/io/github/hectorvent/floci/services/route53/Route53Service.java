@@ -633,12 +633,11 @@ public class Route53Service implements Resettable {
                     String rName = normalizeName(rrs.getName()).toLowerCase();
                     String wildcardSuffix = rName.substring(2); // e.g. "corp.internal."
                     if (normalizedQname.endsWith("." + wildcardSuffix)) {
-                        // Wildcard cannot match beneath an existing closer name in the same zone (RFC 1034 4.3.3)
+                        // A wildcard cannot match when the name or an ancestor closer than the wildcard's
+                        // parent exists, and a name with records only beneath it exists too (RFC 4592 2.2)
                         boolean closerNameExists = records.stream()
                                 .map(r -> normalizeName(r.getName()).toLowerCase())
-                                .filter(n -> !n.startsWith("*."))
-                                .anyMatch(n -> n.length() > wildcardSuffix.length()
-                                        && (normalizedQname.equals(n) || normalizedQname.endsWith("." + n)));
+                                .anyMatch(n -> sharedSuffixLength(n, normalizedQname) > wildcardSuffix.length());
                         if (!closerNameExists) {
                             wildcardMatches.add(rrs);
                         }
@@ -647,6 +646,22 @@ public class Route53Service implements Resettable {
             }
         }
         return !nameMatches.isEmpty() ? nameMatches : wildcardMatches;
+    }
+
+    /** Length of the longest whole-label suffix two normalized names share, trailing dot included. */
+    private static int sharedSuffixLength(String a, String b) {
+        int i = a.length();
+        int j = b.length();
+        int shared = 0;
+        while (i > 0 && j > 0 && a.charAt(i - 1) == b.charAt(j - 1)) {
+            i--;
+            j--;
+            boolean labelStart = (i == 0 || a.charAt(i - 1) == '.') && (j == 0 || b.charAt(j - 1) == '.');
+            if (labelStart) {
+                shared = a.length() - i;
+            }
+        }
+        return shared;
     }
 
     /**

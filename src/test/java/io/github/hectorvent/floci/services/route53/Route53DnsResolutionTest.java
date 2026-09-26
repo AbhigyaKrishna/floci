@@ -188,6 +188,39 @@ class Route53DnsResolutionTest {
     }
 
     @Test
+    void wildcardDoesNotMatchAnEmptyNonTerminal() {
+        String zone = uniqueZone();
+        String zoneId = createPrivateZone(zone);
+        addRecord(zoneId, "*." + zone, "A", "10.0.2.1");
+        addRecord(zoneId, "api.team." + zone, "A", "10.0.2.2");
+
+        Optional<DnsAnswer> team = dnsRecordSource.resolveIpv4("team." + zone);
+        assertTrue(team.isPresent());
+        assertTrue(team.get().isEmpty());
+        assertTrue(team.get().nameExists());
+
+        Optional<DnsAnswer> web = dnsRecordSource.resolveIpv4("web.team." + zone);
+        assertTrue(web.isPresent());
+        assertEquals(DnsAnswer.nxDomain(), web.get());
+
+        Optional<DnsAnswer> other = dnsRecordSource.resolveIpv4("other." + zone);
+        assertTrue(other.isPresent());
+        assertEquals(List.of("10.0.2.1"), other.get().addresses());
+    }
+
+    @Test
+    void closerWildcardTakesPrecedenceOverParentWildcard() {
+        String zone = uniqueZone();
+        String zoneId = createPrivateZone(zone);
+        addRecord(zoneId, "*." + zone, "A", "10.0.2.1");
+        addRecord(zoneId, "*.team." + zone, "A", "10.0.2.3");
+
+        Optional<DnsAnswer> result = dnsRecordSource.resolveIpv4("web.team." + zone);
+        assertTrue(result.isPresent());
+        assertEquals(List.of("10.0.2.3"), result.get().addresses());
+    }
+
+    @Test
     void resolvesPrivateCnameChainToARecord() {
         String zone = uniqueZone();
         String zoneId = createPrivateZone(zone);
