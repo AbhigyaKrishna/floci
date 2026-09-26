@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.route53;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsLookupHelper;
 import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -15,6 +16,7 @@ import java.net.InetAddress;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -63,36 +65,37 @@ public class Route53DnsRecordSource implements DnsRecordSource {
     }
 
     @Override
-    public Optional<List<String>> resolveIpv4(String name) {
+    public Optional<DnsAnswer> resolveIpv4(String name) {
         if (name == null || name.isBlank()) {
             return Optional.empty();
         }
         if (!route53Service.isCoveredByPrivateZone(name)) {
             return Optional.empty();
         }
-        List<String> addresses = resolveAddresses(name, new HashSet<>(), 0);
-        if (addresses.size() > MAX_DNS_ANSWERS) {
-            addresses = addresses.subList(0, MAX_DNS_ANSWERS);
+        DnsAnswer answer = resolveAddresses(name, new HashSet<>(), 0);
+        if (answer.addresses().size() > MAX_DNS_ANSWERS) {
+            answer = DnsAnswer.records(answer.addresses().subList(0, MAX_DNS_ANSWERS), answer.ttlSeconds());
         }
-        return Optional.of(addresses);
+        return Optional.of(answer);
     }
 
-    private List<String> resolveAddresses(String qname, Set<String> visited, int depth) {
+    private DnsAnswer resolveAddresses(String qname, Set<String> visited, int depth) {
         if (depth > MAX_CNAME_DEPTH) {
-            return List.of();
+            return DnsAnswer.noData();
         }
-        String normalized = Route53Service.normalizeName(qname).toLowerCase();
+        String normalized = Route53Service.normalizeName(qname).toLowerCase(Locale.ROOT);
         if (!visited.add(normalized)) {
-            return List.of();
+            return DnsAnswer.noData();
         }
 
         List<ResourceRecordSet> recordSets = route53Service.findPrivateRecordsForName(qname);
         if (recordSets.isEmpty()) {
-            return List.of();
+            return DnsAnswer.nxDomain();
         }
 
         // 1. Direct A records
         Set<String> addresses = new LinkedHashSet<>();
+        int ttl = Integer.MAX_VALUE;
         for (ResourceRecordSet rrs : recordSets) {
             if ("A".equalsIgnoreCase(rrs.getType())) {
                 if (rrs.getRecords() != null) {
@@ -100,6 +103,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                         String val = rr.getValue();
                         if (isIpv4(val)) {
                             addresses.add(val.trim());
+                            ttl = Math.min(ttl, ttlOf(rrs));
                         }
                     }
                 }
@@ -109,23 +113,25 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                     if (cleanAlias.endsWith(".")) {
                         cleanAlias = cleanAlias.substring(0, cleanAlias.length() - 1);
                     }
+                    // An alias record has no TTL of its own; Route 53 answers with the target's.
                     if (route53Service.isCoveredByPrivateZone(cleanAlias)) {
-                        addresses.addAll(resolveAddresses(cleanAlias, visited, depth + 1));
-                    } else if (matchesFlociSuffix(cleanAlias)) {
-                        getLocalFlociAddress().ifPresent(addresses::add);
+                        DnsAnswer target = resolveAddresses(cleanAlias, visited, depth + 1);
+                        if (!target.isEmpty()) {
+                            addresses.addAll(target.addresses());
+                            ttl = Math.min(ttl, target.ttlSeconds());
+                        }
                     } else {
-                        Optional<String> ec2Ip = resolveEc2PrivateDnsName(cleanAlias);
-                        if (ec2Ip.isPresent()) {
-                            addresses.add(ec2Ip.get());
-                        } else {
-                            addresses.addAll(dnsLookupHelper.resolveIpv4(cleanAlias));
+                        List<String> resolved = resolveOutsidePrivateZones(cleanAlias);
+                        if (!resolved.isEmpty()) {
+                            addresses.addAll(resolved);
+                            ttl = Math.min(ttl, DnsAnswer.DEFAULT_TTL_SECONDS);
                         }
                     }
                 }
             }
         }
         if (!addresses.isEmpty()) {
-            return List.copyOf(addresses);
+            return DnsAnswer.records(List.copyOf(addresses), ttl);
         }
 
         // 2. CNAME records
@@ -138,23 +144,40 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                         if (cleanTarget.endsWith(".")) {
                             cleanTarget = cleanTarget.substring(0, cleanTarget.length() - 1);
                         }
+                        // The answer is flattened to A records, so it can be cached only as long
+                        // as the shortest-lived record in the chain.
+                        int cnameTtl = ttlOf(rrs);
                         if (route53Service.isCoveredByPrivateZone(cleanTarget)) {
-                            return resolveAddresses(cleanTarget, visited, depth + 1);
+                            DnsAnswer targetAnswer = resolveAddresses(cleanTarget, visited, depth + 1);
+                            return DnsAnswer.records(targetAnswer.addresses(),
+                                    Math.min(cnameTtl, targetAnswer.ttlSeconds()));
                         }
-                        if (matchesFlociSuffix(cleanTarget)) {
-                            return getLocalFlociAddress().map(List::of).orElse(List.of());
-                        }
-                        Optional<String> ec2Ip = resolveEc2PrivateDnsName(cleanTarget);
-                        if (ec2Ip.isPresent()) {
-                            return List.of(ec2Ip.get());
-                        }
-                        return dnsLookupHelper.resolveIpv4(cleanTarget);
+                        return DnsAnswer.records(resolveOutsidePrivateZones(cleanTarget), cnameTtl);
                     }
                 }
             }
         }
 
-        return List.of();
+        return DnsAnswer.noData();
+    }
+
+    private List<String> resolveOutsidePrivateZones(String name) {
+        if (matchesFlociSuffix(name)) {
+            return getLocalFlociAddress().map(List::of).orElse(List.of());
+        }
+        Optional<String> ec2Ip = resolveEc2PrivateDnsName(name);
+        if (ec2Ip.isPresent()) {
+            return List.of(ec2Ip.get());
+        }
+        return dnsLookupHelper.resolveIpv4(name);
+    }
+
+    private static int ttlOf(ResourceRecordSet rrs) {
+        Long ttl = rrs.getTtl();
+        if (ttl == null || ttl < 0) {
+            return DnsAnswer.DEFAULT_TTL_SECONDS;
+        }
+        return (int) Math.min(ttl, Integer.MAX_VALUE);
     }
 
     private boolean matchesFlociSuffix(String name) {
