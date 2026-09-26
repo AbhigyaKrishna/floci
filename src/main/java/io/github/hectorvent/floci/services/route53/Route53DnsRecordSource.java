@@ -90,7 +90,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
         List<ResourceRecordSet> recordSets = route53Service.findPrivateRecordsForName(qname);
         if (recordSets.isEmpty()) {
-            return DnsAnswer.nxDomain();
+            return route53Service.hasPrivateRecordsBeneath(qname) ? DnsAnswer.noData() : DnsAnswer.nxDomain();
         }
 
         // 1. Direct A records
@@ -152,7 +152,8 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                             return DnsAnswer.records(targetAnswer.addresses(),
                                     Math.min(cnameTtl, targetAnswer.ttlSeconds()));
                         }
-                        return DnsAnswer.records(resolveOutsidePrivateZones(cleanTarget), cnameTtl);
+                        return DnsAnswer.records(resolveOutsidePrivateZones(cleanTarget),
+                                Math.min(cnameTtl, DnsAnswer.DEFAULT_TTL_SECONDS));
                     }
                 }
             }

@@ -259,6 +259,33 @@ class Route53DnsResolutionTest {
     }
 
     @Test
+    void answersNoDataForEmptyNonTerminalName() {
+        String zone = uniqueZone();
+        String zoneId = createPrivateZone(zone);
+        addRecord(zoneId, "api.team." + zone, "A", "10.0.6.1");
+
+        Optional<DnsAnswer> result = dnsRecordSource.resolveIpv4("team." + zone);
+        assertTrue(result.isPresent());
+        assertTrue(result.get().isEmpty());
+        assertTrue(result.get().nameExists());
+    }
+
+    @Test
+    void cnameToExternalHostnameCapsTheTtlForTheUnseenTarget() {
+        Mockito.when(dnsLookupHelper.resolveIpv4("external-ttl.example.com"))
+                .thenReturn(List.of("93.184.216.35"));
+
+        String zone = uniqueZone();
+        String zoneId = createPrivateZone(zone);
+        addRecord(zoneId, "ext." + zone, "CNAME", "external-ttl.example.com.", 3600L);
+
+        Optional<DnsAnswer> result = dnsRecordSource.resolveIpv4("ext." + zone);
+        assertTrue(result.isPresent());
+        assertEquals(List.of("93.184.216.35"), result.get().addresses());
+        assertEquals(DnsAnswer.DEFAULT_TTL_SECONDS, result.get().ttlSeconds());
+    }
+
+    @Test
     void answersNoDataForExistingNameWithoutARecord() {
         String zone = uniqueZone();
         String zoneId = createPrivateZone(zone);
