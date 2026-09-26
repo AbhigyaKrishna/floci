@@ -7,18 +7,25 @@ import java.util.List;
  * publishes for them. A source that holds a TTL of its own supplies it, so a client caches the
  * answer for as long as the zone says rather than for a figure the DNS server picked.
  *
- * <p>Both members are per answer rather than per record: every address behind one Cloud Map
+ * <p>The TTL is per answer rather than per record: every address behind one Cloud Map
  * service shares that service's TTL, which is how Route 53 publishes a record set.
+ * {@code nameExists} distinguishes an owned name without A records from a name that is absent.
  */
-public record DnsAnswer(List<String> addresses, int ttlSeconds) {
+public record DnsAnswer(List<String> addresses, int ttlSeconds, boolean nameExists) {
 
     /** What the DNS server publishes for a name whose zone declares no TTL of its own. */
     public static final int DEFAULT_TTL_SECONDS = 60;
 
-    private static final DnsAnswer NONE = new DnsAnswer(List.of(), DEFAULT_TTL_SECONDS);
+    private static final DnsAnswer NONE = new DnsAnswer(List.of(), DEFAULT_TTL_SECONDS, false);
+    private static final DnsAnswer NO_DATA = new DnsAnswer(List.of(), DEFAULT_TTL_SECONDS, true);
+
+    public DnsAnswer(List<String> addresses, int ttlSeconds) {
+        this(addresses, ttlSeconds, addresses != null && !addresses.isEmpty());
+    }
 
     public DnsAnswer {
         addresses = addresses == null ? List.of() : List.copyOf(addresses);
+        nameExists = nameExists || !addresses.isEmpty();
         // A TTL is an unsigned 31-bit field, and RFC 2181 has a resolver treat anything with the
         // top bit set as zero, so a value outside the range is worse than no value at all. Cloud
         // Map's own range is the same 0 to 2147483647, so one that lands here came from a store
@@ -28,9 +35,14 @@ public record DnsAnswer(List<String> addresses, int ttlSeconds) {
         }
     }
 
-    /** An owned name with no A addresses. Zone ownership is represented by Optional. */
+    /** An absent name inside an owned zone. Zone ownership is represented by Optional. */
     public static DnsAnswer none() {
         return NONE;
+    }
+
+    /** An existing name without A records. */
+    public static DnsAnswer noData() {
+        return NO_DATA;
     }
 
     public boolean isEmpty() {

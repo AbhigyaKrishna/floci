@@ -73,6 +73,27 @@ class CloudMapDnsResolutionTest {
     }
 
     @Test
+    void dnsNamespaceRejectsServiceNamesThatDifferOnlyByCase() {
+        String namespaceId = privateDnsNamespace(uniqueNamespace());
+        createService(namespaceId, "Api", dnsConfig("{\"Type\":\"A\",\"TTL\":15}"));
+
+        AwsException error = assertThrows(AwsException.class, () -> createService(
+                namespaceId, "api", dnsConfig("{\"Type\":\"A\",\"TTL\":300}")));
+        assertEquals("ServiceAlreadyExists", error.getErrorCode());
+    }
+
+    @Test
+    void httpNamespaceAllowsServiceNamesThatDifferOnlyByCase() {
+        String namespaceId = cloudMapService.createHttpNamespace(uniqueNamespace(), null, null,
+                Map.of(), REGION).getTargets().get("NAMESPACE");
+
+        createService(namespaceId, "Api");
+        createService(namespaceId, "api");
+
+        assertEquals(2, cloudMapService.listServices(REGION, namespaceId).size());
+    }
+
+    @Test
     void resolvesAPublicDnsNamespaceToo() {
         String namespace = uniqueNamespace();
         Operation operation = cloudMapService.createPublicDnsNamespace(
@@ -177,7 +198,9 @@ class CloudMapDnsResolutionTest {
         registerInstance(service.getId(), "task-1", "172.31.0.6");
 
         assertTrue(cloudMapService.resolveDnsName("srvonly." + namespace).isEmpty());
-        assertTrue(cloudMapService.resolveDnsNameIfOwned("srvonly." + namespace).orElseThrow().isEmpty());
+        DnsAnswer answer = cloudMapService.resolveDnsNameIfOwned("srvonly." + namespace).orElseThrow();
+        assertTrue(answer.isEmpty());
+        assertTrue(answer.nameExists());
     }
 
     @Test

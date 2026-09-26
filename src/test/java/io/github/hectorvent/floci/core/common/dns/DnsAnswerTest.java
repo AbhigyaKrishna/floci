@@ -16,6 +16,9 @@ class DnsAnswerTest {
     void noneIsEmptyAndCarriesTheDefaultTtl() {
         assertTrue(DnsAnswer.none().isEmpty());
         assertEquals(DnsAnswer.DEFAULT_TTL_SECONDS, DnsAnswer.none().ttlSeconds());
+        assertFalse(DnsAnswer.none().nameExists());
+        assertTrue(DnsAnswer.noData().isEmpty());
+        assertTrue(DnsAnswer.noData().nameExists());
     }
 
     @Test
