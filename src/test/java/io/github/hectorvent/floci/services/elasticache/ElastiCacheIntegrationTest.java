@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -94,11 +95,11 @@ class ElastiCacheIntegrationTest {
                     .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ReplicationGroupId", equalTo(GROUP_ID))
                     .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.Status", equalTo("available"))
                     .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.AuthTokenEnabled", equalTo("true"))
-                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Address", equalTo("localhost"))
-                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port", notNullValue())
+                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Address", equalTo("localhost"))
+                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port", notNullValue())
                 .extract()
                     .xmlPath()
-                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
     }
 
     @Test
@@ -114,8 +115,11 @@ class ElastiCacheIntegrationTest {
             .statusCode(200)
             .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ReplicationGroupId",
                     equalTo(GROUP_ID))
-            .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ConfigurationEndpoint.Port",
-                    equalTo(String.valueOf(firstProxyPort)));
+            .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port",
+                    equalTo(String.valueOf(firstProxyPort)))
+            .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ClusterEnabled",
+                    equalTo("false"))
+            .body(not(containsString("<ConfigurationEndpoint>")));
     }
 
     @Test
@@ -235,7 +239,7 @@ class ElastiCacheIntegrationTest {
                     .statusCode(200)
                 .extract()
                     .xmlPath()
-                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
 
             // User associated with GROUP_ID should be rejected on CROSS_GROUP_ID
             String reply = sendCommand(crossGroupPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -345,10 +349,10 @@ class ElastiCacheIntegrationTest {
                     .post("/")
                 .then()
                     .statusCode(200)
-                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Address", equalTo("localhost"))
+                    .body("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Address", equalTo("localhost"))
                 .extract()
                     .xmlPath()
-                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.ConfigurationEndpoint.Port");
+                    .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
 
         assertEquals(firstProxyPort, reusedPort);
 

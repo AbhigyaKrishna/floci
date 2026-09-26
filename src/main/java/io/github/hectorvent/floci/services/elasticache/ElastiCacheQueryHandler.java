@@ -962,7 +962,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             appendSingleNodeGroup(xml, g, members, ep);
         }
         xml.end("NodeGroups");
-        if (ep != null) {
+        if (g.isClusterEnabled() && ep != null) {
             xml.start("ConfigurationEndpoint")
                .elem("Address", ep.address())
                .elem("Port", (long) ep.port())
