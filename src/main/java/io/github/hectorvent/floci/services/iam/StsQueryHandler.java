@@ -132,7 +132,8 @@ public class StsQueryHandler {
         // these temporary credentials to the assumed role's account.
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId);
+                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId,
+                sessionName, assumedRoleId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -177,8 +178,9 @@ public class StsQueryHandler {
         String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
+        String userId = iamService.resolveCallerUserId(accessKeyId).orElse(accountId);
         String result = new XmlBuilder()
-                .elem("UserId", accountId)
+                .elem("UserId", userId)
                 .elem("Account", accountId)
                 .elem("Arn", arn)
                 .build();
@@ -243,7 +245,8 @@ public class StsQueryHandler {
 
         String sessionPolicy = getParam(params, "Policy");
         iamService.registerSession(
-                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId);
+                accessKeyId, secretKey, sessionToken, roleArn, expiration, sessionPolicy, callerAccountId,
+                sessionName, assumedRoleId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -405,7 +408,8 @@ public class StsQueryHandler {
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null, callerAccountId);
+        iamService.registerSession(accessKeyId, secretKey, sessionToken, roleArn, expiration, null,
+                callerAccountId, sessionName, assumedRoleId);
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser").elem("Arn", assumedRoleArn).elem("AssumedRoleId", assumedRoleId).end("AssumedRoleUser")
