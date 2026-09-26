@@ -426,7 +426,7 @@ public class CloudMapService {
                         || !serviceName.equalsIgnoreCase(service.getName())) {
                     continue;
                 }
-                int serviceTtl = dnsRecordTtl(service);
+                int serviceTtl = dnsRecordTtl(service, "A");
                 if (serviceTtl < 0) {
                     nameExists |= !scanInstances(service.getId()).isEmpty();
                     continue;
@@ -440,6 +440,26 @@ public class CloudMapService {
                 if (!addresses.isEmpty()) {
                     return Optional.of(new DnsAnswer(addresses.size() > MAX_DNS_ANSWERS
                             ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, serviceTtl));
+                }
+            }
+            for (Service service : scan(serviceStore)) {
+                if (!namespace.getId().equals(service.getNamespaceId())
+                        || !serviceName.endsWith("." + service.getName().toLowerCase())) {
+                    continue;
+                }
+                int srvTtl = dnsRecordTtl(service, "SRV");
+                if (srvTtl < 0) {
+                    continue;
+                }
+                for (Instance instance : scanInstances(service.getId())) {
+                    if (!(instance.getInstanceId() + "." + service.getName()).equalsIgnoreCase(serviceName)) {
+                        continue;
+                    }
+                    nameExists = true;
+                    String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
+                    if (isIpv4(ipv4)) {
+                        return Optional.of(new DnsAnswer(List.of(ipv4), srvTtl));
+                    }
                 }
             }
         }
@@ -466,14 +486,14 @@ public class CloudMapService {
         }
     }
 
-    /** Returns -1 when the service explicitly has no A record. */
-    private int dnsRecordTtl(Service service) {
+    /** Returns -1 when the service has no record of the requested type. */
+    private int dnsRecordTtl(Service service, String type) {
         JsonNode records = dnsConfigNode(service).path("DnsRecords");
         if (!records.isArray()) {
-            return DnsAnswer.DEFAULT_TTL_SECONDS;
+            return "A".equals(type) ? DnsAnswer.DEFAULT_TTL_SECONDS : -1;
         }
         for (JsonNode record : records) {
-            if ("A".equalsIgnoreCase(record.path("Type").asText())) {
+            if (type.equalsIgnoreCase(record.path("Type").asText())) {
                 int ttl = ttlSeconds(record.path("TTL"));
                 return ttl >= 0 ? ttl : DnsAnswer.DEFAULT_TTL_SECONDS;
             }

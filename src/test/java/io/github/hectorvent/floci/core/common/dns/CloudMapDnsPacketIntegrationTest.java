@@ -77,6 +77,26 @@ class CloudMapDnsPacketIntegrationTest {
     }
 
     @Test
+    void srvInstanceHostnameAnswersAQueryWithConfiguredTtl() throws Exception {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service service = cloudMapService.createService("backend", namespaceId, null, null,
+                "{\"DnsRecords\":[{\"Type\":\"SRV\",\"TTL\":300}]}", null, null, null, Map.of(), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-1", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6", "AWS_INSTANCE_PORT", "8080"), REGION);
+
+        byte[] request = buildQuery("task-1.backend." + namespace, (short) 1);
+        byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)), request);
+        ByteBuffer packet = ByteBuffer.wrap(response);
+
+        assertEquals(0, packet.getShort(2) & 0x000F);
+        assertEquals(1, packet.getShort(6));
+        assertEquals(300, packet.getInt(request.length + 6));
+        assertArrayEquals(new byte[]{(byte) 172, 31, 0, 6},
+                Arrays.copyOfRange(response, request.length + 12, request.length + 16));
+    }
+
+    @Test
     void absentServiceNameStillReturnsNxDomain() throws Exception {
         String namespace = uniqueNamespace();
         privateDnsNamespace(namespace);
