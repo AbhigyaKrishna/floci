@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -37,6 +39,7 @@ import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
+import io.swagger.v3.parser.util.OpenAPIDeserializer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -55,6 +58,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -2640,15 +2644,33 @@ public class ApiGatewayService {
         request.put("description", description);
         RestApi api = createRestApi(region, request);
 
-        applyOpenApiSpec(region, api.getId(), openAPI);
+        try {
+            applyOpenApiSpec(region, api.getId(), openAPI);
+        } catch (RuntimeException e) {
+            // AWS creates nothing when an import fails, and the error carries no id to clean up with.
+            restoreRestApi(region, api.getId(), RestApiSnapshot.empty());
+            throw e;
+        }
         LOG.infov("Imported REST API from OpenAPI spec: {0} ({1})", name, api.getId());
         return api;
     }
 
     public RestApi putRestApi(String region, String apiId, String mode, String specBody) {
         // Note: mode=merge is accepted but treated as overwrite (merge semantics not yet implemented)
-        RestApi api = getRestApi(region, apiId);
+        getRestApi(region, apiId);
         OpenAPI openAPI = parseOpenApiSpec(specBody);
+        RestApiSnapshot snapshot = snapshotRestApi(region, apiId);
+        try {
+            return overwriteRestApi(region, apiId, openAPI);
+        } catch (RuntimeException e) {
+            // A failed PutRestApi leaves the API as it was; the overwrite has already cleared it by now.
+            restoreRestApi(region, apiId, snapshot);
+            throw e;
+        }
+    }
+
+    private RestApi overwriteRestApi(String region, String apiId, OpenAPI openAPI) {
+        RestApi api = getRestApi(region, apiId);
 
         // Delete all non-root resources
         List<ApiGatewayResource> existing = getResources(region, apiId);
@@ -2682,6 +2704,62 @@ public class ApiGatewayService {
         applyOpenApiSpec(region, apiId, openAPI);
         LOG.infov("Updated REST API from OpenAPI spec: {0} ({1})", api.getName(), apiId);
         return api;
+    }
+
+    /**
+     * The API-scoped state an OpenAPI import writes, deep-copied so a failed import can put it back:
+     * the stores hand out live objects, and the import mutates some of them in place.
+     */
+    private record RestApiSnapshot(Map<String, RestApi> apis,
+                                   Map<String, ApiGatewayResource> resources,
+                                   Map<String, Model> models,
+                                   Map<String, RequestValidator> requestValidators,
+                                   Map<String, Authorizer> authorizers,
+                                   Map<String, GatewayResponse> gatewayResponses) {
+
+        static RestApiSnapshot empty() {
+            return new RestApiSnapshot(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+        }
+    }
+
+    private RestApiSnapshot snapshotRestApi(String region, String apiId) {
+        String prefix = region + "::" + apiId + "::";
+        String apiKey = apiKey(region, apiId);
+        return new RestApiSnapshot(
+                copyEntries(apiStore, apiKey::equals, RestApi.class),
+                copyEntries(resourceStore, k -> k.startsWith(prefix), ApiGatewayResource.class),
+                copyEntries(modelStore, k -> k.startsWith(prefix), Model.class),
+                copyEntries(requestValidatorStore, k -> k.startsWith(prefix), RequestValidator.class),
+                copyEntries(authorizerStore, k -> k.startsWith(prefix), Authorizer.class),
+                copyEntries(gatewayResponseStore, k -> k.startsWith(prefix), GatewayResponse.class));
+    }
+
+    private void restoreRestApi(String region, String apiId, RestApiSnapshot snapshot) {
+        String prefix = region + "::" + apiId + "::";
+        String apiKey = apiKey(region, apiId);
+        replaceEntries(apiStore, apiKey::equals, snapshot.apis());
+        replaceEntries(resourceStore, k -> k.startsWith(prefix), snapshot.resources());
+        replaceEntries(modelStore, k -> k.startsWith(prefix), snapshot.models());
+        replaceEntries(requestValidatorStore, k -> k.startsWith(prefix), snapshot.requestValidators());
+        replaceEntries(authorizerStore, k -> k.startsWith(prefix), snapshot.authorizers());
+        replaceEntries(gatewayResponseStore, k -> k.startsWith(prefix), snapshot.gatewayResponses());
+    }
+
+    private static <T> Map<String, T> copyEntries(StorageBackend<String, T> store, Predicate<String> keyFilter,
+                                                  Class<T> type) {
+        Map<String, T> copies = new LinkedHashMap<>();
+        for (String key : store.keys()) {
+            if (keyFilter.test(key)) {
+                store.get(key).ifPresent(value -> copies.put(key, JSON.convertValue(value, type)));
+            }
+        }
+        return copies;
+    }
+
+    private static <T> void replaceEntries(StorageBackend<String, T> store, Predicate<String> keyFilter,
+                                           Map<String, T> entries) {
+        store.keys().stream().filter(keyFilter).toList().forEach(store::delete);
+        entries.forEach(store::put);
     }
 
     private OpenAPI parseOpenApiSpec(String specBody) {
@@ -3011,27 +3089,37 @@ public class ApiGatewayService {
             if (pathItem.getExtensions() != null) {
                 Object anyMethodExt = pathItem.getExtensions().get("x-amazon-apigateway-any-method");
                 if (anyMethodExt != null) {
+                    Operation anyOperation = parseAnyMethodOperation(path, anyMethodExt);
                     try {
-                        Operation anyOperation = io.swagger.v3.core.util.Json.mapper()
-                                .convertValue(anyMethodExt, Operation.class);
-                        try {
-                            applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
-                                    schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
-                        } catch (AwsException e) {
-                            if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
-                                throw importParameterNameFailure("ANY", path, e);
-                            }
-                            throw e;
+                        applyOperation(region, apiId, resourceId, "ANY", anyOperation, openAPI,
+                                schemeToAuthorizerId, schemeToAuthType, validatorNameToId);
+                    } catch (AwsException e) {
+                        if (PARAMETER_NAME_ERROR.equals(e.getMessage())) {
+                            throw importParameterNameFailure("ANY", path, e);
                         }
-                    } catch (IllegalArgumentException e) {
-                        throw new AwsException("BadRequestException",
-                                "Invalid x-amazon-apigateway-any-method definition for path " + path + ": "
-                                        + e.getMessage(),
-                                400);
+                        throw e;
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Builds the typed Operation for an ANY pseudo-operation with the swagger parser's own
+     * Operation reader, the one that already parses the real verbs. Binding the untyped extension
+     * map with Jackson bean deserialization instead needs reflection metadata for the whole
+     * swagger model graph, which the native image does not have.
+     */
+    private Operation parseAnyMethodOperation(String path, Object anyMethodExt) {
+        JsonNode node = io.swagger.v3.core.util.Json.mapper().valueToTree(anyMethodExt);
+        if (!(node instanceof ObjectNode operationNode)) {
+            throw new AwsException("BadRequestException",
+                    "Invalid x-amazon-apigateway-any-method definition for path " + path
+                            + ": expected an Operation object",
+                    400);
+        }
+        return new OpenAPIDeserializer().getOperation(operationNode,
+                "paths.'" + path + "'.x-amazon-apigateway-any-method", new OpenAPIDeserializer.ParseResult());
     }
 
     private void applyOperation(String region, String apiId, String resourceId, String httpMethod,
