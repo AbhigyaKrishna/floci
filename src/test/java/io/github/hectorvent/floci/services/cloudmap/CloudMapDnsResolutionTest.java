@@ -9,6 +9,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -224,6 +225,26 @@ class CloudMapDnsResolutionTest {
         cloudMapService.deregisterInstance(service.getId(), "task.one", REGION);
         assertFalse(cloudMapService.resolveDnsNameIfOwned("task.one.backend." + namespace)
                 .orElseThrow().nameExists());
+    }
+
+    @Test
+    void resolvesNamesWithAnIRegardlessOfTheDefaultLocale() {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service srv = createService(namespaceId, "Inventory", dnsConfig("{\"Type\":\"SRV\",\"TTL\":300}"));
+        registerInstance(srv.getId(), "task", "172.31.0.6");
+        Service a = createService(namespaceId, "Billing");
+        registerInstance(a.getId(), "i-1", "172.31.0.7");
+
+        Locale previous = Locale.getDefault();
+        Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+        try {
+            assertEquals(List.of("172.31.0.6"), cloudMapService.resolveDnsName("task.inventory." + namespace));
+            assertEquals(List.of("172.31.0.6"), cloudMapService.resolveDnsName("TASK.INVENTORY." + namespace));
+            assertEquals(List.of("172.31.0.7"), cloudMapService.resolveDnsName("BILLING." + namespace));
+        } finally {
+            Locale.setDefault(previous);
+        }
     }
 
     @Test
