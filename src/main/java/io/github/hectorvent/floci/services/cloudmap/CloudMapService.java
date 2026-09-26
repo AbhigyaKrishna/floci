@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -395,7 +396,7 @@ public class CloudMapService {
         if (queryName == null || queryName.isBlank()) {
             return Optional.empty();
         }
-        String name = queryName.toLowerCase();
+        String name = queryName.toLowerCase(Locale.ROOT);
         if (name.endsWith(".")) {
             name = name.substring(0, name.length() - 1);
         }
@@ -403,7 +404,7 @@ public class CloudMapService {
         String matchedNamespaceName = null;
         boolean nameExists = false;
         for (Namespace namespace : dnsNamespacesByLongestName()) {
-            String namespaceName = namespace.getName().toLowerCase();
+            String namespaceName = namespace.getName().toLowerCase(Locale.ROOT);
             String suffix = "." + namespaceName;
             boolean apex = name.equals(namespaceName);
             if (!apex && !name.endsWith(suffix)) {
@@ -472,7 +473,7 @@ public class CloudMapService {
     private Optional<DnsAnswer> resolveInstanceHostname(List<Service> services, String label) {
         boolean exists = false;
         for (Service service : services) {
-            String serviceSuffix = "." + service.getName().toLowerCase();
+            String serviceSuffix = "." + service.getName().toLowerCase(Locale.ROOT);
             if (!label.endsWith(serviceSuffix)) {
                 continue;
             }
