@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -201,6 +202,28 @@ class CloudMapDnsResolutionTest {
         DnsAnswer answer = cloudMapService.resolveDnsNameIfOwned("srvonly." + namespace).orElseThrow();
         assertTrue(answer.isEmpty());
         assertTrue(answer.nameExists());
+    }
+
+    @Test
+    void srvInstanceHostnamePublishesItsOwnIpv4Address() {
+        String namespace = uniqueNamespace();
+        Service service = createService(privateDnsNamespace(namespace), "backend",
+                dnsConfig("{\"Type\":\"SRV\",\"TTL\":300}"));
+        cloudMapService.registerInstance(service.getId(), "task.one", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.6", "AWS_INSTANCE_PORT", "8080"), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-two", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.7", "AWS_INSTANCE_PORT", "8080"), REGION);
+
+        DnsAnswer answer = cloudMapService.resolveDnsNameIfOwned(
+                "TASK.ONE.BACKEND." + namespace.toUpperCase() + ".").orElseThrow();
+        assertEquals(List.of("172.31.0.6"), answer.addresses());
+        assertEquals(300, answer.ttlSeconds());
+        assertFalse(cloudMapService.resolveDnsNameIfOwned("missing.backend." + namespace)
+                .orElseThrow().nameExists());
+
+        cloudMapService.deregisterInstance(service.getId(), "task.one", REGION);
+        assertFalse(cloudMapService.resolveDnsNameIfOwned("task.one.backend." + namespace)
+                .orElseThrow().nameExists());
     }
 
     @Test
