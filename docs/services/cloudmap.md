@@ -32,6 +32,9 @@ unhealthy still resolves rather than disappearing from DNS. At most eight record
 go back either way, as Route 53 answers a service discovery query.
 Names inside a DNS namespace stay local when no instance has a usable address:
 the resolver answers negatively instead of forwarding them to upstream DNS.
+An absent service name receives NXDOMAIN; a service with registered instances
+and only other record types receives NOERROR with no A answers. DNS service
+names are unique without regard to case, as in AWS Cloud Map.
 
 A records carry the TTL of the service's `A` entry in `DnsConfig.DnsRecords`.
 A service that declares only other record types has no A answer. Floci uses a

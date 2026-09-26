@@ -65,7 +65,7 @@ public class EmbeddedDnsServer {
             Pattern.compile("^ip-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})-(\\d{1,3})\\.ec2\\.internal$", Pattern.CASE_INSENSITIVE);
 
     // Well-known emulator wildcard DNS domains that always resolve to Floci's IP.
-    // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X" — it does
+    // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X"; it does
     // NOT cover "*.X" (e.g. "localhost.floci.io" does NOT resolve bare "*.floci.io").
     //   localhost.localstack.cloud → localhost.localstack.cloud, *.localhost.localstack.cloud
     //   localhost.floci.io         → localhost.floci.io, *.localhost.floci.io
@@ -127,7 +127,7 @@ public class EmbeddedDnsServer {
 
     // ── packet handling ───────────────────────────────────────────────────────
 
-    private void handleQuery(Vertx vertx, DatagramSocket socket, byte[] data,
+    void handleQuery(Vertx vertx, DatagramSocket socket, byte[] data,
                              String senderHost, int senderPort, String myIp) {
         try {
             ByteBuffer buf = ByteBuffer.wrap(data);
@@ -158,7 +158,7 @@ public class EmbeddedDnsServer {
                         byte[] response = qtype == 1 && !records.isEmpty()
                                 ? buildAResponse(data, txId, questionOffset, questionEnd, records)
                                 : buildEmptyResponse(data, txId, questionOffset, questionEnd,
-                                        records.isEmpty() ? 3 : 0);
+                                        records.nameExists() ? 0 : 3);
                         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
                     })
                     .onFailure(e -> LOG.warnv("DNS record lookup failed for {0}: {1}", qname, e.getMessage()));

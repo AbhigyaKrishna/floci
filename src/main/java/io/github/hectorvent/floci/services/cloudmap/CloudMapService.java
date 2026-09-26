@@ -28,6 +28,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -188,13 +189,13 @@ public class CloudMapService {
             // DnsConfig may carry the namespace id when the top-level field is absent.
             resolvedNamespaceId = dnsConfigNamespaceId(dnsConfig);
         }
-        if (resolvedNamespaceId != null) {
-            requireNamespace(resolvedNamespaceId);
-        }
+        Namespace namespace = resolvedNamespaceId == null ? null : requireNamespace(resolvedNamespaceId);
+        boolean dnsNamespace = namespace != null && ("DNS_PRIVATE".equals(namespace.getType())
+                || "DNS_PUBLIC".equals(namespace.getType()));
         final String nsId = resolvedNamespaceId;
         boolean exists = scan(serviceStore).stream()
-                .anyMatch(s -> region.equals(s.getRegion()) && name.equals(s.getName())
-                        && java.util.Objects.equals(nsId, s.getNamespaceId()));
+                .anyMatch(s -> region.equals(s.getRegion()) && Objects.equals(nsId, s.getNamespaceId())
+                        && (dnsNamespace ? name.equalsIgnoreCase(s.getName()) : name.equals(s.getName())));
         if (exists) {
             throw new AwsException("ServiceAlreadyExists",
                     "A service named \"" + name + "\" already exists.", 400);
@@ -403,7 +404,7 @@ public class CloudMapService {
 
         List<String> addresses = new ArrayList<>();
         String matchedNamespaceName = null;
-        int answerTtl = DnsAnswer.DEFAULT_TTL_SECONDS;
+        boolean nameExists = false;
         for (Namespace namespace : dnsNamespacesByLongestName()) {
             String namespaceName = namespace.getName().toLowerCase();
             String suffix = "." + namespaceName;
@@ -416,6 +417,7 @@ public class CloudMapService {
             }
             matchedNamespaceName = namespaceName;
             if (apex) {
+                nameExists = true;
                 continue;
             }
             String serviceName = name.substring(0, name.length() - suffix.length());
@@ -426,24 +428,23 @@ public class CloudMapService {
                 }
                 int serviceTtl = dnsRecordTtl(service);
                 if (serviceTtl < 0) {
+                    nameExists |= !scanInstances(service.getId()).isEmpty();
                     continue;
                 }
                 for (Instance instance : applyHealthFilter(scanInstances(service.getId()), "HEALTHY_OR_ELSE_ALL")) {
                     String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
                     if (isIpv4(ipv4)) {
-                        if (addresses.isEmpty()) {
-                            answerTtl = serviceTtl;
-                        }
                         addresses.add(ipv4);
                     }
                 }
-            }
-            if (!addresses.isEmpty()) {
-                return Optional.of(new DnsAnswer(addresses.size() > MAX_DNS_ANSWERS
-                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, answerTtl));
+                if (!addresses.isEmpty()) {
+                    return Optional.of(new DnsAnswer(addresses.size() > MAX_DNS_ANSWERS
+                            ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, serviceTtl));
+                }
             }
         }
-        return matchedNamespaceName != null ? Optional.of(DnsAnswer.none()) : Optional.empty();
+        return matchedNamespaceName != null
+                ? Optional.of(nameExists ? DnsAnswer.noData() : DnsAnswer.none()) : Optional.empty();
     }
 
     private void validateDnsRecordTtls(String dnsConfig) {
