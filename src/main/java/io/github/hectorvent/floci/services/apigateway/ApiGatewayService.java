@@ -33,6 +33,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
+import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -2963,7 +2964,7 @@ public class ApiGatewayService {
                 modelReq.put("contentType", "application/json");
                 try {
                     // Use swagger's own JSON serializer to produce clean JSON Schema
-                    modelReq.put("schema", io.swagger.v3.core.util.Json.mapper().writeValueAsString(schema));
+                    modelReq.put("schema", Json.mapper().writeValueAsString(schema));
                 } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                     modelReq.put("schema", "{}");
                 }
@@ -3111,7 +3112,7 @@ public class ApiGatewayService {
      * swagger model graph, which the native image does not have.
      */
     private Operation parseAnyMethodOperation(String path, Object anyMethodExt) {
-        JsonNode node = io.swagger.v3.core.util.Json.mapper().valueToTree(anyMethodExt);
+        JsonNode node = Json.mapper().valueToTree(anyMethodExt);
         if (!(node instanceof ObjectNode operationNode)) {
             throw new AwsException("BadRequestException",
                     "Invalid x-amazon-apigateway-any-method definition for path " + path
