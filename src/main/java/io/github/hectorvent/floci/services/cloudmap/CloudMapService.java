@@ -181,13 +181,11 @@ public class CloudMapService {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidInput", "Service name is required.", 400);
         }
-        if (dnsConfig != null) {
-            validateDnsRecordTtls(dnsConfig);
-        }
+        JsonNode dnsConfigNode = dnsConfig == null ? null : parseDnsConfig(dnsConfig);
         String resolvedNamespaceId = namespaceId;
-        if (dnsConfig != null && resolvedNamespaceId == null) {
+        if (dnsConfigNode != null && resolvedNamespaceId == null) {
             // DnsConfig may carry the namespace id when the top-level field is absent.
-            resolvedNamespaceId = dnsConfigNamespaceId(dnsConfig);
+            resolvedNamespaceId = dnsConfigNode.path("NamespaceId").textValue();
         }
         Namespace namespace = resolvedNamespaceId == null ? null : requireNamespace(resolvedNamespaceId);
         boolean dnsNamespace = namespace != null && ("DNS_PRIVATE".equals(namespace.getType())
@@ -402,7 +400,6 @@ public class CloudMapService {
             name = name.substring(0, name.length() - 1);
         }
 
-        List<String> addresses = new ArrayList<>();
         String matchedNamespaceName = null;
         boolean nameExists = false;
         for (Namespace namespace : dnsNamespacesByLongestName()) {
@@ -420,54 +417,85 @@ public class CloudMapService {
                 nameExists = true;
                 continue;
             }
-            String serviceName = name.substring(0, name.length() - suffix.length());
-            for (Service service : scan(serviceStore)) {
-                if (!namespace.getId().equals(service.getNamespaceId())
-                        || !serviceName.equalsIgnoreCase(service.getName())) {
-                    continue;
-                }
-                int serviceTtl = dnsRecordTtl(service, "A");
-                if (serviceTtl < 0) {
-                    nameExists |= !scanInstances(service.getId()).isEmpty();
-                    continue;
-                }
-                for (Instance instance : applyHealthFilter(scanInstances(service.getId()), "HEALTHY_OR_ELSE_ALL")) {
-                    String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
-                    if (isIpv4(ipv4)) {
-                        addresses.add(ipv4);
-                    }
-                }
-                if (!addresses.isEmpty()) {
-                    return Optional.of(new DnsAnswer(addresses.size() > MAX_DNS_ANSWERS
-                            ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, serviceTtl));
+            String label = name.substring(0, name.length() - suffix.length());
+            List<Service> services = scan(serviceStore).stream()
+                    .filter(service -> namespace.getId().equals(service.getNamespaceId()))
+                    .toList();
+            Optional<DnsAnswer> byService = resolveServiceName(services, label);
+            if (byService.filter(answer -> !answer.isEmpty()).isPresent()) {
+                return byService;
+            }
+            Optional<DnsAnswer> byInstance = resolveInstanceHostname(services, label);
+            if (byInstance.filter(answer -> !answer.isEmpty()).isPresent()) {
+                return byInstance;
+            }
+            nameExists |= byService.isPresent() || byInstance.isPresent();
+        }
+        return matchedNamespaceName != null
+                ? Optional.of(nameExists ? DnsAnswer.noData() : DnsAnswer.nxDomain()) : Optional.empty();
+    }
+
+    /**
+     * The A records at {@code <service>.<namespace>}. A service without an A record still owns its
+     * name while it has instances, since its SRV record lives there, so it answers no-data.
+     */
+    private Optional<DnsAnswer> resolveServiceName(List<Service> services, String label) {
+        boolean exists = false;
+        for (Service service : services) {
+            if (!label.equalsIgnoreCase(service.getName())) {
+                continue;
+            }
+            int ttl = dnsRecordTtl(service, "A");
+            if (ttl < 0) {
+                exists |= !scanInstances(service.getId()).isEmpty();
+                continue;
+            }
+            List<String> addresses = new ArrayList<>();
+            for (Instance instance : applyHealthFilter(scanInstances(service.getId()), "HEALTHY_OR_ELSE_ALL")) {
+                String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
+                if (isIpv4(ipv4)) {
+                    addresses.add(ipv4);
                 }
             }
-            for (Service service : scan(serviceStore)) {
-                if (!namespace.getId().equals(service.getNamespaceId())
-                        || !serviceName.endsWith("." + service.getName().toLowerCase())) {
+            if (!addresses.isEmpty()) {
+                return Optional.of(DnsAnswer.records(addresses.size() > MAX_DNS_ANSWERS
+                        ? addresses.subList(0, MAX_DNS_ANSWERS) : addresses, ttl));
+            }
+        }
+        return exists ? Optional.of(DnsAnswer.noData()) : Optional.empty();
+    }
+
+    /**
+     * The A record Cloud Map creates at an SRV record's target, {@code <InstanceId>.<service>.<namespace>},
+     * published with the service's SRV TTL.
+     */
+    private Optional<DnsAnswer> resolveInstanceHostname(List<Service> services, String label) {
+        boolean exists = false;
+        for (Service service : services) {
+            String serviceSuffix = "." + service.getName().toLowerCase();
+            if (!label.endsWith(serviceSuffix)) {
+                continue;
+            }
+            int ttl = dnsRecordTtl(service, "SRV");
+            if (ttl < 0) {
+                continue;
+            }
+            String instanceId = label.substring(0, label.length() - serviceSuffix.length());
+            for (Instance instance : scanInstances(service.getId())) {
+                if (!instanceId.equalsIgnoreCase(instance.getInstanceId())) {
                     continue;
                 }
-                int srvTtl = dnsRecordTtl(service, "SRV");
-                if (srvTtl < 0) {
-                    continue;
-                }
-                for (Instance instance : scanInstances(service.getId())) {
-                    if (!(instance.getInstanceId() + "." + service.getName()).equalsIgnoreCase(serviceName)) {
-                        continue;
-                    }
-                    nameExists = true;
-                    String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
-                    if (isIpv4(ipv4)) {
-                        return Optional.of(new DnsAnswer(List.of(ipv4), srvTtl));
-                    }
+                exists = true;
+                String ipv4 = instance.getAttributes().get("AWS_INSTANCE_IPV4");
+                if (isIpv4(ipv4)) {
+                    return Optional.of(DnsAnswer.records(List.of(ipv4), ttl));
                 }
             }
         }
-        return matchedNamespaceName != null
-                ? Optional.of(nameExists ? DnsAnswer.noData() : DnsAnswer.none()) : Optional.empty();
+        return exists ? Optional.of(DnsAnswer.noData()) : Optional.empty();
     }
 
-    private void validateDnsRecordTtls(String dnsConfig) {
+    private JsonNode parseDnsConfig(String dnsConfig) {
         JsonNode config;
         try {
             config = objectMapper.readTree(dnsConfig);
@@ -484,6 +512,7 @@ public class CloudMapService {
                         "DnsRecords TTL must be an integer from 0 to 2147483647.", 400);
             }
         }
+        return config;
     }
 
     /** Returns -1 when the service has no record of the requested type. */
@@ -743,17 +772,6 @@ public class CloudMapService {
             return "HTTP".equals(type) ? "HTTP" : type;
         }
         return dnsConfig != null ? "DNS_HTTP" : "HTTP";
-    }
-
-    private String dnsConfigNamespaceId(String dnsConfig) {
-        // Best-effort extraction of a NamespaceId embedded in the DnsConfig JSON.
-        int idx = dnsConfig.indexOf("\"NamespaceId\"");
-        if (idx < 0) {
-            return null;
-        }
-        int start = dnsConfig.indexOf('"', dnsConfig.indexOf(':', idx) + 1);
-        int end = dnsConfig.indexOf('"', start + 1);
-        return (start > 0 && end > start) ? dnsConfig.substring(start + 1, end) : null;
     }
 
     private String randomId(int length) {

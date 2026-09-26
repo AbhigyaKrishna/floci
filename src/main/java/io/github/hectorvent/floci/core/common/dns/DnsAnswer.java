@@ -3,46 +3,43 @@ package io.github.hectorvent.floci.core.common.dns;
 import java.util.List;
 
 /**
- * The A records a {@link DnsRecordSource} owns for a query name, with the TTL the answering zone
- * publishes for them. A source that holds a TTL of its own supplies it, so a client caches the
- * answer for as long as the zone says rather than for a figure the DNS server picked.
+ * What a {@link DnsRecordSource} answers for a name inside a zone it owns: the A records with the
+ * TTL the zone publishes for them, an existing name without A records, or an absent name. A name
+ * the source does not own is an empty optional, not an answer.
  *
- * <p>The TTL is per answer rather than per record: every address behind one Cloud Map
- * service shares that service's TTL, which is how Route 53 publishes a record set.
- * {@code nameExists} distinguishes an owned name without A records from a name that is absent.
+ * <p>The TTL is per answer rather than per record: every address behind one Cloud Map service
+ * shares that service's TTL, which is how Route 53 publishes a record set.
  */
 public record DnsAnswer(List<String> addresses, int ttlSeconds, boolean nameExists) {
 
     /** What the DNS server publishes for a name whose zone declares no TTL of its own. */
     public static final int DEFAULT_TTL_SECONDS = 60;
 
-    private static final DnsAnswer NONE = new DnsAnswer(List.of(), DEFAULT_TTL_SECONDS, false);
+    private static final DnsAnswer NX_DOMAIN = new DnsAnswer(List.of(), DEFAULT_TTL_SECONDS, false);
     private static final DnsAnswer NO_DATA = new DnsAnswer(List.of(), DEFAULT_TTL_SECONDS, true);
 
-    public DnsAnswer(List<String> addresses, int ttlSeconds) {
-        this(addresses, ttlSeconds, addresses != null && !addresses.isEmpty());
-    }
-
     public DnsAnswer {
-        addresses = addresses == null ? List.of() : List.copyOf(addresses);
-        nameExists = nameExists || !addresses.isEmpty();
-        // A TTL is an unsigned 31-bit field, and RFC 2181 has a resolver treat anything with the
-        // top bit set as zero, so a value outside the range is worse than no value at all. Cloud
-        // Map's own range is the same 0 to 2147483647, so one that lands here came from a store
-        // written by something other than a validated CreateService.
+        // A TTL is an unsigned 31-bit field; RFC 2181 has a resolver read anything with the top
+        // bit set as zero. A source picks its own fallback rather than putting one on the wire.
         if (ttlSeconds < 0) {
-            ttlSeconds = DEFAULT_TTL_SECONDS;
+            throw new IllegalArgumentException("DNS TTL must not be negative: " + ttlSeconds);
         }
+        addresses = List.copyOf(addresses);
     }
 
-    /** An absent name inside an owned zone. Zone ownership is represented by Optional. */
-    public static DnsAnswer none() {
-        return NONE;
+    /** A records for an existing name, all published with the same TTL. */
+    public static DnsAnswer records(List<String> addresses, int ttlSeconds) {
+        return new DnsAnswer(addresses, ttlSeconds, true);
     }
 
-    /** An existing name without A records. */
+    /** An existing name without A records: NOERROR with no answers. */
     public static DnsAnswer noData() {
         return NO_DATA;
+    }
+
+    /** An absent name inside an owned zone: NXDOMAIN. */
+    public static DnsAnswer nxDomain() {
+        return NX_DOMAIN;
     }
 
     public boolean isEmpty() {

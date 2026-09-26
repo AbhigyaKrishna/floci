@@ -191,11 +191,11 @@ public class EmbeddedDnsServer {
 
     Optional<DnsAnswer> resolveARecordWithOwnership(String name, String myIp) {
         if (matchesSuffix(name)) {
-            return Optional.of(new DnsAnswer(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS));
+            return Optional.of(DnsAnswer.records(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS));
         }
         Optional<String> ec2PrivateDnsName = resolveEc2PrivateDnsName(name);
         return ec2PrivateDnsName
-                .map(address -> new DnsAnswer(List.of(address), DnsAnswer.DEFAULT_TTL_SECONDS))
+                .map(address -> DnsAnswer.records(List.of(address), DnsAnswer.DEFAULT_TTL_SECONDS))
                 .map(Optional::of).orElseGet(() -> resolveFromRecordSources(name));
     }
 
@@ -301,11 +301,6 @@ public class EmbeddedDnsServer {
             sb.append(new String(label, StandardCharsets.US_ASCII));
         }
         return sb.toString();
-    }
-
-    byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, List<String> ips) {
-        return buildAResponse(query, txId, questionOffset, questionEnd,
-                new DnsAnswer(ips, DnsAnswer.DEFAULT_TTL_SECONDS));
     }
 
     byte[] buildAResponse(byte[] query, short txId, int questionOffset, int questionEnd, DnsAnswer answer) {
