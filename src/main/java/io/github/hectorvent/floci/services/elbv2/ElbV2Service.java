@@ -759,17 +759,19 @@ public class ElbV2Service implements ResourceProvider {
                         "Priority " + e.getValue() + " is already in use.", 400);
             }
         }
-        for (Map.Entry<String, Set<Integer>> e : newPrioritiesByListener.entrySet()) {
-            for (String ruleArn : listenerToRules.getOrDefault(e.getKey(), List.of())) {
-                Rule existing = regionRules.get(ruleArn);
-                if (existing == null || existing.isDefault() || arnToPriority.containsKey(ruleArn)) {
-                    continue;
-                }
-                int existingPriority = Integer.parseInt(existing.getPriority());
-                if (e.getValue().contains(existingPriority)) {
-                    throw new AwsException("PriorityInUse",
-                            "Priority " + existingPriority + " is already in use.", 400);
-                }
+        // iterate the concurrent region map, not the listener index lists, which CreateRule/DeleteRule mutate
+        for (Rule existing : regionRules.values()) {
+            if (existing.isDefault() || arnToPriority.containsKey(existing.getRuleArn())) {
+                continue;
+            }
+            Set<Integer> newPriorities = newPrioritiesByListener.get(existing.getListenerArn());
+            if (newPriorities == null) {
+                continue;
+            }
+            int existingPriority = Integer.parseInt(existing.getPriority());
+            if (newPriorities.contains(existingPriority)) {
+                throw new AwsException("PriorityInUse",
+                        "Priority " + existingPriority + " is already in use.", 400);
             }
         }
 
