@@ -392,6 +392,11 @@ it to a `docker exec` in the container. Deliberate limits:
 with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
 time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
 
+With persistent storage, services survive a restart but their tasks do not: task state is
+held in memory. The service scheduler starts at boot, so within a few seconds of startup every
+persisted service is brought back to its `desiredCount`, re-registering load balancer targets
+and Cloud Map instances as its tasks start, without waiting for an ECS request.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
