@@ -139,6 +139,30 @@ class EcsServiceDiscoveryRegistrarTest {
         assertTrue(!registrar.hasRegistries(svc));
     }
 
+    @Test
+    void deregisterStaleInstancesRemovesOnlyThisServicesTaskInstances() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "web");
+        EcsServiceModel web = serviceWithRegistry(cloudMapSvc.getArn(), "web", 8080);
+        web.setServiceName("web-svc");
+        EcsServiceModel other = serviceWithRegistry(cloudMapSvc.getArn(), "web", 8080);
+        other.setServiceName("other-svc");
+        registrar.registerTask(taskInCluster("172.31.0.11", "payments"), web, REGION);
+        registrar.registerTask(taskInCluster("172.31.0.12", "payments"), web, REGION);
+        registrar.registerTask(taskInCluster("172.31.0.13", "payments"), other, REGION);
+        registrar.registerTask(taskInCluster("172.31.0.14", "billing"), web, REGION);
+        cloudMapService.registerInstance(cloudMapSvc.getId(), "registered-by-hand", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.15"), REGION);
+
+        registrar.deregisterStaleInstances(web, "payments", REGION);
+
+        List<String> remaining = cloudMapService.listInstances(cloudMapSvc.getId()).stream()
+                .map(instance -> instance.getAttributes().get("AWS_INSTANCE_IPV4"))
+                .sorted()
+                .toList();
+        assertEquals(List.of("172.31.0.13", "172.31.0.14", "172.31.0.15"), remaining);
+    }
+
     private Service createDnsService(String namespaceName, String serviceName) {
         Operation operation = cloudMapService.createPrivateDnsNamespace(
                 namespaceName, "vpc-svcdisc", null, null, Map.of(), REGION);
@@ -165,6 +189,12 @@ class EcsServiceDiscoveryRegistrarTest {
         task.setTaskArn("arn:aws:ecs:" + REGION + ":000000000000:task/c/" + uniqueName("task"));
         task.setPrivateIpAddress(privateIpAddress);
         task.setContainers(List.of(container));
+        return task;
+    }
+
+    private EcsTask taskInCluster(String privateIpAddress, String clusterName) {
+        EcsTask task = task(privateIpAddress, "web", 8080, 8080);
+        task.setClusterArn("arn:aws:ecs:" + REGION + ":000000000000:cluster/" + clusterName);
         return task;
     }
 

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -61,6 +62,48 @@ public class EcsLoadBalancerRegistrar {
                 LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
             }
         });
+    }
+
+    /**
+     * Deregisters every address target in the service's target groups. Only for startup, when
+     * ECS holds no task at all: task state is memory-only, so each such target was registered for
+     * a task of a previous run whose container is gone or is being removed, and Docker is free to
+     * hand its address to an unrelated container. Instance and Lambda targets are never ECS's and
+     * stay registered.
+     */
+    public void deregisterStaleTargets(EcsServiceModel svc, String region) {
+        if (svc.getLoadBalancers() == null) {
+            return;
+        }
+        for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
+            String tgArn = lb.getTargetGroupArn();
+            if (tgArn == null || tgArn.isBlank()) {
+                continue;
+            }
+            try {
+                TargetGroup tg = elbV2Service.getTargetGroup(region, tgArn);
+                if (tg == null || tg.getTargets() == null) {
+                    continue;
+                }
+                List<TargetDescription> stale = tg.getTargets().stream()
+                        .filter(td -> isAddress(td.getId()))
+                        .toList();
+                if (stale.isEmpty()) {
+                    continue;
+                }
+                elbV2Service.deregisterTargets(region, tgArn, stale);
+                LOG.infov("Deregistered {0} target(s) left in target group {1} by ECS service {2}''s previous tasks",
+                        stale.size(), tgArn, svc.getServiceName());
+            } catch (Exception e) {
+                LOG.warnv("Could not deregister stale ECS targets from {0}: {1}", tgArn, e.getMessage());
+            }
+        }
+    }
+
+    /** An IP literal, the only kind of target id ECS registers; instance ids and ARNs are not. */
+    private static boolean isAddress(String targetId) {
+        return targetId != null && (targetId.contains(":") && !targetId.startsWith("arn:")
+                || targetId.matches("[0-9.]+"));
     }
 
     private void forEachTarget(EcsTask task, EcsServiceModel svc,

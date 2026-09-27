@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import io.quarkus.test.junit.QuarkusTest;
@@ -124,5 +125,35 @@ class EcsLoadBalancerRegistrarTest {
         registrar.registerTask(task, svc, REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
                 "no network binding for the declared containerPort -> no target");
+    }
+
+    @Test
+    void deregisterStaleTargetsRemovesAddressTargetsAndKeepsInstanceTargets() {
+        String tgArn = createTargetGroup("reg-tg-stale");
+        elbV2Service.registerTargets(REGION, tgArn, List.of(
+                target("172.18.0.7", 8080), target("127.0.0.1", 34567), target("i-0123456789abcdef0", 80)));
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.deregisterStaleTargets(svc, REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size(), "only the instance target should survive");
+        assertEquals("i-0123456789abcdef0", health.get(0).getTarget().getId());
+    }
+
+    @Test
+    void deregisterStaleTargetsToleratesAMissingTargetGroup() {
+        EcsServiceModel svc = serviceWithLb(
+                "arn:aws:elasticloadbalancing:" + REGION + ":000000000000:targetgroup/gone/0123456789abcdef",
+                "web", 8080);
+
+        registrar.deregisterStaleTargets(svc, REGION);
+    }
+
+    private static TargetDescription target(String id, int port) {
+        TargetDescription td = new TargetDescription();
+        td.setId(id);
+        td.setPort(port);
+        return td;
     }
 }

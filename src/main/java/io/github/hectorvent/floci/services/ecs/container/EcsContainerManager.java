@@ -312,7 +312,9 @@ public class EcsContainerManager {
                         .withHostDockerInternalOnLinux()
                         .withEmbeddedDns()
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                                "ecs", taskId, regionResolver.getAccountId(), region));
+                                "ecs", taskId, regionResolver.getAccountId(), region))
+                        .withLabels(Map.of(ContainerStorageHelper.OWNER_LABEL,
+                                ContainerStorageHelper.ownerIdentity(config)));
                 if (protectedNetwork != null) {
                     specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
                     specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
@@ -1028,6 +1030,42 @@ public class EcsContainerManager {
             LOG.debugv("Could not delete the ENI {0} of task {1}: {2}",
                     eniId, task.getTaskArn(), e.getMessage());
         }
+    }
+
+    /**
+     * Removes the ECS containers a previous run of this Floci left on the daemon: task containers
+     * and the security-group helpers whose network namespace they share. Task state is memory-only,
+     * so at startup no container carrying this deployment's owner label belongs to a task this
+     * process knows. A graceful shutdown already stops them; this covers a run that ended without
+     * one (SIGKILL, OOM, a stop timeout that expired mid-drain), whose containers would otherwise
+     * keep serving beside the replacements the service scheduler starts. Containers created before
+     * the owner label existed carry none and are left alone.
+     *
+     * @return the number of containers removed
+     */
+    public int removeLeftoverContainers() {
+        String owner = ContainerStorageHelper.ownerIdentity(config);
+        int removed = 0;
+        try {
+            // Docker's container summary, not the ECS model Container this class imports.
+            List<com.github.dockerjava.api.model.Container> containers = lifecycleManager.getDockerClient()
+                    .listContainersCmd()
+                    .withShowAll(true)
+                    .withLabelFilter(Map.of("io.floci.service", "ecs", ContainerStorageHelper.OWNER_LABEL, owner))
+                    .exec();
+            for (com.github.dockerjava.api.model.Container container : containers) {
+                lifecycleManager.removeIfExists(container.getId());
+                removed++;
+                LOG.infov("Removed ECS container {0} ({1}) left by a previous run", container.getId(),
+                        container.getNames() == null ? "" : String.join(",", container.getNames()));
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not remove the ECS containers a previous run left behind: {0}", e.getMessage());
+        }
+        if (removed > 0) {
+            LOG.infov("Removed {0} ECS container(s) left by a previous run", String.valueOf(removed));
+        }
+        return removed;
     }
 
     /** The ENI {@link #attachTaskNetwork} allocated for this task, or null if it is already gone. */

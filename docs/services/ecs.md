@@ -491,6 +491,27 @@ Known differences from AWS:
   registers `HEALTHY`, which is Cloud Map's own default for a `RegisterInstance` that names no
   `AWS_INIT_HEALTH_STATUS`, and stays there until it is deregistered.
 
+#### Restarts
+
+Task state is memory-only, so a restarted Floci knows no task and the service scheduler starts
+new ones to reach each service's desired count. Floci therefore clears what the previous run's
+tasks left behind before it starts their replacements, so a service is never served by a task
+nothing manages:
+
+- In Docker mode, every ECS container a previous run of this Floci left on the daemon is
+  removed. A graceful shutdown already stops them; this covers a run that ended without one
+  (SIGKILL, OOM, a stop timeout that expired mid-drain). Containers are recognised by the
+  `floci_owner_port` label (the resource namespace and API port), so the containers of another
+  Floci sharing the daemon stay. Containers created by a Floci version without that label are
+  not recognised and must be removed by hand once.
+- Every IP target in a target group named by a service's `loadBalancers` is deregistered.
+  Floci registers task containers by address, and Docker hands a dead container's address to
+  the next container it starts, so a stale target would route to an unrelated container.
+  Instance and Lambda targets stay.
+- Every Cloud Map instance a service's tasks registered is deregistered. They are recognised by
+  their `ECS_SERVICE_NAME` and `ECS_CLUSTER_NAME` attributes, so instances registered through
+  the Cloud Map API stay.
+
 #### Unknown services
 
 A service reference that does not resolve is returned in `failures` with

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
+import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
@@ -86,6 +87,38 @@ public class EcsServiceDiscoveryRegistrar {
             }
         }
         task.setServiceDiscoveryServiceIds(List.of());
+    }
+
+    /**
+     * Deregisters the instances this ECS service registered for tasks of a previous run. Only for
+     * startup, when ECS holds no task at all: task state is memory-only, so none of them can still
+     * be a live task. They are recognised by the {@code ECS_SERVICE_NAME} and
+     * {@code ECS_CLUSTER_NAME} attributes {@link #registerTask} records, so an instance registered
+     * through the Cloud Map API stays.
+     */
+    public void deregisterStaleInstances(EcsServiceModel svc, String clusterName, String region) {
+        for (Map<String, Object> registry : registries(svc)) {
+            String cloudMapServiceId = cloudMapServiceId(registry);
+            if (cloudMapServiceId == null) {
+                continue;
+            }
+            try {
+                for (Instance instance : cloudMapService.listInstances(cloudMapServiceId)) {
+                    Map<String, String> attributes = instance.getAttributes();
+                    if (attributes == null
+                            || !svc.getServiceName().equals(attributes.get("ECS_SERVICE_NAME"))
+                            || !clusterName.equals(attributes.get("ECS_CLUSTER_NAME"))) {
+                        continue;
+                    }
+                    cloudMapService.deregisterInstance(cloudMapServiceId, instance.getInstanceId(), region);
+                    LOG.infov("Deregistered Cloud Map instance {0} of {1} left by a previous ECS task",
+                            instance.getInstanceId(), cloudMapServiceId);
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not deregister stale ECS instances from Cloud Map service {0}: {1}",
+                        cloudMapServiceId, e.getMessage());
+            }
+        }
     }
 
     public boolean hasRegistries(EcsServiceModel svc) {

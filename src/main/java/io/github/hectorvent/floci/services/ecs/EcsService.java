@@ -218,7 +218,44 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     @PostConstruct
     void init() {
         initializeStorage();
+        releasePreviousRunLeftovers();
         scheduleReconciliation(reconciler);
+    }
+
+    /**
+     * Clears what the tasks of a previous run left behind, before the scheduler starts their
+     * replacements. Task state is memory-only, so a restarted Floci knows no task, yet a run that
+     * ended without a graceful shutdown leaves its task containers serving, and even a graceful one
+     * leaves their load balancer targets and Cloud Map instances registered. Left alone, each
+     * service would serve from its replacements and a task nothing manages, and a dead task's
+     * target would follow its address to whichever container Docker hands it to next.
+     */
+    void releasePreviousRunLeftovers() {
+        if (dockerMode) {
+            containerManager.removeLeftoverContainers();
+        }
+        for (String accountId : reconcilableAccountIds()) {
+            RequestScopes.runAs(accountId, () -> {
+                for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
+                    try {
+                        releaseStaleRegistrations(entry.getKey(), entry.getValue());
+                    } catch (Exception e) {
+                        LOG.warnv("Could not release the registrations of ECS service {0}: {1}",
+                                entry.getKey(), e.getMessage());
+                    }
+                }
+            });
+        }
+    }
+
+    private void releaseStaleRegistrations(String key, EcsServiceModel svc) {
+        String region = extractRegionFromServiceKey(key);
+        if (lbRegistrar != null) {
+            lbRegistrar.deregisterStaleTargets(svc, region);
+        }
+        if (discoveryRegistrar != null && discoveryRegistrar.hasRegistries(svc)) {
+            discoveryRegistrar.deregisterStaleInstances(svc, extractClusterNameFromServiceKey(key), region);
+        }
     }
 
     private void scheduleReconciliation(ScheduledExecutorService scheduler) {

@@ -63,12 +63,11 @@ public class SecurityGroupFirewallManager {
             return;
         }
         try {
-            String namespace = config.docker().resourceNamespace().orElse("");
-            String owner = namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
+            String owner = ContainerStorageHelper.ownerIdentity(config);
             dockerClient.listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of("floci.security-group-helper", "true"))
                     .exec().stream()
-                    .filter(container -> owner.equals(container.getLabels().get("floci_owner_port")))
+                    .filter(container -> owner.equals(container.getLabels().get(ContainerStorageHelper.OWNER_LABEL)))
                     .forEach(container -> {
                         if ("running".equals(container.getState())) {
                             quarantine(container.getId());
@@ -102,15 +101,14 @@ public class SecurityGroupFirewallManager {
         ensureHelperImage();
         String name = ContainerStorageHelper.resourceName(config, "sg", null,
                 resourceId.replaceAll("[^a-zA-Z0-9_.-]", "-"));
-        String namespace = config.docker().resourceNamespace().orElse("");
-        String owner = namespace.isBlank() ? String.valueOf(config.port()) : namespace + "/" + config.port();
         ContainerBuilder.Builder builder = containerBuilder.newContainer(config.network().securityGroupEnforcement().helperImage())
                 .withName(name)
                 .withDockerNetwork(dockerNetwork)
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
-                .withLabels(Map.of("floci.security-group-helper", "true", "floci_owner_port", owner));
+                .withLabels(Map.of("floci.security-group-helper", "true",
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)));
         if (portBindings != null) {
             portBindings.forEach(builder::withPortBinding);
         }
