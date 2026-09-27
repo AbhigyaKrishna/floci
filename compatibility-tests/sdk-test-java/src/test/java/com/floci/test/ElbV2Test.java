@@ -484,6 +484,24 @@ class ElbV2Test {
     }
 
     @Test
+    @Order(35)
+    @DisplayName("DeleteRule - cannot delete default rule")
+    void deleteDefaultRuleForbidden() {
+        DescribeRulesResponse resp = elb.describeRules(
+                DescribeRulesRequest.builder().listenerArn(listenerArn).build());
+
+        String defaultRuleArn = resp.rules().stream()
+                .filter(Rule::isDefault)
+                .findFirst()
+                .map(Rule::ruleArn)
+                .orElseThrow();
+
+        assertThatThrownBy(() -> elb.deleteRule(
+                DeleteRuleRequest.builder().ruleArn(defaultRuleArn).build()))
+                .isInstanceOf(OperationNotPermittedException.class);
+    }
+
+    @Test
     @Order(36)
     @DisplayName("SetRulePriorities - priority held on another listener is not a conflict")
     void setRulePrioritiesIgnoresOtherListeners() {
@@ -566,24 +584,6 @@ class ElbV2Test {
         } finally {
             elb.deleteRule(DeleteRuleRequest.builder().ruleArn(conflictingRuleArn).build());
         }
-    }
-
-    @Test
-    @Order(35)
-    @DisplayName("DeleteRule - cannot delete default rule")
-    void deleteDefaultRuleForbidden() {
-        DescribeRulesResponse resp = elb.describeRules(
-                DescribeRulesRequest.builder().listenerArn(listenerArn).build());
-
-        String defaultRuleArn = resp.rules().stream()
-                .filter(Rule::isDefault)
-                .findFirst()
-                .map(Rule::ruleArn)
-                .orElseThrow();
-
-        assertThatThrownBy(() -> elb.deleteRule(
-                DeleteRuleRequest.builder().ruleArn(defaultRuleArn).build()))
-                .isInstanceOf(OperationNotPermittedException.class);
     }
 
     // ─── Tags ────────────────────────────────────────────────────────────────
