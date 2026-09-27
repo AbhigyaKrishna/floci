@@ -469,8 +469,7 @@ Known differences from AWS:
 
 A service that declares `serviceRegistries` has each of its running tasks registered as a
 Cloud Map instance of the named service, and deregistered when the task stops. The instance
-carries `AWS_INSTANCE_IPV4` (the task's ENI address on an awsvpc task, otherwise the
-container's address on the Docker network) and `AWS_INSTANCE_PORT` (the entry's `port`, or
+carries `AWS_INSTANCE_IPV4` (the address the task's container holds on its Docker network) and `AWS_INSTANCE_PORT` (the entry's `port`, or
 the host port its `containerPort` was published on), alongside the metadata attributes AWS
 records: `AVAILABILITY_ZONE`, `REGION`, `ECS_SERVICE_NAME`, `ECS_CLUSTER_NAME` and
 `ECS_TASK_DEFINITION_FAMILY`. The task id is the instance id, as on AWS, so a replacement
@@ -488,6 +487,10 @@ Known differences from AWS:
   reachable port is the published host port rather than the container port. Floci serves
   only A records, so such a task registers its address and its published host port and
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
+- An awsvpc task registers its container's Docker network address, not its ENI address. On
+  AWS the two are the same interface. In Floci a task's containers never join the subnet's
+  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The ENI
+  address is registered only when there is no running container to ask, as in mock mode.
 - `EC2_INSTANCE_ID` is not recorded. Every Floci task runs as a container rather than on a
   registered EC2 host, which is the Fargate case on AWS, where the attribute is also absent.
 - An instance's health status never moves. AWS registers a task `UNHEALTHY` and promotes it to

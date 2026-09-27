@@ -246,9 +246,12 @@ public class EcsServiceDiscoveryRegistrar {
     }
 
     /**
-     * Builds the instance attributes AWS records for an ECS-registered instance. The address is
-     * the task's own ENI address in awsvpc mode, and otherwise the container's address on the
-     * Docker network, which is the one another container on that network can reach.
+     * Builds the instance attributes AWS records for an ECS-registered instance. On AWS the
+     * address of an awsvpc task is its ENI address, because that is where the task answers. In
+     * Floci the ENI address belongs to no network the task's containers joined, so an awsvpc task
+     * registers the address its container actually holds, and keeps the ENI address only when
+     * there is no running container to ask (mock mode). A bridge-mode task has no ENI and is
+     * registered at the container's host address, as before.
      *
      * <p>The metadata attributes alongside it are the ones the ECS service discovery
      * documentation lists, so a caller can filter a {@code DiscoverInstances} response by them
@@ -259,7 +262,9 @@ public class EcsServiceDiscoveryRegistrar {
                                                    Map<String, Object> registry, String region) {
         Container container = containerFor(task, string(registry, "containerName"));
         String address = task.getPrivateIpAddress();
-        if ((address == null || address.isBlank()) && container != null) {
+        if (address != null && !address.isBlank()) {
+            address = containerManager.resolvePeerAddress(container).orElse(address);
+        } else if (container != null) {
             address = containerManager.resolveContainerHost(container);
         }
         if (address == null || address.isBlank()) {

@@ -84,6 +84,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
+import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -103,6 +104,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -116,7 +118,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -137,6 +138,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
+    private static final long SYNTHETIC_FIRST_OFFSET = 10;
+    private static final String SYNTHETIC_FALLBACK_CIDR = "172.31.0.0/24";
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
     private static final Set<String> VALID_VOLUME_TYPES =
             Set.of("standard", "io1", "io2", "gp2", "sc1", "st1", "gp3");
@@ -239,8 +242,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
     private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
-    // subnetId → counter for IP assignment (runtime-only, not persisted)
-    private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
+    // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
+    // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
+    private final Map<String, Long> subnetIpCursors = new HashMap<>();
 
     /**
      * Null in the hermetic unit tests, which reach the constructors that do not take it; CDI always
@@ -3315,17 +3319,87 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (subnetId == null) {
             return "172.31.0." + (10 + new Random().nextInt(200));
         }
-        AtomicInteger counter = subnetIpCounters.computeIfAbsent(region + "::" + subnetId, k -> new AtomicInteger(10));
-        int offset = counter.getAndIncrement();
-        Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
-        if (subnet == null) {
-            return "172.31.0." + offset;
+        Cidr4 cidr = subnets.get(key(region, subnetId))
+                .flatMap(subnet -> Cidr4.parse(subnet.getCidrBlock()))
+                .or(() -> Cidr4.parse(SYNTHETIC_FALLBACK_CIDR))
+                .orElseThrow();
+        // AWS reserves the first four addresses of a subnet and its last one.
+        long first = 4;
+        long last = cidr.size() - 2;
+        if (last < first) {
+            throw insufficientFreeAddresses(subnetId);
         }
-        // Parse base IP from CIDR
-        String cidr = subnet.getCidrBlock();
-        String baseIp = cidr.split("/")[0];
-        String[] parts = baseIp.split("\\.");
-        return parts[0] + "." + parts[1] + "." + parts[2] + "." + offset;
+        String cursorKey = key(region, subnetId);
+        synchronized (subnetIpCursors) {
+            // The addresses persisted resources already hold, so a restart, which forgets the
+            // cursor, never hands out an address that is still in use.
+            Set<String> inUse = privateIpsInUse(region, subnetId);
+            long start = Math.clamp(subnetIpCursors.getOrDefault(cursorKey, SYNTHETIC_FIRST_OFFSET), first, last);
+            long span = last - first + 1;
+            for (long step = 0; step < span; step++) {
+                long offset = first + (start - first + step) % span;
+                String address = cidr.addressAt(offset).orElseThrow();
+                if (!inUse.contains(address)) {
+                    subnetIpCursors.put(cursorKey, offset + 1);
+                    return address;
+                }
+            }
+        }
+        throw insufficientFreeAddresses(subnetId);
+    }
+
+    private static AwsException insufficientFreeAddresses(String subnetId) {
+        return new AwsException("InsufficientFreeAddressesInSubnet",
+                "There are not enough free addresses in subnet '" + subnetId + "' to satisfy the requested number of instances.",
+                400);
+    }
+
+    /** Every private address a live instance, network interface or NAT gateway holds in the subnet. */
+    private Set<String> privateIpsInUse(String region, String subnetId) {
+        String regionPrefix = region + "::";
+        Set<String> inUse = new HashSet<>();
+        for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(regionPrefix))) {
+            if (!subnetId.equals(ni.getSubnetId())) {
+                continue;
+            }
+            addIfSet(inUse, ni.getPrivateIpAddress());
+            for (NetworkInterfacePrivateIpAddress ip : nullToEmpty(ni.getPrivateIpAddresses())) {
+                addIfSet(inUse, ip.getPrivateIpAddress());
+            }
+        }
+        for (Instance instance : instances.scan(k -> k.startsWith(regionPrefix))) {
+            String state = instance.getState() == null ? null : instance.getState().getName();
+            if ("terminated".equals(state)) {
+                continue;
+            }
+            if (subnetId.equals(instance.getSubnetId())) {
+                addIfSet(inUse, instance.getPrivateIpAddress());
+            }
+            for (InstanceNetworkInterface ni : nullToEmpty(instance.getNetworkInterfaces())) {
+                if (subnetId.equals(ni.getSubnetId())) {
+                    addIfSet(inUse, ni.getPrivateIpAddress());
+                }
+            }
+        }
+        for (NatGateway natGateway : natGateways.scan(k -> k.startsWith(regionPrefix))) {
+            if (!subnetId.equals(natGateway.getSubnetId()) || "deleted".equals(natGateway.getState())) {
+                continue;
+            }
+            for (NatGatewayAddress address : nullToEmpty(natGateway.getNatGatewayAddresses())) {
+                addIfSet(inUse, address.getPrivateIp());
+            }
+        }
+        return inUse;
+    }
+
+    private static <T> List<T> nullToEmpty(List<T> list) {
+        return list == null ? List.of() : list;
+    }
+
+    private static void addIfSet(Set<String> addresses, String address) {
+        if (address != null && !address.isBlank()) {
+            addresses.add(address);
+        }
     }
 
     public List<Reservation> describeInstances(String region, List<String> instanceIds, Map<String, List<String>> filters) {
