@@ -750,18 +750,26 @@ public class ElbV2Service implements ResourceProvider {
             }
         }
 
-        // check for collisions with rules NOT in the update set
-        Set<String> updatingArns = arnToPriority.keySet();
-        Set<Integer> newPriorities = new HashSet<>(arnToPriority.values());
-        for (Rule existing : regionRules.values()) {
-            if (!updatingArns.contains(existing.getRuleArn()) && !existing.isDefault()) {
-                try {
-                    int existingPriority = Integer.parseInt(existing.getPriority());
-                    if (newPriorities.contains(existingPriority)) {
-                        throw new AwsException("PriorityInUse",
-                                "Priority " + existingPriority + " is already in use.", 400);
-                    }
-                } catch (NumberFormatException ignored) { /* default rule */ }
+        // priorities are unique per listener, so collisions are only checked among rules of the same listener
+        Map<String, Set<Integer>> newPrioritiesByListener = new HashMap<>();
+        for (Map.Entry<String, Integer> e : arnToPriority.entrySet()) {
+            String listenerArn = regionRules.get(e.getKey()).getListenerArn();
+            if (!newPrioritiesByListener.computeIfAbsent(listenerArn, k -> new HashSet<>()).add(e.getValue())) {
+                throw new AwsException("PriorityInUse",
+                        "Priority " + e.getValue() + " is already in use.", 400);
+            }
+        }
+        for (Map.Entry<String, Set<Integer>> e : newPrioritiesByListener.entrySet()) {
+            for (String ruleArn : listenerToRules.getOrDefault(e.getKey(), List.of())) {
+                Rule existing = regionRules.get(ruleArn);
+                if (existing == null || existing.isDefault() || arnToPriority.containsKey(ruleArn)) {
+                    continue;
+                }
+                int existingPriority = Integer.parseInt(existing.getPriority());
+                if (e.getValue().contains(existingPriority)) {
+                    throw new AwsException("PriorityInUse",
+                            "Priority " + existingPriority + " is already in use.", 400);
+                }
             }
         }
 
