@@ -3972,10 +3972,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         leftoverContainersRemoved = containerManager.removeLeftoverContainers();
         if (leftoverContainersRemoved) {
             LOG.info("The containers a previous ECS run left behind are gone; starting service tasks");
-        } else if (!leftoverContainersBlockReported) {
+        } else {
+            LOG.log(leftoverContainersBlockReported ? Logger.Level.DEBUG : Logger.Level.WARN,
+                    "Not starting ECS service tasks while a previous run's containers remain;"
+                            + " retrying whenever a service needs a task");
             leftoverContainersBlockReported = true;
-            LOG.warn("Not starting ECS service tasks while a previous run's containers remain;"
-                    + " retrying whenever a service needs a task");
         }
         return leftoverContainersRemoved;
     }
