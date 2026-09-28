@@ -249,6 +249,7 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
+        Map<String, String> imageDigestsByContainer = new LinkedHashMap<>();
         // The task metadata id has to exist before the container does: its own environment carries
         // the URI, so it cannot be derived from the Docker id the daemon hands back afterwards.
         Map<String, String> metadataIdsByContainer = new LinkedHashMap<>();
@@ -263,6 +264,13 @@ public class EcsContainerManager {
                 envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
                         metadataId, taskRoleEndpoint.vending()));
                 imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
+            }
+            // Pulled for every container before any is created, as the ECS agent does, so a tag
+            // moved in its registry since the last launch is what this task runs.
+            for (ContainerDefinition def : launchOrder) {
+                lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
+                                config.services().ecs().imagePullBehavior())
+                        .ifPresent(digest -> imageDigestsByContainer.put(def.getName(), digest));
             }
 
             if (firelensRouter != null) {
@@ -489,6 +497,7 @@ public class EcsContainerManager {
                 // Build ECS container model
                 Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region,
                         metadataIdsByContainer.get(def.getName()));
+                container.setImageDigest(imageDigestsByContainer.get(def.getName()));
                 runtimeContainers.add(container);
                 containerIds.put(def.getName(), dockerId);
 

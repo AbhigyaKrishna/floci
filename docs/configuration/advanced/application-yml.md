@@ -278,6 +278,7 @@ floci:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
       docker-network: floci-net               # required for task-role credentials; must be user-defined
+      image-pull-behavior: default            # as ECS_IMAGE_PULL_BEHAVIOR: default | always | once | prefer-cached
       task-role-credentials:
         enabled: false                        # vend real task IAM role credentials to task containers
         ttl-seconds: 21600                    # six hours, matching AWS
@@ -339,6 +340,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` is rejected |
 | `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
 | `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true`         | Remove the ECS containers a previous run of this Floci left on the daemon before replacement tasks start |
+| `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR`           | `default`        | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |

@@ -13,9 +13,13 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.UnauthorizedException;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -24,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -34,6 +39,9 @@ import static org.mockito.Mockito.when;
 class ImageCacheServiceTest {
 
     private static final String IMAGE = "public.ecr.aws/docker/library/alpine:latest";
+    private static final String REGISTRY_REPO = "registry.example:5000/app";
+    private static final String REGISTRY_IMAGE = REGISTRY_REPO + ":latest";
+    private static final String LOCAL_IMAGE = "app-local:latest";
 
     @Test
     void pullsImageWhenInspectionReportsNotFound() throws Exception {
@@ -381,6 +389,171 @@ class ImageCacheServiceTest {
                     throw new InterruptedException("interrupted mid-pull");
                 }));
         assertEquals(1, calls.get());
+    }
+
+    @Test
+    void defaultPullBehaviourRunsTheImageAMovedTagNamesNow() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
+        ImageCacheService service = newService(daemon.client);
+        assertEquals("sha256:old", service.ensureImageExists(REGISTRY_IMAGE));
+
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
+
+        assertEquals(Optional.of("sha256:new-manifest"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT));
+        assertEquals("sha256:new", service.ensureImageExists(REGISTRY_IMAGE));
+        assertEquals(2, daemon.pulls.get());
+    }
+
+    @Test
+    void defaultPullBehaviourRunsTheCachedImageWhenThePullFails() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(LOCAL_IMAGE, image("sha256:built"));
+        ImageCacheService service = newService(daemon.client);
+
+        assertEquals(Optional.empty(), service.resolveForLaunch(LOCAL_IMAGE, ImagePullBehavior.DEFAULT));
+        assertEquals("sha256:built", service.ensureImageExists(LOCAL_IMAGE));
+        assertEquals(1, daemon.pulls.get());
+    }
+
+    @Test
+    void defaultPullBehaviourFailsWhenThePullFailsAndNothingIsCached() {
+        FakeDaemon daemon = new FakeDaemon();
+
+        assertThrows(NotFoundException.class,
+                () -> newService(daemon.client).resolveForLaunch(LOCAL_IMAGE, ImagePullBehavior.DEFAULT));
+    }
+
+    @Test
+    void alwaysPullBehaviourFailsWhenThePullFailsEvenWithACachedImage() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(LOCAL_IMAGE, image("sha256:built"));
+
+        assertThrows(NotFoundException.class,
+                () -> newService(daemon.client).resolveForLaunch(LOCAL_IMAGE, ImagePullBehavior.ALWAYS));
+    }
+
+    @Test
+    void preferCachedPullBehaviourFollowsTheLocalTagWithoutPulling() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
+        ImageCacheService service = newService(daemon.client);
+        assertEquals("sha256:old", service.ensureImageExists(REGISTRY_IMAGE));
+
+        daemon.store(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
+
+        assertEquals(Optional.of("sha256:new-manifest"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
+        assertEquals("sha256:new", service.ensureImageExists(REGISTRY_IMAGE));
+        assertEquals(0, daemon.pulls.get());
+    }
+
+    @Test
+    void preferCachedPullBehaviourPullsWhenNothingIsCached() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
+
+        assertEquals(Optional.of("sha256:new-manifest"),
+                newService(daemon.client).resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
+        assertEquals(1, daemon.pulls.get());
+    }
+
+    @Test
+    void oncePullBehaviourPullsOnlyTheFirstLaunch() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(REGISTRY_IMAGE, image("sha256:stale"));
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
+        ImageCacheService service = newService(daemon.client);
+
+        service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ONCE);
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
+
+        assertEquals(Optional.of("sha256:old-manifest"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ONCE));
+        assertEquals("sha256:old", service.ensureImageExists(REGISTRY_IMAGE));
+        assertEquals(1, daemon.pulls.get());
+    }
+
+    @Test
+    void manifestDigestIsTheRepoDigestOfTheRepositoryTheReferenceNames() {
+        InspectImageResponse pulled = image("sha256:id",
+                "mirror.example:5000/app@sha256:mirror-manifest", REGISTRY_REPO + "@sha256:manifest");
+
+        assertEquals(Optional.of("sha256:manifest"), ImageCacheService.manifestDigest(REGISTRY_IMAGE, pulled));
+    }
+
+    @Test
+    void manifestDigestMatchesDockerHubRepositoriesWrittenInFull() {
+        InspectImageResponse pulled = image("sha256:id", "alpine@sha256:manifest");
+
+        assertEquals(Optional.of("sha256:manifest"),
+                ImageCacheService.manifestDigest("docker.io/library/alpine:3.20", pulled));
+    }
+
+    @Test
+    void manifestDigestOfADigestReferenceIsThatDigest() {
+        assertEquals(Optional.of("sha256:pinned"),
+                ImageCacheService.manifestDigest(REGISTRY_REPO + "@sha256:pinned", image("sha256:id")));
+    }
+
+    @Test
+    void manifestDigestIsEmptyForALocallyBuiltImage() {
+        assertEquals(Optional.empty(), ImageCacheService.manifestDigest(LOCAL_IMAGE, image("sha256:built")));
+    }
+
+    private static InspectImageResponse image(String id, String... repoDigests) {
+        return new InspectImageResponse()
+                .withId(id)
+                .withOs("linux")
+                .withArch("amd64")
+                .withRepoDigests(List.of(repoDigests));
+    }
+
+    /**
+     * A daemon whose local images and registry are plain maps, so a test can move a tag in either
+     * place and watch which image the next launch resolves to.
+     */
+    private static final class FakeDaemon {
+        final DockerClient client = mock(DockerClient.class);
+        final Map<String, InspectImageResponse> local = new HashMap<>();
+        final Map<String, InspectImageResponse> registry = new HashMap<>();
+        final AtomicInteger pulls = new AtomicInteger();
+
+        FakeDaemon() {
+            when(client.inspectImageCmd(anyString())).thenAnswer(invocation -> {
+                String reference = invocation.getArgument(0);
+                InspectImageCmd inspect = mock(InspectImageCmd.class);
+                when(inspect.exec()).thenAnswer(ignored -> {
+                    InspectImageResponse image = local.get(reference);
+                    if (image == null) {
+                        throw new NotFoundException("No such image: " + reference);
+                    }
+                    return image;
+                });
+                return inspect;
+            });
+            when(client.pullImageCmd(anyString())).thenAnswer(invocation -> {
+                String reference = invocation.getArgument(0);
+                PullImageCmd pull = mock(PullImageCmd.class);
+                when(pull.withAuthConfig(any())).thenReturn(pull);
+                when(pull.exec(any(PullImageResultCallback.class))).thenAnswer(ignored -> {
+                    pulls.incrementAndGet();
+                    InspectImageResponse image = registry.get(reference);
+                    if (image == null) {
+                        throw new NotFoundException("manifest unknown: " + reference);
+                    }
+                    store(reference, image);
+                    return mock(PullImageResultCallback.class);
+                });
+                return pull;
+            });
+        }
+
+        void store(String tag, InspectImageResponse image) {
+            local.put(tag, image);
+            local.put(image.getId(), image);
+        }
     }
 
     private static ImageCacheService newService(DockerClient dockerClient) {

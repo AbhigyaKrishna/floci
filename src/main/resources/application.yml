@@ -605,6 +605,7 @@ floci:
       # Remove the ECS containers a previous run of this deployment left on the daemon before
       # the service scheduler starts replacements. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
+      image-pull-behavior: default
       task-role-credentials:
         enabled: false
         ttl-seconds: 21600
