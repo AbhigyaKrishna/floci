@@ -96,19 +96,21 @@ public class EcsLoadBalancerRegistrar {
     }
 
     /**
-     * Deregisters the task's load-balanced containers from their ELBv2 target groups: the targets
-     * {@link #registerTask} recorded, or, for a task it holds no record of, the ones its
-     * containers resolve to now.
+     * Deregisters the targets {@link #registerTask} recorded for the task, and no other: a task
+     * with no record registered nothing, as when each of its targets was already in its group.
+     * Only a task without an ARN, which {@link #registerTask} cannot record, falls back to the
+     * targets its containers resolve to now.
      */
     public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
-        Optional<EcsRegisteredTargets> recorded = task.getTaskArn() == null
-                ? Optional.empty() : ledger.get(task.getTaskArn());
+        if (task.getTaskArn() == null) {
+            forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
+            return;
+        }
+        Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
         if (recorded.isPresent()) {
             deregister(recorded.get());
             ledger.delete(task.getTaskArn());
-            return;
         }
-        forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
     }
 
     /**

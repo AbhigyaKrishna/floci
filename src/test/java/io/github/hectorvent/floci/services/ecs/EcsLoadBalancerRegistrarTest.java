@@ -195,10 +195,11 @@ class EcsLoadBalancerRegistrarTest {
         EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
 
         registrar.registerTask(task, svc, REGION);
+        registrar.deregisterTask(task, svc, REGION);
         registrar.releaseRecordedTargets();
 
         List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
-        assertEquals(1, health.size(), "the target registered by hand should survive the release");
+        assertEquals(1, health.size(), "the target registered by hand should survive the stop and the release");
         assertEquals(39000, health.get(0).getTarget().getPort());
     }
 
