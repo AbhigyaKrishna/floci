@@ -50,21 +50,40 @@ public class EcsLoadBalancerRegistrar {
                 new TypeReference<Map<String, EcsRegisteredTargets>>() {});
     }
 
-    /** Registers the task's load-balanced containers as ELBv2 targets, and records them. */
+    /**
+     * Registers the task's load-balanced containers as ELBv2 targets. The targets are recorded
+     * before they are registered, so a process killed in between still leaves a record for the
+     * next run to release; releasing a recorded target that never registered is harmless.
+     */
     public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
+        List<EcsRegisteredTargets.Target> planned = new ArrayList<>();
+        forEachTarget(task, svc, (tgArn, td) ->
+                planned.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort())));
+        if (planned.isEmpty()) {
+            return;
+        }
+        String taskArn = task.getTaskArn();
+        if (taskArn != null) {
+            ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(planned)));
+        }
         List<EcsRegisteredTargets.Target> registered = new ArrayList<>();
-        forEachTarget(task, svc, (tgArn, td) -> {
+        for (EcsRegisteredTargets.Target target : planned) {
             try {
-                elbV2Service.registerTargets(region, tgArn, List.of(td));
-                registered.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort()));
+                elbV2Service.registerTargets(region, target.targetGroupArn(), List.of(target.toDescription()));
+                registered.add(target);
                 LOG.infov("Registered ECS task target {0}:{1} into target group {2}",
-                        td.getId(), td.getPort(), tgArn);
+                        target.id(), target.port(), target.targetGroupArn());
             } catch (Exception e) {
-                LOG.warnv("Could not register ECS target into {0}: {1}", tgArn, e.getMessage());
+                LOG.warnv("Could not register ECS target into {0}: {1}", target.targetGroupArn(), e.getMessage());
             }
-        });
-        if (!registered.isEmpty() && task.getTaskArn() != null) {
-            ledger.put(task.getTaskArn(), new EcsRegisteredTargets(region, List.copyOf(registered)));
+        }
+        if (taskArn == null || registered.size() == planned.size()) {
+            return;
+        }
+        if (registered.isEmpty()) {
+            ledger.delete(taskArn);
+        } else {
+            ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
         }
     }
 
@@ -104,10 +123,7 @@ public class EcsLoadBalancerRegistrar {
             return;
         }
         for (EcsRegisteredTargets.Target target : recorded.targets()) {
-            TargetDescription td = new TargetDescription();
-            td.setId(target.id());
-            td.setPort(target.port());
-            deregister(recorded.region(), target.targetGroupArn(), td);
+            deregister(recorded.region(), target.targetGroupArn(), target.toDescription());
         }
     }
 

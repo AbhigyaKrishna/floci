@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -17,7 +18,11 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * Component test for {@link EcsServiceDiscoveryRegistrar}: drives register/deregister directly
@@ -33,7 +38,7 @@ class EcsServiceDiscoveryRegistrarTest {
     @Inject
     EcsServiceDiscoveryRegistrar registrar;
 
-    @Inject
+    @InjectSpy
     CloudMapService cloudMapService;
 
     @Test
@@ -157,6 +162,27 @@ class EcsServiceDiscoveryRegistrarTest {
                 .map(Instance::getInstanceId)
                 .toList();
         assertEquals(List.of("registered-by-hand"), remaining);
+    }
+
+    @Test
+    void releaseRecordedInstancesReleasesAnInstanceWhoseRegistrationWasCutShort() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "killed");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new ProcessKilled();
+        }).when(cloudMapService).registerInstance(eq(cloudMapSvc.getId()), any(), any(), any(), any());
+
+        assertThrows(ProcessKilled.class, () -> registrar.registerTask(task("172.31.0.13", "killed", 8080, 8080),
+                serviceWithRegistry(cloudMapSvc.getArn(), "killed", 8080), REGION));
+        registrar.releaseRecordedInstances();
+
+        assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty(),
+                "an instance registered just before the process died should be released");
+    }
+
+    /** Stands in for the process dying between the registration and anything after it. */
+    private static final class ProcessKilled extends Error {
     }
 
     private Service createDnsService(String namespaceName, String serviceName) {

@@ -502,7 +502,8 @@ nothing manages:
   removed. A graceful shutdown already stops them; this covers a run that ended without one
   (SIGKILL, OOM, a stop timeout that expired mid-drain). Containers are recognised by the
   `floci_owner_port` label (the resource namespace and API port), so the containers of another
-  Floci sharing the daemon stay. Containers created by a Floci version without that label are
+  Floci sharing the daemon stay, and are told apart from the current run's by a per-process
+  `floci.ecs-run` label rather than by creation time. Containers created by a Floci version without that label are
   not recognised and must be removed by hand once. If Docker cannot list or remove one, the
   service scheduler starts no task and retries on each reconciliation tick until it is gone.
 - Every load balancer target and Cloud Map instance a previous run's tasks registered is
@@ -510,7 +511,9 @@ nothing manages:
   address to the next container it starts, so a stale target would route to an unrelated
   container. ECS records each registration it makes in its persisted state and releases exactly
   those, so a target or instance registered through the ELBv2 or Cloud Map API, even into the
-  same target group or Cloud Map service, stays.
+  same target group or Cloud Map service, stays. A registration is recorded before it is made,
+  so one cut short by the process dying is still released. Registrations made by a Floci
+  version that kept no record are not recognised either, and must be deregistered by hand once.
 
 #### Unknown services
 

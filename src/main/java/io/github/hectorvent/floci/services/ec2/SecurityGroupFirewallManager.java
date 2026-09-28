@@ -87,6 +87,13 @@ public class SecurityGroupFirewallManager {
     /** The helper starts before any workload process and owns all published ports. */
     public Namespace createNamespace(String service, String resourceId, String accountId, String region,
                                      Optional<String> dockerNetwork, Map<Integer, Integer> portBindings) {
+        return createNamespace(service, resourceId, accountId, region, dockerNetwork, portBindings, Map.of());
+    }
+
+    /** {@link #createNamespace} with extra labels on the helper, as the owning service tracks it by. */
+    public Namespace createNamespace(String service, String resourceId, String accountId, String region,
+                                     Optional<String> dockerNetwork, Map<Integer, Integer> portBindings,
+                                     Map<String, String> extraLabels) {
         if (!enabled()) {
             throw new IllegalStateException("Security-group enforcement is disabled");
         }
@@ -108,7 +115,8 @@ public class SecurityGroupFirewallManager {
                 .withCmd(List.of("exec sleep 2147483647"))
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
                 .withLabels(Map.of("floci.security-group-helper", "true",
-                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)));
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                .withLabels(extraLabels);
         if (portBindings != null) {
             portBindings.forEach(builder::withPortBinding);
         }

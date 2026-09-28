@@ -52,10 +52,14 @@ public class EcsServiceDiscoveryRegistrar {
                 new TypeReference<Map<String, EcsRegisteredInstances>>() {});
     }
 
-    /** Registers the task as a Cloud Map instance of every service registry the ECS service declares. */
+    /**
+     * Registers the task as a Cloud Map instance of every service registry the ECS service declares.
+     * The registrations are recorded before they are made, so a process killed in between still
+     * leaves a record for the next run to release; releasing one that never registered is harmless.
+     */
     public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
         String instanceId = instanceId(task);
-        Set<String> registered = new LinkedHashSet<>();
+        Map<String, Map<String, String>> planned = new LinkedHashMap<>();
         for (Map<String, Object> registry : registries(svc)) {
             String cloudMapServiceId = cloudMapServiceId(registry);
             if (cloudMapServiceId == null) {
@@ -67,6 +71,16 @@ public class EcsServiceDiscoveryRegistrar {
                         task.getTaskArn(), cloudMapServiceId);
                 continue;
             }
+            planned.putIfAbsent(cloudMapServiceId, attributes);
+        }
+        String taskArn = task.getTaskArn();
+        if (!planned.isEmpty() && taskArn != null) {
+            ledger.put(taskArn, new EcsRegisteredInstances(region, instanceId, List.copyOf(planned.keySet())));
+        }
+        Set<String> registered = new LinkedHashSet<>();
+        for (Map.Entry<String, Map<String, String>> entry : planned.entrySet()) {
+            String cloudMapServiceId = entry.getKey();
+            Map<String, String> attributes = entry.getValue();
             try {
                 cloudMapService.registerInstance(cloudMapServiceId, instanceId, null, attributes, region);
                 registered.add(cloudMapServiceId);
@@ -78,8 +92,13 @@ public class EcsServiceDiscoveryRegistrar {
             }
         }
         task.setServiceDiscoveryServiceIds(List.copyOf(registered));
-        if (!registered.isEmpty() && task.getTaskArn() != null) {
-            ledger.put(task.getTaskArn(), new EcsRegisteredInstances(region, instanceId, List.copyOf(registered)));
+        if (taskArn == null || registered.size() == planned.size()) {
+            return;
+        }
+        if (registered.isEmpty()) {
+            ledger.delete(taskArn);
+        } else {
+            ledger.put(taskArn, new EcsRegisteredInstances(region, instanceId, List.copyOf(registered)));
         }
     }
 

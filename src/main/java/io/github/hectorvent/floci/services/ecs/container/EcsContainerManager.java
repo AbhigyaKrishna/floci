@@ -93,6 +93,8 @@ public class EcsContainerManager {
     private static final Logger LOG = Logger.getLogger(EcsContainerManager.class);
 
     private static final String ATTACHMENT_DELETED = "DELETED";
+    /** The label naming the Floci process that created a container, set by {@link #ownerLabels()}. */
+    public static final String RUN_LABEL = "floci.ecs-run";
 
     /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
     private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
@@ -133,7 +135,8 @@ public class EcsContainerManager {
     private final EcsTaskRoleCredentials taskRoleCredentials;
     private final EcsCredentialsProxy credentialsProxy;
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
-    private final Instant startedAt = Instant.now();
+    // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
+    private final String runId = UUID.randomUUID().toString();
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -314,8 +317,7 @@ public class EcsContainerManager {
                         .withEmbeddedDns()
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                                 "ecs", taskId, regionResolver.getAccountId(), region))
-                        .withLabels(Map.of(ContainerStorageHelper.OWNER_LABEL,
-                                ContainerStorageHelper.ownerIdentity(config)));
+                        .withLabels(ownerLabels());
                 if (protectedNetwork != null) {
                     specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
                     specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
@@ -1036,21 +1038,29 @@ public class EcsContainerManager {
     /**
      * Removes the ECS containers a previous run of this Floci left on the daemon: task containers
      * and the security-group helpers whose network namespace they share. Task state is memory-only,
-     * so no container carrying this deployment's owner label and created before this process
-     * started belongs to a task this process knows. A graceful shutdown already stops them; this
+     * so no container carrying this deployment's owner label and another run's {@link #RUN_LABEL}
+     * belongs to a task this process knows. A graceful shutdown already stops them; this
      * covers a run that ended without one (SIGKILL, OOM, a stop timeout that expired mid-drain),
      * whose containers would otherwise keep serving beside the replacements the service scheduler
      * starts. Containers created before the owner label existed carry none and are left alone.
-     * Leaving out the ones this process created is what makes a retry safe once tasks run.
+     * Leaving out the ones this process created is what makes a retry safe once tasks run. The run
+     * label decides that rather than the creation time, which Docker reports to the second and from
+     * a clock that can drift from this process's.
      *
      * @return whether every leftover is gone: false when Docker could not list or remove one
      */
     public boolean removeLeftoverContainers() {
-        return removeLeftoverContainers(startedAt);
+        return removeLeftoverContainers(runId);
     }
 
-    /** {@link #removeLeftoverContainers()} for the containers created before {@code createdBefore}. */
-    public boolean removeLeftoverContainers(Instant createdBefore) {
+    /** The labels that tie a container to this deployment and to this process's run of it. */
+    private Map<String, String> ownerLabels() {
+        return Map.of(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config),
+                RUN_LABEL, runId);
+    }
+
+    /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
+    public boolean removeLeftoverContainers(String currentRunId) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
         List<com.github.dockerjava.api.model.Container> containers;
         try {
@@ -1066,7 +1076,7 @@ public class EcsContainerManager {
         }
         boolean allRemoved = true;
         for (com.github.dockerjava.api.model.Container container : containers) {
-            if (container.getCreated() != null && container.getCreated() >= createdBefore.getEpochSecond()) {
+            if (container.getLabels() != null && currentRunId.equals(container.getLabels().get(RUN_LABEL))) {
                 continue;
             }
             try {
@@ -1123,7 +1133,7 @@ public class EcsContainerManager {
                     containerDetector.isRunningInContainer(),
                     config.services().ecs().publishAwsvpcPortsToHost());
             namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
-                    region, config.services().ecs().dockerNetwork(), bindings);
+                    region, config.services().ecs().dockerNetwork(), bindings, Map.of(RUN_LABEL, runId));
             List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
             List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
             if (groups.size() != groupIds.size()) {

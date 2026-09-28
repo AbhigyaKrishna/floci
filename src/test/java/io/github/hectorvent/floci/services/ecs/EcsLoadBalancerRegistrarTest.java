@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +19,11 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * Component test for {@link EcsLoadBalancerRegistrar}: drives the register/deregister
@@ -33,7 +38,7 @@ class EcsLoadBalancerRegistrarTest {
     @Inject
     EcsLoadBalancerRegistrar registrar;
 
-    @Inject
+    @InjectSpy
     ElbV2Service elbV2Service;
 
     private String createTargetGroup(String name) {
@@ -164,6 +169,26 @@ class EcsLoadBalancerRegistrarTest {
         elbV2Service.deleteTargetGroup(REGION, tgArn);
 
         registrar.releaseRecordedTargets();
+    }
+
+    @Test
+    void releaseRecordedTargetsReleasesATargetWhoseRegistrationWasCutShort() {
+        String tgArn = createTargetGroup("reg-tg-killed");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new ProcessKilled();
+        }).when(elbV2Service).registerTargets(eq(REGION), eq(tgArn), any());
+
+        assertThrows(ProcessKilled.class, () -> registrar.registerTask(
+                taskWithContainer("web", 8080, 38000), serviceWithLb(tgArn, "web", 8080), REGION));
+        registrar.releaseRecordedTargets();
+
+        assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
+                "a target registered just before the process died should be released");
+    }
+
+    /** Stands in for the process dying between the registration and anything after it. */
+    private static final class ProcessKilled extends Error {
     }
 
     private static TargetDescription target(String id, int port) {

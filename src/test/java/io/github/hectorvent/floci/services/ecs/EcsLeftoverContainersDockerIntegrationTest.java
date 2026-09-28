@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -32,7 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * A Floci that ends without a graceful shutdown leaves its task containers running, and the next
  * run knows no task, since task state is memory-only. Those containers must go at startup, or the
  * service scheduler starts a second task beside each one. The sweep recognises them by the owner
- * label a task container is created with, so a container of another Floci sharing the daemon stays.
+ * label a task container is created with, so a container of another Floci sharing the daemon stays,
+ * and tells this run's containers from a previous run's by the run label rather than by time.
  */
 @QuarkusTest
 @TestProfile(EcsServiceDiscoveryDockerIntegrationTest.DockerEcsProfile.class)
@@ -73,36 +74,43 @@ class EcsLeftoverContainersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDef.getTaskDefinitionArn(), 1, LaunchType.EC2, null, null,
                 null, null, REGION).getFirst();
         String foreignId = null;
+        String previousRunId = null;
         try {
             String taskContainerId = task.getContainers().getFirst().getDockerId();
             assertNotNull(taskContainerId, "the task must have started a container: " + task.getStoppedReason());
             assertEquals(ContainerStorageHelper.ownerIdentity(config), labels(taskContainerId)
                     .get(ContainerStorageHelper.OWNER_LABEL), "a task container must carry its owner");
 
-            foreignId = createForeignEcsContainer();
+            foreignId = createEcsContainer(Map.of(ContainerStorageHelper.OWNER_LABEL, "another-floci/4566"));
+            // Created a moment ago, as by a run killed within the second this one started.
+            previousRunId = createEcsContainer(Map.of(ContainerStorageHelper.OWNER_LABEL,
+                    ContainerStorageHelper.ownerIdentity(config), EcsContainerManager.RUN_LABEL, "a-previous-run"));
 
             assertTrue(containerManager.removeLeftoverContainers(), "the sweep must succeed");
             assertTrue(exists(taskContainerId), "a task container this run started must stay");
+            assertFalse(exists(previousRunId), "a previous run's container must be removed however recent");
 
-            assertTrue(containerManager.removeLeftoverContainers(Instant.now().plusSeconds(1)),
-                    "the sweep must succeed");
+            assertTrue(containerManager.removeLeftoverContainers("the-next-run"), "the sweep must succeed");
             assertFalse(exists(taskContainerId), "the leftover task container must be removed");
             assertTrue(exists(foreignId), "another Floci's container must stay");
         } finally {
             ecsService.stopTask(clusterName, task.getTaskArn(), "test teardown", REGION);
-            if (foreignId != null) {
-                dockerClient.removeContainerCmd(foreignId).withForce(true).exec();
+            for (String containerId : new String[] {foreignId, previousRunId}) {
+                if (containerId != null && exists(containerId)) {
+                    dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+                }
             }
         }
     }
 
-    /** An ECS container stamped with a different owner, as another Floci on the daemon creates. */
-    private String createForeignEcsContainer() {
+    /** An ECS container carrying {@code ownership}, as another Floci or another run creates. */
+    private String createEcsContainer(Map<String, String> ownership) {
+        Map<String, String> labels = new HashMap<>(ownership);
+        labels.put("io.floci.service", "ecs");
         CreateContainerResponse created = dockerClient.createContainerCmd(BUSYBOX_IMAGE)
                 .withName(unique("floci-other-ecs"))
                 .withCmd("sleep", "120")
-                .withLabels(Map.of("io.floci.service", "ecs",
-                        ContainerStorageHelper.OWNER_LABEL, "another-floci/4566"))
+                .withLabels(labels)
                 .exec();
         return created.getId();
     }
