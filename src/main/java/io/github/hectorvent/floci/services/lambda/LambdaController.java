@@ -345,6 +345,8 @@ public class LambdaController {
     Map<String, Object> buildEsmResponse(EventSourceMapping esm) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("UUID", esm.getUuid());
+        node.put("EventSourceMappingArn",
+                LambdaArnUtils.eventSourceMappingArn(esm.getRegion(), esm.getAccountId(), esm.getUuid()));
         node.put("FunctionArn", esm.getFunctionArn());
         if (esm.getEventSourceArn() != null) {
             node.put("EventSourceArn", esm.getEventSourceArn());
