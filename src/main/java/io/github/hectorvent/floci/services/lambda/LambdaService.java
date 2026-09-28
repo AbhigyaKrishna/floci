@@ -85,6 +85,7 @@ public class LambdaService implements ResourceProvider {
     private static final Pattern HANDLER_PATTERN = Pattern.compile("\\S+");
     private static final int MAX_HANDLER_LENGTH = 128;
     private static final List<String> FUNCTION_ARCHITECTURES = List.of("x86_64", "arm64");
+    private static final List<String> FUNCTION_RESPONSE_TYPES = List.of("ReportBatchItemFailures");
 
     /**
      * Structure members {@code UpdateFunctionConfiguration} accepts. Shape-checked before the
@@ -1318,11 +1319,28 @@ public class LambdaService implements ResourceProvider {
         return destinationConfig;
     }
 
-    @SuppressWarnings("unchecked")
-    private static List<String> parseFunctionResponseTypes(Map<String, Object> request) {
-        return request.get("FunctionResponseTypes") instanceof List
-                ? new ArrayList<>((List<String>) request.get("FunctionResponseTypes"))
-                : new ArrayList<>();
+    static List<String> parseFunctionResponseTypes(Map<String, Object> request) {
+        if (!(request.get("FunctionResponseTypes") instanceof List<?> types)) {
+            return new ArrayList<>();
+        }
+        if (types.size() > 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "1 validation error detected: Value '" + types + "' at 'functionResponseTypes' "
+                            + "failed to satisfy constraint: Member must have length less than or equal to 1",
+                    400);
+        }
+        List<String> validated = new ArrayList<>();
+        for (Object type : types) {
+            if (!FUNCTION_RESPONSE_TYPES.contains(type)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "1 validation error detected: Value '" + types + "' at 'functionResponseTypes' "
+                                + "failed to satisfy constraint: Member must satisfy constraint: "
+                                + "[Member must satisfy enum value set: " + FUNCTION_RESPONSE_TYPES + "]",
+                        400);
+            }
+            validated.add((String) type);
+        }
+        return validated;
     }
 
     /**

@@ -1692,6 +1692,16 @@ class EsmIntegrationTest {
         .then().statusCode(202)
             .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
 
+        given().contentType("application/json").body("{ \"FunctionResponseTypes\": [\"Bogus\"] }")
+        .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given()
+        .when().get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then().statusCode(200)
+            .body("FunctionResponseTypes", contains("ReportBatchItemFailures"));
+
         given().contentType("application/json").body("{ \"FunctionResponseTypes\": [] }")
         .when().put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
         .then().statusCode(202)
