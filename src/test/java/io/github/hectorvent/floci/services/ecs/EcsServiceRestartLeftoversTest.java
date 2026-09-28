@@ -70,6 +70,20 @@ class EcsServiceRestartLeftoversTest {
     }
 
     @Test
+    void theSweepIsNotRetriedWhileNoServiceNeedsATask() {
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        when(containerManager.removeLeftoverContainers()).thenReturn(false);
+        EcsService restarted = service(new SharedStorageFactory(), false, containerManager,
+                mock(EcsLoadBalancerRegistrar.class), null);
+
+        restarted.releasePreviousRunLeftovers();
+        restarted.reconcile();
+        restarted.reconcile();
+
+        verify(containerManager).removeLeftoverContainers();
+    }
+
+    @Test
     void dockerModeRemovesTheContainersAPreviousRunLeft() {
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
 

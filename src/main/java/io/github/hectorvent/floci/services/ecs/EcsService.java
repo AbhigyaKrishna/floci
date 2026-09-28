@@ -116,8 +116,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
     private final Object reconcilerLock = new Object();
-    // False until a previous run's task containers are confirmed gone; the scheduler waits for it.
+    // False until a previous run's task containers are confirmed gone; no service task starts before.
     private volatile boolean leftoverContainersRemoved = true;
+    private volatile boolean leftoverContainersBlockReported;
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
@@ -232,8 +233,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * service would serve from its replacements and a task nothing manages, and a dead task's
      * target would follow its address to whichever container Docker hands it to next. Only what
      * the registrars recorded registering is released, never a target or instance registered by
-     * hand. A container Docker would not remove is retried by {@link #reconcile()}, which starts
-     * no service task until it is gone.
+     * hand. A container Docker would not remove is retried by {@link #leftoverContainersCleared()}
+     * whenever a service needs a task, and no service task starts until it is gone.
      */
     void releasePreviousRunLeftovers() {
         if (dockerMode) {
@@ -3947,13 +3948,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } catch (Exception e) {
             LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
         }
-        if (!leftoverContainersRemoved) {
-            leftoverContainersRemoved = containerManager.removeLeftoverContainers();
-            if (!leftoverContainersRemoved) {
-                LOG.warn("Not starting ECS service tasks while a previous run's containers remain");
-                return;
-            }
-        }
         for (String accountId : reconcilableAccountIds()) {
             RequestScopes.runAs(accountId, () -> {
                 try {
@@ -3964,6 +3958,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
             });
         }
+    }
+
+    /**
+     * Whether a service task may start: true once the containers a previous run left behind are
+     * gone, retrying the sweep otherwise. Only a service that needs a task calls it, so an
+     * unreachable Docker daemon costs nothing while no task is due, and it is reported once.
+     */
+    private boolean leftoverContainersCleared() {
+        if (leftoverContainersRemoved) {
+            return true;
+        }
+        leftoverContainersRemoved = containerManager.removeLeftoverContainers();
+        if (leftoverContainersRemoved) {
+            LOG.info("The containers a previous ECS run left behind are gone; starting service tasks");
+        } else if (!leftoverContainersBlockReported) {
+            leftoverContainersBlockReported = true;
+            LOG.warn("Not starting ECS service tasks while a previous run's containers remain;"
+                    + " retrying whenever a service needs a task");
+        }
+        return leftoverContainersRemoved;
     }
 
     private Set<String> reconcilableAccountIds() {
@@ -4253,6 +4267,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (covered.contains(ci.getContainerInstanceArn())) {
                 continue;
             }
+            if (!leftoverContainersCleared()) {
+                break;
+            }
             try {
                 EcsTask launched = launchServiceTask(cluster, svc, LaunchType.EC2,
                         ci.getContainerInstanceArn(), region);
@@ -4390,6 +4407,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         if (current < svc.getDesiredCount()) {
+            if (!leftoverContainersCleared()) {
+                return;
+            }
             int toStart = svc.getDesiredCount() - (int) current;
             for (int i = 0; i < toStart; i++) {
                 try {

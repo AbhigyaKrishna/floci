@@ -505,7 +505,8 @@ nothing manages:
   Floci sharing the daemon stay, and are told apart from the current run's by a per-process
   `floci.ecs-run` label rather than by creation time. Containers created by a Floci version without that label are
   not recognised and must be removed by hand once. If Docker cannot list or remove one, the
-  service scheduler starts no task and retries on each reconciliation tick until it is gone.
+  service scheduler starts no task until it is gone, retrying the removal on each reconciliation
+  tick in which a service needs a task. The failure is logged as a warning once.
 - Every load balancer target and Cloud Map instance a previous run's tasks registered is
   deregistered. Floci registers task containers by address, and Docker hands a dead container's
   address to the next container it starts, so a stale target would route to an unrelated
