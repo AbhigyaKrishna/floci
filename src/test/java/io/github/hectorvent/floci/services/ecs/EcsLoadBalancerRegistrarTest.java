@@ -187,6 +187,21 @@ class EcsLoadBalancerRegistrarTest {
                 "a target registered just before the process died should be released");
     }
 
+    @Test
+    void aTargetRegisteredByHandAtTheTasksAddressIsNeverRecordedOrRemoved() {
+        String tgArn = createTargetGroup("reg-tg-preexisting");
+        elbV2Service.registerTargets(REGION, tgArn, List.of(target("127.0.0.1", 39000)));
+        EcsTask task = taskWithContainer("web", 8080, 39000);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, REGION);
+        registrar.releaseRecordedTargets();
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size(), "the target registered by hand should survive the release");
+        assertEquals(39000, health.get(0).getTarget().getPort());
+    }
+
     /** Stands in for the process dying between the registration and anything after it. */
     private static final class ProcessKilled extends Error {
     }

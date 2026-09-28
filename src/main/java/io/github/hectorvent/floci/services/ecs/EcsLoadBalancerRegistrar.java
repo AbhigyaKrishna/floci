@@ -53,12 +53,20 @@ public class EcsLoadBalancerRegistrar {
     /**
      * Registers the task's load-balanced containers as ELBv2 targets. The targets are recorded
      * before they are registered, so a process killed in between still leaves a record for the
-     * next run to release; releasing a recorded target that never registered is harmless.
+     * next run to release. A target already in its group, as one registered by hand, is neither
+     * recorded nor registered: ECS did not add it, so neither a task stop nor the startup release
+     * may remove it, and releasing a recorded target that never registered then removes nothing.
      */
     public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
         List<EcsRegisteredTargets.Target> planned = new ArrayList<>();
-        forEachTarget(task, svc, (tgArn, td) ->
-                planned.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort())));
+        forEachTarget(task, svc, (tgArn, td) -> {
+            if (alreadyRegistered(region, tgArn, td)) {
+                LOG.infov("ECS task target {0}:{1} is already registered in target group {2}; leaving it as is",
+                        td.getId(), td.getPort(), tgArn);
+                return;
+            }
+            planned.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort()));
+        });
         if (planned.isEmpty()) {
             return;
         }
@@ -115,6 +123,18 @@ public class EcsLoadBalancerRegistrar {
             RequestScopes.runAs(entry.accountId(), () -> deregister(entry.value()));
             ledger.deleteForAccount(entry.accountId(), entry.key());
             LOG.infov("Released the load balancer targets of ECS task {0} left by a previous run", entry.key());
+        }
+    }
+
+    private boolean alreadyRegistered(String region, String tgArn, TargetDescription td) {
+        try {
+            return elbV2Service.describeTargetHealth(region, tgArn, List.of(td)).stream()
+                    .noneMatch(health -> "Target.NotRegistered".equals(health.getReason()));
+        } catch (Exception e) {
+            // A missing target group: the registration that follows fails and is logged there.
+            LOG.debugv("Could not look up target {0}:{1} in {2}: {3}", td.getId(), td.getPort(), tgArn,
+                    e.getMessage());
+            return false;
         }
     }
 

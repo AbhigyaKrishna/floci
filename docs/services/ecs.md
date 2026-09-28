@@ -512,7 +512,8 @@ nothing manages:
   container. ECS records each registration it makes in its persisted state and releases exactly
   those, so a target or instance registered through the ELBv2 or Cloud Map API, even into the
   same target group or Cloud Map service, stays. A registration is recorded before it is made,
-  so one cut short by the process dying is still released. Registrations made by a Floci
+  so one cut short by the process dying is still released, and a target already in its group
+  when a task starts is left to whoever registered it and never recorded. Registrations made by a Floci
   version that kept no record are not recognised either, and must be deregistered by hand once.
 
 #### Unknown services
