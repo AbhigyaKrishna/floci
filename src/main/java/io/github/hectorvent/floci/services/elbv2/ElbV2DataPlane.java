@@ -728,7 +728,7 @@ public class ElbV2DataPlane {
                         }
                     });
                     if (!preserveHostHeader) {
-                        clientReq.putHeader("Host", host + ":" + port);
+                        clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
                     }
                     AtomicBoolean responseStarted = new AtomicBoolean();
                     AtomicBoolean requestFailed = new AtomicBoolean();
@@ -837,7 +837,7 @@ public class ElbV2DataPlane {
                     clientReq.putHeader("Connection", "Upgrade");
                     clientReq.putHeader("Upgrade", req.getHeader("Upgrade"));
                     if (!preserveHostHeader) {
-                        clientReq.putHeader("Host", host + ":" + port);
+                        clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
                     }
                     clientReq.connect()
                             .onSuccess(resp -> {

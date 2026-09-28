@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpServer;
@@ -26,6 +29,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 
 @QuarkusTest
 @TestProfile(RealElbV2DataPlaneProfile.class)
@@ -34,9 +40,13 @@ class ElbV2WebSocketIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260927/us-east-1/elasticloadbalancing/aws4_request";
     private static final int LISTENER_PORT = 7795;
+    private static final String INSTANCE_ID = "i-0websocket0000001";
 
     @Inject
     Vertx vertx;
+
+    @InjectSpy
+    Ec2Service ec2Service;
 
     private HttpServer backend;
     private HttpClient client;
@@ -64,8 +74,8 @@ class ElbV2WebSocketIntegrationTest {
                 .get(2, TimeUnit.SECONDS);
         client = vertx.createHttpClient();
         loadBalancerArn = createLoadBalancer();
-        targetGroupArn = createTargetGroup(backend.actualPort());
-        registerTarget(targetGroupArn, backend.actualPort());
+        targetGroupArn = createTargetGroup("websocket-tg", "ip", backend.actualPort());
+        registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
         listenerArn = createListener(loadBalancerArn, targetGroupArn);
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> given()
                 .baseUri("http://127.0.0.1")
@@ -93,6 +103,30 @@ class ElbV2WebSocketIntegrationTest {
             assertEquals("EIO=4&transport=websocket:again", exchange(socket, "again"));
         } finally {
             socket.close();
+        }
+    }
+
+    @Test
+    void tunnelsWebSocketUpgradeToInstanceTarget() throws Exception {
+        Instance instance = new Instance();
+        instance.setInstanceId(INSTANCE_ID);
+        instance.setContainerBridgeIp("127.0.0.1");
+        doReturn(instance).when(ec2Service).findInstanceById(anyString(), eq(INSTANCE_ID));
+        String instanceTargetGroupArn = createTargetGroup("websocket-instance-tg", "instance", backend.actualPort());
+        try {
+            registerTarget(instanceTargetGroupArn, INSTANCE_ID, backend.actualPort());
+            forwardDefaultActionTo(listenerArn, instanceTargetGroupArn);
+
+            WebSocket socket = connect("/socket.io/?transport=websocket");
+            try {
+                assertEquals("transport=websocket:hello", exchange(socket, "hello"));
+            } finally {
+                socket.close();
+            }
+        } finally {
+            deleteListener(listenerArn);
+            listenerArn = null;
+            deleteTargetGroup(instanceTargetGroupArn);
         }
     }
 
@@ -238,13 +272,13 @@ class ElbV2WebSocketIntegrationTest {
                 .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
     }
 
-    private static String createTargetGroup(int backendPort) {
+    private static String createTargetGroup(String name, String targetType, int backendPort) {
         return given()
                 .formParam("Action", "CreateTargetGroup")
-                .formParam("Name", "websocket-tg")
+                .formParam("Name", name)
                 .formParam("Protocol", "HTTP")
                 .formParam("Port", backendPort)
-                .formParam("TargetType", "ip")
+                .formParam("TargetType", targetType)
                 .formParam("HealthCheckEnabled", "false")
                 .header("Authorization", AUTH)
             .when()
@@ -255,11 +289,11 @@ class ElbV2WebSocketIntegrationTest {
                 .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
     }
 
-    private static void registerTarget(String targetGroupArn, int backendPort) {
+    private static void registerTarget(String targetGroupArn, String targetId, int backendPort) {
         given()
                 .formParam("Action", "RegisterTargets")
                 .formParam("TargetGroupArn", targetGroupArn)
-                .formParam("Targets.member.1.Id", "127.0.0.1")
+                .formParam("Targets.member.1.Id", targetId)
                 .formParam("Targets.member.1.Port", backendPort)
                 .header("Authorization", AUTH)
             .when()
