@@ -1234,10 +1234,7 @@ public class LambdaService implements ResourceProvider {
         Integer maximumBatchingWindowInSeconds = parseMaximumBatchingWindow(request);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
-        @SuppressWarnings("unchecked")
-        List<String> functionResponseTypes = request.get("FunctionResponseTypes") instanceof List
-                ? (List<String>) request.get("FunctionResponseTypes")
-                : new ArrayList<>();
+        List<String> functionResponseTypes = parseFunctionResponseTypes(request);
 
         ScalingConfig scalingConfig = parseScalingConfig(request, eventSourceArn);
 
@@ -1319,6 +1316,13 @@ public class LambdaService implements ResourceProvider {
         EventSourceMapping.DestinationConfig destinationConfig = new EventSourceMapping.DestinationConfig();
         destinationConfig.setOnFailure(onFailure);
         return destinationConfig;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> parseFunctionResponseTypes(Map<String, Object> request) {
+        return request.get("FunctionResponseTypes") instanceof List
+                ? new ArrayList<>((List<String>) request.get("FunctionResponseTypes"))
+                : new ArrayList<>();
     }
 
     /**
@@ -1792,6 +1796,12 @@ public class LambdaService implements ResourceProvider {
             // AWS: passing FilterCriteria replaces the whole set; an empty object or an empty
             // Filters array clears all filters.
             esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
+        }
+
+        if (request.containsKey("FunctionResponseTypes")) {
+            // AWS: passing FunctionResponseTypes replaces the list; an empty list turns
+            // ReportBatchItemFailures off.
+            esm.setFunctionResponseTypes(parseFunctionResponseTypes(request));
         }
 
         if (request.containsKey("FunctionName")) {
