@@ -66,6 +66,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
@@ -2123,6 +2124,41 @@ class Ec2ServiceTest {
         assertEquals("InsufficientFreeAddressesInSubnet", assertThrows(AwsException.class,
                 () -> service.createNetworkInterface("us-east-1", subnetId, null,
                         null, List.of(), List.of(), List.of())).getErrorCode());
+    }
+
+    @Test
+    void concurrentCreatesInASmallSubnetNeverShareASynthesisedAddress() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.73.0.0/16", false).getVpcId();
+        int rounds = 20;
+        int usable = 11;
+        ExecutorService executor = Executors.newFixedThreadPool(usable);
+        try {
+            for (int round = 0; round < rounds; round++) {
+                String subnetId = service.createSubnet("us-east-1", vpcId, "10.73." + round + ".0/28",
+                        "us-east-1a").getSubnetId();
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<String>> creates = new ArrayList<>();
+                for (int i = 0; i < usable; i++) {
+                    creates.add(executor.submit(() -> {
+                        start.await();
+                        return service.createNetworkInterface("us-east-1", subnetId, null,
+                                null, List.of(), List.of(), List.of()).getPrivateIpAddress();
+                    }));
+                }
+                start.countDown();
+                Set<String> addresses = new HashSet<>();
+                for (Future<String> create : creates) {
+                    String address = create.get(10, TimeUnit.SECONDS);
+                    assertTrue(addresses.add(address), "handed out twice: " + address);
+                }
+                assertEquals(usable, addresses.size());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test

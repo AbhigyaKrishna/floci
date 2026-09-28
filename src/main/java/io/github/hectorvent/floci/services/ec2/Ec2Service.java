@@ -245,6 +245,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
     // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
     private final Map<String, Long> subnetIpCursors = new HashMap<>();
+    // Held from a synthesised address being chosen until the resource holding it is persisted, so
+    // a concurrent allocation, which reads persisted resources to see what is taken, cannot pick
+    // the same address in between. Taken after imageRegistryLock where a caller holds both.
+    private final Object privateIpAllocationLock = new Object();
 
     /**
      * Null in the hermetic unit tests, which reach the constructors that do not take it; CDI always
@@ -2956,6 +2960,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // outside.
         ResolvedAmiImage dockerImage = null;
         synchronized (imageRegistryLock) {
+        synchronized (privateIpAllocationLock) {
             requireNotDeregistered(region, imageId);
             if (!config.services().ec2().mock()) {
                 // A CreateImage AMI is not in the catalog, so resolve through its source. The
@@ -3078,6 +3083,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 launched.add(inst);
                 reservation.getInstances().add(inst);
             }
+        }
         }
 
         // Outside the lock: the containers are what the lock protects a reference to, not part of
@@ -3330,7 +3336,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw insufficientFreeAddresses(subnetId);
         }
         String cursorKey = key(region, subnetId);
-        synchronized (subnetIpCursors) {
+        synchronized (privateIpAllocationLock) {
             // The addresses persisted resources already hold, so a restart, which forgets the
             // cursor, never hands out an address that is still in use.
             Set<String> inUse = privateIpsInUse(region, subnetId);
@@ -8047,12 +8053,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         natGateway.setConnectivityType(connectivityType != null && !connectivityType.isBlank() ? connectivityType : "public");
         natGateway.setCreateTime(Instant.now());
         natGateway.setRegion(region);
-        natGateway.getNatGatewayAddresses().add(natGatewayAddress(region, subnetId, allocationId));
-        if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
-            natGateway.setTags(new ArrayList<>(natGatewayTags));
-            tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
+        synchronized (privateIpAllocationLock) {
+            natGateway.getNatGatewayAddresses().add(natGatewayAddress(region, subnetId, allocationId));
+            if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
+                natGateway.setTags(new ArrayList<>(natGatewayTags));
+                tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
+            }
+            natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
         }
-        natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
         return natGateway;
     }
 
@@ -9273,49 +9281,51 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
         }
 
-        String eniId = "eni-" + randomHex(17);
-        String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
-                ? privateIpAddress : assignPrivateIp(region, subnetId);
-        String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
+        synchronized (privateIpAllocationLock) {
+            String eniId = "eni-" + randomHex(17);
+            String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
+                    ? privateIpAddress : assignPrivateIp(region, subnetId);
+            String primaryDns = "ip-" + primaryIp.replace('.', '-') + ".ec2.internal";
 
-        NetworkInterface ni = new NetworkInterface();
-        ni.setNetworkInterfaceId(eniId);
-        ni.setSubnetId(subnetId);
-        ni.setVpcId(subnet.getVpcId());
-        ni.setAvailabilityZone(subnet.getAvailabilityZone());
-        ni.setDescription(description);
-        ni.setOwnerId(callerAccountId());
-        ni.setStatus("available");
-        ni.setMacAddress(randomMac());
-        ni.setPrivateIpAddress(primaryIp);
-        ni.setPrivateDnsName(primaryDns);
-        ni.setGroups(sgIdentifiers);
-        if (tagList != null) {
-            ni.getTagSet().addAll(tagList);
-        }
-
-        List<NetworkInterfacePrivateIpAddress> ipList = new ArrayList<>();
-        NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
-        primary.setPrivateIpAddress(primaryIp);
-        primary.setPrivateDnsName(primaryDns);
-        primary.setPrimary(true);
-        ipList.add(primary);
-        if (privateIpAddresses != null) {
-            for (String extra : privateIpAddresses) {
-                if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
-                    continue;
-                }
-                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
-                secondary.setPrivateIpAddress(extra);
-                secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
-                secondary.setPrimary(false);
-                ipList.add(secondary);
+            NetworkInterface ni = new NetworkInterface();
+            ni.setNetworkInterfaceId(eniId);
+            ni.setSubnetId(subnetId);
+            ni.setVpcId(subnet.getVpcId());
+            ni.setAvailabilityZone(subnet.getAvailabilityZone());
+            ni.setDescription(description);
+            ni.setOwnerId(callerAccountId());
+            ni.setStatus("available");
+            ni.setMacAddress(randomMac());
+            ni.setPrivateIpAddress(primaryIp);
+            ni.setPrivateDnsName(primaryDns);
+            ni.setGroups(sgIdentifiers);
+            if (tagList != null) {
+                ni.getTagSet().addAll(tagList);
             }
-        }
-        ni.setPrivateIpAddresses(ipList);
 
-        networkInterfaces.put(key(region, eniId), ni);
-        return ni;
+            List<NetworkInterfacePrivateIpAddress> ipList = new ArrayList<>();
+            NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
+            primary.setPrivateIpAddress(primaryIp);
+            primary.setPrivateDnsName(primaryDns);
+            primary.setPrimary(true);
+            ipList.add(primary);
+            if (privateIpAddresses != null) {
+                for (String extra : privateIpAddresses) {
+                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
+                        continue;
+                    }
+                    NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                    secondary.setPrivateIpAddress(extra);
+                    secondary.setPrivateDnsName("ip-" + extra.replace('.', '-') + ".ec2.internal");
+                    secondary.setPrimary(false);
+                    ipList.add(secondary);
+                }
+            }
+            ni.setPrivateIpAddresses(ipList);
+
+            networkInterfaces.put(key(region, eniId), ni);
+            return ni;
+        }
     }
 
     /**
