@@ -1,19 +1,26 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
+import io.github.hectorvent.floci.services.ecs.model.EcsRegisteredTargets;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
-import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.function.BiConsumer;
 
 /**
@@ -31,79 +38,87 @@ public class EcsLoadBalancerRegistrar {
 
     private final ElbV2Service elbV2Service;
     private final EcsContainerManager containerManager;
+    // taskArn → the targets registered for it, persisted so they can be released after a restart
+    private final AccountAwareStorageBackend<EcsRegisteredTargets> ledger;
 
     @Inject
-    public EcsLoadBalancerRegistrar(ElbV2Service elbV2Service, EcsContainerManager containerManager) {
+    public EcsLoadBalancerRegistrar(ElbV2Service elbV2Service, EcsContainerManager containerManager,
+                                    StorageFactory storageFactory) {
         this.elbV2Service = elbV2Service;
         this.containerManager = containerManager;
+        this.ledger = storageFactory.create("ecs", "ecs-registered-targets.json",
+                new TypeReference<Map<String, EcsRegisteredTargets>>() {});
     }
 
-    /** Registers the task's load-balanced containers as ELBv2 targets. */
+    /** Registers the task's load-balanced containers as ELBv2 targets, and records them. */
     public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
+        List<EcsRegisteredTargets.Target> registered = new ArrayList<>();
         forEachTarget(task, svc, (tgArn, td) -> {
             try {
                 elbV2Service.registerTargets(region, tgArn, List.of(td));
+                registered.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort()));
                 LOG.infov("Registered ECS task target {0}:{1} into target group {2}",
                         td.getId(), td.getPort(), tgArn);
             } catch (Exception e) {
                 LOG.warnv("Could not register ECS target into {0}: {1}", tgArn, e.getMessage());
             }
         });
-    }
-
-    /** Deregisters the task's load-balanced containers from their ELBv2 target groups. */
-    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
-        forEachTarget(task, svc, (tgArn, td) -> {
-            try {
-                elbV2Service.deregisterTargets(region, tgArn, List.of(td));
-                LOG.infov("Deregistered ECS task target {0}:{1} from target group {2}",
-                        td.getId(), td.getPort(), tgArn);
-            } catch (Exception e) {
-                LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
-            }
-        });
+        if (!registered.isEmpty() && task.getTaskArn() != null) {
+            ledger.put(task.getTaskArn(), new EcsRegisteredTargets(region, List.copyOf(registered)));
+        }
     }
 
     /**
-     * Deregisters every address target in the service's target groups. Only for startup, when
-     * ECS holds no task at all: task state is memory-only, so each such target was registered for
-     * a task of a previous run whose container is gone or is being removed, and Docker is free to
-     * hand its address to an unrelated container. Instance and Lambda targets are never ECS's and
-     * stay registered.
+     * Deregisters the task's load-balanced containers from their ELBv2 target groups: the targets
+     * {@link #registerTask} recorded, or, for a task it holds no record of, the ones its
+     * containers resolve to now.
      */
-    public void deregisterStaleTargets(EcsServiceModel svc, String region) {
-        if (svc.getLoadBalancers() == null) {
+    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+        Optional<EcsRegisteredTargets> recorded = task.getTaskArn() == null
+                ? Optional.empty() : ledger.get(task.getTaskArn());
+        if (recorded.isPresent()) {
+            deregister(recorded.get());
+            ledger.delete(task.getTaskArn());
             return;
         }
-        for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
-            String tgArn = lb.getTargetGroupArn();
-            if (tgArn == null || tgArn.isBlank()) {
-                continue;
-            }
-            try {
-                TargetGroup tg = elbV2Service.getTargetGroup(region, tgArn);
-                if (tg == null || tg.getTargets() == null) {
-                    continue;
-                }
-                List<TargetDescription> stale = tg.getTargets().stream()
-                        .filter(td -> isAddress(td.getId()))
-                        .toList();
-                if (stale.isEmpty()) {
-                    continue;
-                }
-                elbV2Service.deregisterTargets(region, tgArn, stale);
-                LOG.infov("Deregistered {0} target(s) left in target group {1} by ECS service {2}''s previous tasks",
-                        stale.size(), tgArn, svc.getServiceName());
-            } catch (Exception e) {
-                LOG.warnv("Could not deregister stale ECS targets from {0}: {1}", tgArn, e.getMessage());
-            }
+        forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
+    }
+
+    /**
+     * Deregisters every target ECS recorded for a task, in every account. Only for startup, when
+     * ECS holds no task at all: task state is memory-only, so each recorded target belongs to a
+     * task of a previous run whose container is gone or is being removed, and Docker is free to
+     * hand its address to an unrelated container. Targets ECS did not register are never touched.
+     */
+    public void releaseRecordedTargets() {
+        for (AccountAwareStorageBackend.AccountEntry<EcsRegisteredTargets> entry
+                : ledger.scanAllAccountEntries(key -> true)) {
+            RequestScopes.runAs(entry.accountId(), () -> deregister(entry.value()));
+            ledger.deleteForAccount(entry.accountId(), entry.key());
+            LOG.infov("Released the load balancer targets of ECS task {0} left by a previous run", entry.key());
         }
     }
 
-    /** An IP literal, the only kind of target id ECS registers; instance ids and ARNs are not. */
-    private static boolean isAddress(String targetId) {
-        return targetId != null && (targetId.contains(":") && !targetId.startsWith("arn:")
-                || targetId.matches("[0-9.]+"));
+    private void deregister(EcsRegisteredTargets recorded) {
+        if (recorded.targets() == null) {
+            return;
+        }
+        for (EcsRegisteredTargets.Target target : recorded.targets()) {
+            TargetDescription td = new TargetDescription();
+            td.setId(target.id());
+            td.setPort(target.port());
+            deregister(recorded.region(), target.targetGroupArn(), td);
+        }
+    }
+
+    private void deregister(String region, String tgArn, TargetDescription td) {
+        try {
+            elbV2Service.deregisterTargets(region, tgArn, List.of(td));
+            LOG.infov("Deregistered ECS task target {0}:{1} from target group {2}",
+                    td.getId(), td.getPort(), tgArn);
+        } catch (Exception e) {
+            LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
+        }
     }
 
     private void forEachTarget(EcsTask task, EcsServiceModel svc,

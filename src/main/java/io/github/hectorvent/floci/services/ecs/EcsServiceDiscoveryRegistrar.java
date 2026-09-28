@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
-import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
+import io.github.hectorvent.floci.services.ecs.model.EcsRegisteredInstances;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
@@ -36,11 +40,16 @@ public class EcsServiceDiscoveryRegistrar {
 
     private final CloudMapService cloudMapService;
     private final EcsContainerManager containerManager;
+    // taskArn → the instance registered for it, persisted so it can be released after a restart
+    private final AccountAwareStorageBackend<EcsRegisteredInstances> ledger;
 
     @Inject
-    public EcsServiceDiscoveryRegistrar(CloudMapService cloudMapService, EcsContainerManager containerManager) {
+    public EcsServiceDiscoveryRegistrar(CloudMapService cloudMapService, EcsContainerManager containerManager,
+                                        StorageFactory storageFactory) {
         this.cloudMapService = cloudMapService;
         this.containerManager = containerManager;
+        this.ledger = storageFactory.create("ecs", "ecs-registered-instances.json",
+                new TypeReference<Map<String, EcsRegisteredInstances>>() {});
     }
 
     /** Registers the task as a Cloud Map instance of every service registry the ECS service declares. */
@@ -69,6 +78,9 @@ public class EcsServiceDiscoveryRegistrar {
             }
         }
         task.setServiceDiscoveryServiceIds(List.copyOf(registered));
+        if (!registered.isEmpty() && task.getTaskArn() != null) {
+            ledger.put(task.getTaskArn(), new EcsRegisteredInstances(region, instanceId, List.copyOf(registered)));
+        }
     }
 
     /** Deregisters the task from the Cloud Map services it actually registered in. */
@@ -87,37 +99,38 @@ public class EcsServiceDiscoveryRegistrar {
             }
         }
         task.setServiceDiscoveryServiceIds(List.of());
+        if (task.getTaskArn() != null) {
+            ledger.delete(task.getTaskArn());
+        }
     }
 
     /**
-     * Deregisters the instances this ECS service registered for tasks of a previous run. Only for
+     * Deregisters every Cloud Map instance ECS recorded for a task, in every account. Only for
      * startup, when ECS holds no task at all: task state is memory-only, so none of them can still
-     * be a live task. They are recognised by the {@code ECS_SERVICE_NAME} and
-     * {@code ECS_CLUSTER_NAME} attributes {@link #registerTask} records, so an instance registered
-     * through the Cloud Map API stays.
+     * be a live task. Instances ECS did not register, including ones registered through the Cloud
+     * Map API, are never touched.
      */
-    public void deregisterStaleInstances(EcsServiceModel svc, String clusterName, String region) {
-        for (Map<String, Object> registry : registries(svc)) {
-            String cloudMapServiceId = cloudMapServiceId(registry);
-            if (cloudMapServiceId == null) {
-                continue;
-            }
-            try {
-                for (Instance instance : cloudMapService.listInstances(cloudMapServiceId)) {
-                    Map<String, String> attributes = instance.getAttributes();
-                    if (attributes == null
-                            || !svc.getServiceName().equals(attributes.get("ECS_SERVICE_NAME"))
-                            || !clusterName.equals(attributes.get("ECS_CLUSTER_NAME"))) {
-                        continue;
+    public void releaseRecordedInstances() {
+        for (AccountAwareStorageBackend.AccountEntry<EcsRegisteredInstances> entry
+                : ledger.scanAllAccountEntries(key -> true)) {
+            EcsRegisteredInstances recorded = entry.value();
+            List<String> cloudMapServiceIds = recorded.cloudMapServiceIds() != null
+                    ? recorded.cloudMapServiceIds() : List.of();
+            RequestScopes.runAs(entry.accountId(), () -> {
+                for (String cloudMapServiceId : cloudMapServiceIds) {
+                    try {
+                        cloudMapService.deregisterInstance(cloudMapServiceId, recorded.instanceId(),
+                                recorded.region());
+                        LOG.infov("Deregistered Cloud Map instance {0} of {1} left by a previous ECS task",
+                                recorded.instanceId(), cloudMapServiceId);
+                    } catch (Exception e) {
+                        // Already gone, as when its Cloud Map service was deleted: nothing left to release.
+                        LOG.debugv("Could not deregister Cloud Map instance {0} of {1}: {2}",
+                                recorded.instanceId(), cloudMapServiceId, e.getMessage());
                     }
-                    cloudMapService.deregisterInstance(cloudMapServiceId, instance.getInstanceId(), region);
-                    LOG.infov("Deregistered Cloud Map instance {0} of {1} left by a previous ECS task",
-                            instance.getInstanceId(), cloudMapServiceId);
                 }
-            } catch (Exception e) {
-                LOG.warnv("Could not deregister stale ECS instances from Cloud Map service {0}: {1}",
-                        cloudMapServiceId, e.getMessage());
-            }
+            });
+            ledger.deleteForAccount(entry.accountId(), entry.key());
         }
     }
 

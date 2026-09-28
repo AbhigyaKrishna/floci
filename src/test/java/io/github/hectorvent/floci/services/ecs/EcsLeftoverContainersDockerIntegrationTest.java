@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -80,9 +81,11 @@ class EcsLeftoverContainersDockerIntegrationTest {
 
             foreignId = createForeignEcsContainer();
 
-            int removed = containerManager.removeLeftoverContainers();
+            assertTrue(containerManager.removeLeftoverContainers(), "the sweep must succeed");
+            assertTrue(exists(taskContainerId), "a task container this run started must stay");
 
-            assertTrue(removed >= 1, "the task container must be swept");
+            assertTrue(containerManager.removeLeftoverContainers(Instant.now().plusSeconds(1)),
+                    "the sweep must succeed");
             assertFalse(exists(taskContainerId), "the leftover task container must be removed");
             assertTrue(exists(foreignId), "another Floci's container must stay");
         } finally {

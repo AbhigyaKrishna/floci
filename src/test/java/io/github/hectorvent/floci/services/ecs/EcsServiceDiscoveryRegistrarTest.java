@@ -140,27 +140,23 @@ class EcsServiceDiscoveryRegistrarTest {
     }
 
     @Test
-    void deregisterStaleInstancesRemovesOnlyThisServicesTaskInstances() {
+    void releaseRecordedInstancesKeepsInstancesRegisteredByHand() {
         String namespace = uniqueName("svcdisc") + ".internal";
         Service cloudMapSvc = createDnsService(namespace, "web");
         EcsServiceModel web = serviceWithRegistry(cloudMapSvc.getArn(), "web", 8080);
         web.setServiceName("web-svc");
-        EcsServiceModel other = serviceWithRegistry(cloudMapSvc.getArn(), "web", 8080);
-        other.setServiceName("other-svc");
         registrar.registerTask(taskInCluster("172.31.0.11", "payments"), web, REGION);
         registrar.registerTask(taskInCluster("172.31.0.12", "payments"), web, REGION);
-        registrar.registerTask(taskInCluster("172.31.0.13", "payments"), other, REGION);
-        registrar.registerTask(taskInCluster("172.31.0.14", "billing"), web, REGION);
         cloudMapService.registerInstance(cloudMapSvc.getId(), "registered-by-hand", null,
-                Map.of("AWS_INSTANCE_IPV4", "172.31.0.15"), REGION);
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.15",
+                        "ECS_SERVICE_NAME", "web-svc", "ECS_CLUSTER_NAME", "payments"), REGION);
 
-        registrar.deregisterStaleInstances(web, "payments", REGION);
+        registrar.releaseRecordedInstances();
 
         List<String> remaining = cloudMapService.listInstances(cloudMapSvc.getId()).stream()
-                .map(instance -> instance.getAttributes().get("AWS_INSTANCE_IPV4"))
-                .sorted()
+                .map(Instance::getInstanceId)
                 .toList();
-        assertEquals(List.of("172.31.0.13", "172.31.0.14", "172.31.0.15"), remaining);
+        assertEquals(List.of("registered-by-hand"), remaining);
     }
 
     private Service createDnsService(String namespaceName, String serviceName) {

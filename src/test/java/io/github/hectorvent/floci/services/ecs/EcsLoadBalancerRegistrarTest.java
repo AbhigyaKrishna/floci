@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -48,7 +49,7 @@ class EcsLoadBalancerRegistrarTest {
         container.setNetworkBindings(List.of(
                 new NetworkBinding("0.0.0.0", containerPort, hostPort, "tcp")));
         EcsTask task = new EcsTask();
-        task.setTaskArn("arn:aws:ecs:" + REGION + ":000000000000:task/c/regtest");
+        task.setTaskArn("arn:aws:ecs:" + REGION + ":000000000000:task/c/" + UUID.randomUUID());
         task.setGroup("regtest-svc");
         task.setContainers(List.of(container));
         return task;
@@ -128,26 +129,41 @@ class EcsLoadBalancerRegistrarTest {
     }
 
     @Test
-    void deregisterStaleTargetsRemovesAddressTargetsAndKeepsInstanceTargets() {
+    void releaseRecordedTargetsKeepsATargetRegisteredByHand() {
         String tgArn = createTargetGroup("reg-tg-stale");
-        elbV2Service.registerTargets(REGION, tgArn, List.of(
-                target("172.18.0.7", 8080), target("127.0.0.1", 34567), target("i-0123456789abcdef0", 80)));
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        registrar.registerTask(taskWithContainer("web", 8080, 34567), serviceWithLb(tgArn, "web", 8080), REGION);
+        elbV2Service.registerTargets(REGION, tgArn, List.of(target("172.18.0.7", 8080)));
 
-        registrar.deregisterStaleTargets(svc, REGION);
+        registrar.releaseRecordedTargets();
 
         List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
-        assertEquals(1, health.size(), "only the instance target should survive");
-        assertEquals("i-0123456789abcdef0", health.get(0).getTarget().getId());
+        assertEquals(1, health.size(), "only the target registered by hand should survive");
+        assertEquals("172.18.0.7", health.get(0).getTarget().getId());
     }
 
     @Test
-    void deregisterStaleTargetsToleratesAMissingTargetGroup() {
-        EcsServiceModel svc = serviceWithLb(
-                "arn:aws:elasticloadbalancing:" + REGION + ":000000000000:targetgroup/gone/0123456789abcdef",
-                "web", 8080);
+    void deregisterTaskRemovesTheTargetItRecordedEvenAfterTheBindingChanged() {
+        String tgArn = createTargetGroup("reg-tg-recorded");
+        EcsTask task = taskWithContainer("web", 8080, 35000);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        registrar.registerTask(task, svc, REGION);
+        task.getContainers().getFirst().setNetworkBindings(List.of(
+                new NetworkBinding("0.0.0.0", 8080, 36000, "tcp")));
 
-        registrar.deregisterStaleTargets(svc, REGION);
+        registrar.deregisterTask(task, svc, REGION);
+
+        assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
+                "the recorded target should be deregistered");
+    }
+
+    @Test
+    void releaseRecordedTargetsToleratesADeletedTargetGroup() {
+        String tgArn = createTargetGroup("reg-tg-gone");
+        EcsTask task = taskWithContainer("web", 8080, 37000);
+        registrar.registerTask(task, serviceWithLb(tgArn, "web", 8080), REGION);
+        elbV2Service.deleteTargetGroup(REGION, tgArn);
+
+        registrar.releaseRecordedTargets();
     }
 
     private static TargetDescription target(String id, int port) {

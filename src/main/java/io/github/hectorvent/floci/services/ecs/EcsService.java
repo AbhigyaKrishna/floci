@@ -116,6 +116,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
     private final Object reconcilerLock = new Object();
+    // False until a previous run's task containers are confirmed gone; the scheduler waits for it.
+    private volatile boolean leftoverContainersRemoved = true;
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
@@ -228,33 +230,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * ended without a graceful shutdown leaves its task containers serving, and even a graceful one
      * leaves their load balancer targets and Cloud Map instances registered. Left alone, each
      * service would serve from its replacements and a task nothing manages, and a dead task's
-     * target would follow its address to whichever container Docker hands it to next.
+     * target would follow its address to whichever container Docker hands it to next. Only what
+     * the registrars recorded registering is released, never a target or instance registered by
+     * hand. A container Docker would not remove is retried by {@link #reconcile()}, which starts
+     * no service task until it is gone.
      */
     void releasePreviousRunLeftovers() {
         if (dockerMode) {
-            containerManager.removeLeftoverContainers();
+            leftoverContainersRemoved = containerManager.removeLeftoverContainers();
         }
-        for (String accountId : reconcilableAccountIds()) {
-            RequestScopes.runAs(accountId, () -> {
-                for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
-                    try {
-                        releaseStaleRegistrations(entry.getKey(), entry.getValue());
-                    } catch (Exception e) {
-                        LOG.warnv("Could not release the registrations of ECS service {0}: {1}",
-                                entry.getKey(), e.getMessage());
-                    }
-                }
-            });
-        }
-    }
-
-    private void releaseStaleRegistrations(String key, EcsServiceModel svc) {
-        String region = extractRegionFromServiceKey(key);
         if (lbRegistrar != null) {
-            lbRegistrar.deregisterStaleTargets(svc, region);
+            lbRegistrar.releaseRecordedTargets();
         }
-        if (discoveryRegistrar != null && discoveryRegistrar.hasRegistries(svc)) {
-            discoveryRegistrar.deregisterStaleInstances(svc, extractClusterNameFromServiceKey(key), region);
+        if (discoveryRegistrar != null) {
+            discoveryRegistrar.releaseRecordedInstances();
         }
     }
 
@@ -3957,6 +3946,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             reconcileTasks();
         } catch (Exception e) {
             LOG.warnv(e, "ECS task reconciliation tick failed: {0}", e.getMessage());
+        }
+        if (!leftoverContainersRemoved) {
+            leftoverContainersRemoved = containerManager.removeLeftoverContainers();
+            if (!leftoverContainersRemoved) {
+                LOG.warn("Not starting ECS service tasks while a previous run's containers remain");
+                return;
+            }
         }
         for (String accountId : reconcilableAccountIds()) {
             RequestScopes.runAs(accountId, () -> {

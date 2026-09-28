@@ -133,6 +133,7 @@ public class EcsContainerManager {
     private final EcsTaskRoleCredentials taskRoleCredentials;
     private final EcsCredentialsProxy credentialsProxy;
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
+    private final Instant startedAt = Instant.now();
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -1035,37 +1036,50 @@ public class EcsContainerManager {
     /**
      * Removes the ECS containers a previous run of this Floci left on the daemon: task containers
      * and the security-group helpers whose network namespace they share. Task state is memory-only,
-     * so at startup no container carrying this deployment's owner label belongs to a task this
-     * process knows. A graceful shutdown already stops them; this covers a run that ended without
-     * one (SIGKILL, OOM, a stop timeout that expired mid-drain), whose containers would otherwise
-     * keep serving beside the replacements the service scheduler starts. Containers created before
-     * the owner label existed carry none and are left alone.
+     * so no container carrying this deployment's owner label and created before this process
+     * started belongs to a task this process knows. A graceful shutdown already stops them; this
+     * covers a run that ended without one (SIGKILL, OOM, a stop timeout that expired mid-drain),
+     * whose containers would otherwise keep serving beside the replacements the service scheduler
+     * starts. Containers created before the owner label existed carry none and are left alone.
+     * Leaving out the ones this process created is what makes a retry safe once tasks run.
      *
-     * @return the number of containers removed
+     * @return whether every leftover is gone: false when Docker could not list or remove one
      */
-    public int removeLeftoverContainers() {
+    public boolean removeLeftoverContainers() {
+        return removeLeftoverContainers(startedAt);
+    }
+
+    /** {@link #removeLeftoverContainers()} for the containers created before {@code createdBefore}. */
+    public boolean removeLeftoverContainers(Instant createdBefore) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
-        int removed = 0;
+        List<com.github.dockerjava.api.model.Container> containers;
         try {
             // Docker's container summary, not the ECS model Container this class imports.
-            List<com.github.dockerjava.api.model.Container> containers = lifecycleManager.getDockerClient()
+            containers = lifecycleManager.getDockerClient()
                     .listContainersCmd()
                     .withShowAll(true)
                     .withLabelFilter(Map.of("io.floci.service", "ecs", ContainerStorageHelper.OWNER_LABEL, owner))
                     .exec();
-            for (com.github.dockerjava.api.model.Container container : containers) {
-                lifecycleManager.removeIfExists(container.getId());
-                removed++;
+        } catch (Exception e) {
+            LOG.warnv("Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
+            return false;
+        }
+        boolean allRemoved = true;
+        for (com.github.dockerjava.api.model.Container container : containers) {
+            if (container.getCreated() != null && container.getCreated() >= createdBefore.getEpochSecond()) {
+                continue;
+            }
+            try {
+                lifecycleManager.removeIfExistsStrict(container.getId());
                 LOG.infov("Removed ECS container {0} ({1}) left by a previous run", container.getId(),
                         container.getNames() == null ? "" : String.join(",", container.getNames()));
+            } catch (Exception e) {
+                allRemoved = false;
+                LOG.warnv("Could not remove ECS container {0} left by a previous run: {1}",
+                        container.getId(), e.getMessage());
             }
-        } catch (Exception e) {
-            LOG.warnv("Could not remove the ECS containers a previous run left behind: {0}", e.getMessage());
         }
-        if (removed > 0) {
-            LOG.infov("Removed {0} ECS container(s) left by a previous run", String.valueOf(removed));
-        }
-        return removed;
+        return allRemoved;
     }
 
     /** The ENI {@link #attachTaskNetwork} allocated for this task, or null if it is already gone. */

@@ -503,14 +503,14 @@ nothing manages:
   (SIGKILL, OOM, a stop timeout that expired mid-drain). Containers are recognised by the
   `floci_owner_port` label (the resource namespace and API port), so the containers of another
   Floci sharing the daemon stay. Containers created by a Floci version without that label are
-  not recognised and must be removed by hand once.
-- Every IP target in a target group named by a service's `loadBalancers` is deregistered.
-  Floci registers task containers by address, and Docker hands a dead container's address to
-  the next container it starts, so a stale target would route to an unrelated container.
-  Instance and Lambda targets stay.
-- Every Cloud Map instance a service's tasks registered is deregistered. They are recognised by
-  their `ECS_SERVICE_NAME` and `ECS_CLUSTER_NAME` attributes, so instances registered through
-  the Cloud Map API stay.
+  not recognised and must be removed by hand once. If Docker cannot list or remove one, the
+  service scheduler starts no task and retries on each reconciliation tick until it is gone.
+- Every load balancer target and Cloud Map instance a previous run's tasks registered is
+  deregistered. Floci registers task containers by address, and Docker hands a dead container's
+  address to the next container it starts, so a stale target would route to an unrelated
+  container. ECS records each registration it makes in its persisted state and releases exactly
+  those, so a target or instance registered through the ELBv2 or Cloud Map API, even into the
+  same target group or Cloud Map service, stays.
 
 #### Unknown services
 

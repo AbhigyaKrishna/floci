@@ -20,11 +20,10 @@ import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,21 +40,33 @@ class EcsServiceRestartLeftoversTest {
             "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/web/0123456789abcdef";
 
     @Test
-    void releasesTheRegistrationsOfEveryPersistedService() {
-        SharedStorageFactory storage = new SharedStorageFactory();
-        persistServiceWithLoadBalancer(storage);
+    void releasesTheRegistrationsThePreviousRunRecorded() {
         EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
         EcsServiceDiscoveryRegistrar discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
-        when(discoveryRegistrar.hasRegistries(any())).thenReturn(true);
 
-        EcsService restarted = service(storage, true, mock(EcsContainerManager.class),
-                lbRegistrar, discoveryRegistrar);
+        service(new SharedStorageFactory(), true, mock(EcsContainerManager.class),
+                lbRegistrar, discoveryRegistrar).releasePreviousRunLeftovers();
+
+        verify(lbRegistrar).releaseRecordedTargets();
+        verify(discoveryRegistrar).releaseRecordedInstances();
+    }
+
+    @Test
+    void theSchedulerWaitsUntilThePreviousRunsContainersAreRemoved() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        persistServiceWithLoadBalancer(storage);
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        when(containerManager.removeLeftoverContainers()).thenReturn(false, false, true);
+        EcsService restarted = service(storage, false, containerManager,
+                mock(EcsLoadBalancerRegistrar.class), null);
+
         restarted.releasePreviousRunLeftovers();
+        restarted.reconcile();
+        verify(containerManager, never()).startTask(any(), any(), any(), anyString());
 
-        verify(lbRegistrar).deregisterStaleTargets(argThat(svc -> "web-svc".equals(svc.getServiceName())),
-                eq(REGION));
-        verify(discoveryRegistrar).deregisterStaleInstances(
-                argThat(svc -> "web-svc".equals(svc.getServiceName())), eq("app-cluster"), eq(REGION));
+        restarted.reconcile();
+        restarted.reconcile();
+        verify(containerManager, times(3)).removeLeftoverContainers();
     }
 
     @Test
@@ -106,7 +117,7 @@ class EcsServiceRestartLeftoversTest {
         lb.setTargetGroupArn(TARGET_GROUP_ARN);
         lb.setContainerName("web");
         lb.setContainerPort(80);
-        first.createService("app-cluster", "web-svc", "web", 0, LaunchType.EC2, List.of(lb), null, REGION);
+        first.createService("app-cluster", "web-svc", "web", 1, LaunchType.EC2, List.of(lb), null, REGION);
     }
 
     private static EcsService service(StorageFactory storage, boolean mockMode,
