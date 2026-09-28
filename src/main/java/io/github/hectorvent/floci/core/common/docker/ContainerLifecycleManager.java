@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
@@ -117,13 +118,10 @@ public class ContainerLifecycleManager {
 
     /**
      * Resolves the image a container launch is about to run, pulling it as the ECS agent does
-     * under {@code behavior}. A {@link #create} or {@link #createAndStart} for the same image that
-     * follows creates the container from the image this resolved to, rather than from whatever the
-     * reference named the first time Floci saw it.
-     *
-     * @return the image's manifest digest, empty for an image with no registry digest
+     * under {@code behavior}. A spec built from the returned image id runs exactly that image,
+     * whatever a later pull of the same reference moves its tag to.
      */
-    public Optional<String> resolveImageForLaunch(String image, ImagePullBehavior behavior) {
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
         return imageCacheService.resolveForLaunch(image, behavior);
     }
 

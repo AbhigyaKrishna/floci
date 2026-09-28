@@ -14,6 +14,7 @@ import com.github.dockerjava.api.exception.UnauthorizedException;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -400,7 +401,7 @@ class ImageCacheServiceTest {
 
         daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
 
-        assertEquals(Optional.of("sha256:new-manifest"),
+        assertEquals(new LaunchImage("sha256:new", "sha256:new-manifest"),
                 service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT));
         assertEquals("sha256:new", service.ensureImageExists(REGISTRY_IMAGE));
         assertEquals(2, daemon.pulls.get());
@@ -412,7 +413,8 @@ class ImageCacheServiceTest {
         daemon.store(LOCAL_IMAGE, image("sha256:built"));
         ImageCacheService service = newService(daemon.client);
 
-        assertEquals(Optional.empty(), service.resolveForLaunch(LOCAL_IMAGE, ImagePullBehavior.DEFAULT));
+        assertEquals(new LaunchImage("sha256:built", null),
+                service.resolveForLaunch(LOCAL_IMAGE, ImagePullBehavior.DEFAULT));
         assertEquals("sha256:built", service.ensureImageExists(LOCAL_IMAGE));
         assertEquals(1, daemon.pulls.get());
     }
@@ -443,7 +445,7 @@ class ImageCacheServiceTest {
 
         daemon.store(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
 
-        assertEquals(Optional.of("sha256:new-manifest"),
+        assertEquals(new LaunchImage("sha256:new", "sha256:new-manifest"),
                 service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
         assertEquals("sha256:new", service.ensureImageExists(REGISTRY_IMAGE));
         assertEquals(0, daemon.pulls.get());
@@ -454,7 +456,7 @@ class ImageCacheServiceTest {
         FakeDaemon daemon = new FakeDaemon();
         daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
 
-        assertEquals(Optional.of("sha256:new-manifest"),
+        assertEquals(new LaunchImage("sha256:new", "sha256:new-manifest"),
                 newService(daemon.client).resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
         assertEquals(1, daemon.pulls.get());
     }
@@ -469,10 +471,39 @@ class ImageCacheServiceTest {
         service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ONCE);
         daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
 
-        assertEquals(Optional.of("sha256:old-manifest"),
+        assertEquals(new LaunchImage("sha256:old", "sha256:old-manifest"),
                 service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ONCE));
         assertEquals("sha256:old", service.ensureImageExists(REGISTRY_IMAGE));
         assertEquals(1, daemon.pulls.get());
+    }
+
+    @Test
+    void aLaunchKeepsTheImageItResolvedWhenAnOverlappingLaunchMovesTheTag() {
+        String oldId = "sha256:" + "a".repeat(64);
+        String newId = "sha256:" + "b".repeat(64);
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image(oldId, REGISTRY_REPO + "@sha256:old-manifest"));
+        ImageCacheService service = newService(daemon.client);
+
+        LaunchImage first = service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT);
+        daemon.registry.put(REGISTRY_IMAGE, image(newId, REGISTRY_REPO + "@sha256:new-manifest"));
+        LaunchImage second = service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT);
+
+        assertEquals(new LaunchImage(oldId, "sha256:old-manifest"), first);
+        assertEquals(new LaunchImage(newId, "sha256:new-manifest"), second);
+        assertEquals(oldId, service.ensureImageExists(first.imageId()),
+                "the first launch's container is created from the image its own pull resolved to");
+        assertEquals(newId, service.ensureImageExists(second.imageId()));
+        assertEquals(2, daemon.pulls.get());
+    }
+
+    @Test
+    void anImageIdThatIsGoneFailsWithoutAPull() {
+        FakeDaemon daemon = new FakeDaemon();
+
+        assertThrows(DockerClientException.class,
+                () -> newService(daemon.client).ensureImageExists("sha256:" + "c".repeat(64)));
+        assertEquals(0, daemon.pulls.get());
     }
 
     @Test

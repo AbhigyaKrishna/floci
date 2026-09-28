@@ -38,6 +38,7 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -263,14 +264,20 @@ public class EcsContainerManager {
                 metadataIdsByContainer.put(def.getName(), metadataId);
                 envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
                         metadataId, taskRoleEndpoint.vending()));
-                imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
+                imagesByContainer.put(def,
+                        containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(def.getImage())));
             }
             // Pulled for every container before any is created, as the ECS agent does, so a tag
-            // moved in its registry since the last launch is what this task runs.
+            // moved in its registry since the last launch is what this task runs. Each container is
+            // created from the image id its pull resolved to, so a concurrent launch that moves the
+            // tag again cannot swap the image under this task's reported digest.
             for (ContainerDefinition def : launchOrder) {
-                lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
-                                config.services().ecs().imagePullBehavior())
-                        .ifPresent(digest -> imageDigestsByContainer.put(def.getName(), digest));
+                LaunchImage launchImage = lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
+                        config.services().ecs().imagePullBehavior());
+                imagesByContainer.put(def, launchImage.imageId());
+                if (launchImage.manifestDigest() != null) {
+                    imageDigestsByContainer.put(def.getName(), launchImage.manifestDigest());
+                }
             }
 
             if (firelensRouter != null) {

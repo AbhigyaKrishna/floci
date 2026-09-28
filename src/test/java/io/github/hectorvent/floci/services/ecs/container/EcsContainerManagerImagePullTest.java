@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -24,7 +25,6 @@ import org.mockito.InOrder;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -48,15 +48,19 @@ class EcsContainerManagerImagePullTest {
 
     private static final String APP_IMAGE = "registry.example:5000/app:latest";
     private static final String SIDECAR_IMAGE = "sidecar:latest";
+    private static final String APP_IMAGE_ID = "sha256:" + "a".repeat(64);
+    private static final String SIDECAR_IMAGE_ID = "sha256:" + "b".repeat(64);
 
+    private ContainerBuilder containerBuilder;
     private ContainerLifecycleManager lifecycleManager;
     private EcsContainerManager manager;
 
     @BeforeEach
     void setUp() {
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
-        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        containerBuilder = mock(ContainerBuilder.class);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
@@ -77,9 +81,9 @@ class EcsContainerManagerImagePullTest {
     @Test
     void everyImageIsPulledWithTheConfiguredBehaviourBeforeAnyContainerIsCreated() {
         when(lifecycleManager.resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS))
-                .thenReturn(Optional.of("sha256:new-manifest"));
+                .thenReturn(new LaunchImage(APP_IMAGE_ID, "sha256:new-manifest"));
         when(lifecycleManager.resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS))
-                .thenReturn(Optional.empty());
+                .thenReturn(new LaunchImage(SIDECAR_IMAGE_ID, null));
         EcsTask task = task();
 
         manager.startTask(task, taskDefinition(), List.of(), "us-east-1");
@@ -91,12 +95,41 @@ class EcsContainerManagerImagePullTest {
         List<Container> containers = task.getContainers();
         assertEquals("sha256:new-manifest", containers.get(0).getImageDigest());
         assertNull(containers.get(1).getImageDigest(), "a locally built image has no manifest digest");
+        assertEquals(APP_IMAGE, containers.get(0).getImage());
+    }
+
+    @Test
+    void everyContainerIsCreatedFromTheImageIdItsPullResolvedTo() {
+        when(lifecycleManager.resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS))
+                .thenReturn(new LaunchImage(APP_IMAGE_ID, "sha256:new-manifest"));
+        when(lifecycleManager.resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS))
+                .thenReturn(new LaunchImage(SIDECAR_IMAGE_ID, null));
+
+        manager.startTask(task(), taskDefinition(), List.of(), "us-east-1");
+
+        verify(containerBuilder).newContainer(APP_IMAGE_ID);
+        verify(containerBuilder).newContainer(SIDECAR_IMAGE_ID);
+        verify(containerBuilder, never()).newContainer(APP_IMAGE);
+        verify(containerBuilder, never()).newContainer(SIDECAR_IMAGE);
+    }
+
+    @Test
+    void theImagePulledIsTheOneTheConfiguredRegistryBaseNames() {
+        when(containerBuilder.resolveImage(anyString()))
+                .thenAnswer(invocation -> "mirror.example/" + invocation.getArgument(0));
+        when(lifecycleManager.resolveImageForLaunch(anyString(), any()))
+                .thenReturn(new LaunchImage(APP_IMAGE_ID, null));
+
+        manager.startTask(task(), taskDefinition(), List.of(), "us-east-1");
+
+        verify(lifecycleManager).resolveImageForLaunch("mirror.example/" + APP_IMAGE, ImagePullBehavior.ALWAYS);
+        verify(lifecycleManager).resolveImageForLaunch("mirror.example/" + SIDECAR_IMAGE, ImagePullBehavior.ALWAYS);
     }
 
     @Test
     void aFailedPullLeavesNoContainerCreated() {
         when(lifecycleManager.resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS))
-                .thenReturn(Optional.of("sha256:new-manifest"));
+                .thenReturn(new LaunchImage(APP_IMAGE_ID, "sha256:new-manifest"));
         when(lifecycleManager.resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS))
                 .thenThrow(new NotFoundException("pull access denied for sidecar"));
 

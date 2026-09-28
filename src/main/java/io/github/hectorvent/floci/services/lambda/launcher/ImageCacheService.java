@@ -21,6 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Ensures each Docker image is pulled only once per platform, except for launches that ask
@@ -35,6 +36,7 @@ public class ImageCacheService {
     static final int MAX_PULL_ATTEMPTS = 3;
     static final long INITIAL_BACKOFF_MS = 500L;
     private static final List<String> DOCKER_HUB_PREFIXES = List.of("docker.io/", "index.docker.io/", "library/");
+    private static final Pattern IMAGE_ID = Pattern.compile("sha256:[0-9a-f]{64}");
 
     private final DockerClient dockerClient;
     private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
@@ -54,6 +56,9 @@ public class ImageCacheService {
     }
 
     public String ensureImageExists(String imageUri, String platform) {
+        if (isImageId(imageUri)) {
+            return existingImageId(imageUri);
+        }
         boolean explicitPlatform = platform != null && !platform.isBlank();
         String requestedPlatform = explicitPlatform ? platform.trim() : daemonPlatform();
         ImageKey imageKey = new ImageKey(imageUri, requestedPlatform);
@@ -83,17 +88,15 @@ public class ImageCacheService {
 
     /**
      * Resolves the image a container launch runs, pulling it as the ECS agent does under
-     * {@code ECS_IMAGE_PULL_BEHAVIOR}, and returns the manifest digest of what it resolved to.
+     * {@code ECS_IMAGE_PULL_BEHAVIOR}.
      *
      * <p>Unlike {@link #ensureImageExists}, this never reuses the id a reference named the first
      * time it was seen: the local tag is read again on every call, so a tag moved by a pull (this
-     * one or anyone else's) is what the next launch runs. The id it resolves to is recorded, so the
-     * {@link #ensureImageExists} that creates the container right after uses the same image.
-     *
-     * @return the image's manifest digest in the repository it was named by, empty when the
-     *         image was never pulled from or pushed to that repository (a locally built image)
+     * one or anyone else's) is what the next launch runs. The launch creates its container from the
+     * returned image id rather than from the reference, so a pull by an overlapping launch that
+     * moves the tag again cannot change what this one runs.
      */
-    public Optional<String> resolveForLaunch(String imageUri, ImagePullBehavior behavior) {
+    public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior) {
         ImageKey imageKey = new ImageKey(imageUri, daemonPlatform());
         Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
         synchronized (lock) {
@@ -103,9 +106,32 @@ public class ImageCacheService {
                 case ONCE -> pulledImages.contains(imageKey) ? cachedOrPull(imageKey) : pull(imageKey, null);
                 case PREFER_CACHED -> cachedOrPull(imageKey);
             };
-            resolvedImages.put(imageKey, resolvedImageReference(imageUri, image));
-            return manifestDigest(imageUri, image);
+            String imageId = resolvedImageReference(imageUri, image);
+            resolvedImages.put(imageKey, imageId);
+            return new LaunchImage(imageId, manifestDigest(imageUri, image).orElse(null));
         }
+    }
+
+    /**
+     * The image a launch resolved a reference to.
+     *
+     * @param imageId the immutable id of the image the launch runs
+     * @param manifestDigest the image's manifest digest in the repository it was named by, null when
+     *        the image was never pulled from or pushed to that repository (a locally built image)
+     */
+    public record LaunchImage(String imageId, String manifestDigest) {}
+
+    /** Whether a reference is an image id, which names one immutable image and never needs a pull. */
+    public static boolean isImageId(String reference) {
+        return reference != null && IMAGE_ID.matcher(reference).matches();
+    }
+
+    private String existingImageId(String imageId) {
+        InspectImageResponse image = inspectLocalImage(imageId);
+        if (image == null) {
+            throw new DockerClientException("Image no longer exists: " + imageId);
+        }
+        return resolvedImageReference(imageId, image);
     }
 
     private InspectImageResponse pullOrUseCached(ImageKey imageKey) {
