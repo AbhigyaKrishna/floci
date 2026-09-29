@@ -12,8 +12,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,16 +40,17 @@ class S3ObjectIndexJournalTest {
     private static final String VERSIONED_BUCKET = "journal-versioned";
 
     @TempDir
-    Path directory;
+    Path root;
 
     @Test
     void putObjectUnderPersistentModeAppendsToTheJournalInsteadOfRewritingTheIndex() throws IOException {
+        Path directory = root.resolve("live");
         Path journal = directory.resolve("s3-objects.wal");
         Path index = directory.resolve("s3-objects.json");
         Path bucketStore = directory.resolve("s3-buckets.json");
 
-        StorageFactory first = newFactory();
-        S3Service s3 = newService(first);
+        StorageFactory first = newFactory(directory);
+        S3Service s3 = newService(first, directory);
         s3.createBucket(BUCKET, REGION);
         assertTrue(Files.readString(bucketStore).contains(BUCKET), "the bucket store is still written on every call");
 
@@ -63,29 +66,115 @@ class S3ObjectIndexJournalTest {
         first.shutdownAll();
 
         assertTrue(Files.exists(index), "a clean shutdown folds the journal into the object index");
-        S3Service reopened = newService(newFactory());
-        for (int i = 0; i < 2; i++) {
-            assertArrayEquals(body(i), reopened.getObject(BUCKET, key(i)).getData());
+        StorageFactory second = newFactory(directory);
+        try {
+            S3Service reopened = newService(second, directory);
+            for (int i = 0; i < 2; i++) {
+                assertArrayEquals(body(i), reopened.getObject(BUCKET, key(i)).getData());
+            }
+            assertEquals(2, reopened.listObjects(BUCKET, null, null, 100).size());
+        } finally {
+            second.shutdownAll();
         }
-        assertEquals(2, reopened.listObjects(BUCKET, null, null, 100).size());
     }
 
     @Test
-    void journaledEntriesAreReplayedWhenTheProcessStopsWithoutCompacting() {
-        StorageFactory first = newFactory();
-        S3Service s3 = newService(first);
-        s3.createBucket(BUCKET, REGION);
-        s3.createBucket(VERSIONED_BUCKET, REGION);
-        s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
-        s3.putObject(BUCKET, key(0), body(0), "text/plain", Map.of());
-        String v1 = s3.putObject(VERSIONED_BUCKET, key(0), body(1), "text/plain", Map.of()).getVersionId();
-        s3.putObject(VERSIONED_BUCKET, key(0), body(2), "text/plain", Map.of());
-        assertFalse(Files.exists(directory.resolve("s3-objects.json")), "nothing has compacted the journal yet");
+    void journaledEntriesAreReplayedWhenTheProcessStopsWithoutCompacting() throws IOException {
+        Path directory = root.resolve("live");
+        Path afterCrash = root.resolve("after-crash");
+        StorageFactory first = newFactory(directory);
+        String v1;
+        try {
+            S3Service s3 = newService(first, directory);
+            s3.createBucket(BUCKET, REGION);
+            s3.createBucket(VERSIONED_BUCKET, REGION);
+            s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            s3.putObject(BUCKET, key(0), body(0), "text/plain", Map.of());
+            v1 = s3.putObject(VERSIONED_BUCKET, key(0), body(1), "text/plain", Map.of()).getVersionId();
+            s3.putObject(VERSIONED_BUCKET, key(0), body(2), "text/plain", Map.of());
+            assertFalse(Files.exists(directory.resolve("s3-objects.json")), "nothing has compacted the journal yet");
+            copyAsLeftByAKill(directory, afterCrash);
+        } finally {
+            first.shutdownAll();
+        }
 
-        S3Service reopened = newService(newFactory());
-        assertArrayEquals(body(0), reopened.getObject(BUCKET, key(0)).getData());
-        assertArrayEquals(body(2), reopened.getObject(VERSIONED_BUCKET, key(0)).getData());
-        assertArrayEquals(body(1), reopened.getObject(VERSIONED_BUCKET, key(0), v1).getData());
+        StorageFactory second = newFactory(afterCrash);
+        try {
+            S3Service reopened = newService(second, afterCrash);
+            assertArrayEquals(body(0), reopened.getObject(BUCKET, key(0)).getData());
+            assertArrayEquals(body(2), reopened.getObject(VERSIONED_BUCKET, key(0)).getData());
+            assertArrayEquals(body(1), reopened.getObject(VERSIONED_BUCKET, key(0), v1).getData());
+        } finally {
+            second.shutdownAll();
+        }
+    }
+
+    @Test
+    void aTagUpdateOnTheLatestKeyIsReplayedUnderTheCurrentVersionToo() throws IOException {
+        Path directory = root.resolve("live");
+        Path afterCrash = root.resolve("after-crash");
+        StorageFactory first = newFactory(directory);
+        String current;
+        try {
+            S3Service s3 = newService(first, directory);
+            s3.createBucket(VERSIONED_BUCKET, REGION);
+            s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            current = s3.putObject(VERSIONED_BUCKET, key(0), body(0), "text/plain", Map.of()).getVersionId();
+            s3.putObjectTagging(VERSIONED_BUCKET, key(0), Map.of("stage", "reviewed"));
+            copyAsLeftByAKill(directory, afterCrash);
+        } finally {
+            first.shutdownAll();
+        }
+
+        StorageFactory second = newFactory(afterCrash);
+        try {
+            S3Service reopened = newService(second, afterCrash);
+            assertEquals(Map.of("stage", "reviewed"), reopened.getObjectTagging(VERSIONED_BUCKET, key(0), current));
+        } finally {
+            second.shutdownAll();
+        }
+    }
+
+    @Test
+    void aLegalHoldSetByVersionIdOnTheCurrentVersionIsReplayedUnderTheLatestKeyToo() throws IOException {
+        Path directory = root.resolve("live");
+        Path afterCrash = root.resolve("after-crash");
+        StorageFactory first = newFactory(directory);
+        try {
+            S3Service s3 = newService(first, directory);
+            s3.createBucket(VERSIONED_BUCKET, REGION);
+            s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            String current = s3.putObject(VERSIONED_BUCKET, key(0), body(0), "text/plain", Map.of()).getVersionId();
+            s3.putObjectLegalHold(VERSIONED_BUCKET, key(0), current, "ON");
+            copyAsLeftByAKill(directory, afterCrash);
+        } finally {
+            first.shutdownAll();
+        }
+
+        StorageFactory second = newFactory(afterCrash);
+        try {
+            S3Service reopened = newService(second, afterCrash);
+            assertEquals("ON", reopened.getObjectLegalHold(VERSIONED_BUCKET, key(0), null).getLegalHoldStatus());
+        } finally {
+            second.shutdownAll();
+        }
+    }
+
+    /**
+     * The storage directory as a process killed now would leave it, with no shutdown compaction.
+     * Replaying a copy keeps the restarted factory from sharing the journal with the live writer.
+     */
+    private static void copyAsLeftByAKill(Path source, Path target) throws IOException {
+        try (Stream<Path> paths = Files.walk(source)) {
+            for (Path path : (Iterable<Path>) paths::iterator) {
+                Path copy = target.resolve(source.relativize(path).toString());
+                if (Files.isDirectory(path)) {
+                    Files.createDirectories(copy);
+                } else {
+                    Files.copy(path, copy, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
     }
 
     private static String key(int i) {
@@ -100,9 +189,9 @@ class S3ObjectIndexJournalTest {
         return Files.exists(journal) ? Files.size(journal) : 0L;
     }
 
-    private S3Service newService(StorageFactory factory) {
+    private static S3Service newService(StorageFactory factory, Path storage) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.storage().persistentPath()).thenReturn(directory.toString());
+        when(config.storage().persistentPath()).thenReturn(storage.toString());
         when(config.storage().mode()).thenReturn("persistent");
         when(config.storage().services().s3().mode()).thenReturn(Optional.of("persistent"));
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -112,10 +201,10 @@ class S3ObjectIndexJournalTest {
                 new RegionResolver(REGION, ACCOUNT), new ObjectMapper(), null);
     }
 
-    private StorageFactory newFactory() {
+    private static StorageFactory newFactory(Path storage) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
-        when(config.storage().persistentPath()).thenReturn(directory.toString());
+        when(config.storage().persistentPath()).thenReturn(storage.toString());
         when(config.storage().wal().compactionIntervalMs()).thenReturn(3_600_000L);
         ServiceConfigAccess access = mock(ServiceConfigAccess.class);
         when(access.storageMode(anyString())).thenReturn("persistent");

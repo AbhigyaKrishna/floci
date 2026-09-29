@@ -2051,7 +2051,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 getStoredObjectEntry(bucketName, key, null);
         S3Object obj = ownedObject.value();
         obj.setTags(tags != null ? tags : new java.util.HashMap<>());
-        putObjectForAccount(ownedObject.account(), objectKey(bucketName, key), obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, null, obj);
         LOG.debugv("Put tags on object: {0}/{1}", bucketName, key);
     }
 
@@ -2070,7 +2070,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 getStoredObjectEntry(bucketName, key, null);
         S3Object obj = ownedObject.value();
         obj.setTags(new java.util.HashMap<>());
-        putObjectForAccount(ownedObject.account(), objectKey(bucketName, key), obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, null, obj);
         LOG.debugv("Deleted tags from object: {0}/{1}", bucketName, key);
     }
 
@@ -3066,9 +3066,6 @@ public class S3Service implements Resettable, ResourceProvider {
                                    String mode, Instant retainUntil, boolean bypassGovernance) {
         AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
                 getStoredObjectEntry(bucketName, key, versionId);
-        String storeKey = versionId != null
-                ? versionedKey(bucketName, key, versionId)
-                : objectKey(bucketName, key);
         S3Object obj = ownedObject.value();
 
         boolean activeComplianceRetention = "COMPLIANCE".equals(obj.getObjectLockMode())
@@ -3103,7 +3100,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         obj.setObjectLockMode(mode);
         obj.setRetainUntilDate(retainUntil);
-        putObjectForAccount(ownedObject.account(), storeKey, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, versionId, obj);
         LOG.debugv("Set retention on {0}/{1}: mode={2}, until={3}", bucketName, key, mode, retainUntil);
     }
 
@@ -3114,12 +3111,9 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putObjectLegalHold(String bucketName, String key, String versionId, String status) {
         AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
                 getStoredObjectEntry(bucketName, key, versionId);
-        String storeKey = versionId != null
-                ? versionedKey(bucketName, key, versionId)
-                : objectKey(bucketName, key);
         S3Object obj = ownedObject.value();
         obj.setLegalHoldStatus(status);
-        putObjectForAccount(ownedObject.account(), storeKey, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, versionId, obj);
         LOG.debugv("Set legal hold on {0}/{1}: {2}", bucketName, key, status);
     }
 
@@ -3394,6 +3388,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
             }
             objectStore.put(objectKey(bucket, key), object);
+            if (object.getVersionId() != null) {
+                objectStore.put(versionedKey(bucket, key, object.getVersionId()), object);
+            }
 
             // Cleanup
             cleanupMultipart(uploadId);
@@ -3750,8 +3747,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String newAcl = resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl);
         rejectPublicAclWhenBlocked(bucketName, newAcl);
         obj.setAcl(newAcl);
-        String storeKey = (versionId != null) ? versionedKey(bucketName, key, versionId) : objectKey(bucketName, key);
-        putObjectForAccount(ownedObject.account(), storeKey, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, versionId, obj);
     }
 
     /**
@@ -4831,6 +4827,32 @@ public class S3Service implements Resettable, ResourceProvider {
             return;
         }
         objectStore.put(storeKey, object);
+    }
+
+    /**
+     * Persists a metadata change to one stored object. The current version of a versioned object
+     * is indexed under both its version key and the latest key, so both entries are written: the
+     * journaled object store replays each entry on its own, and writing one would bring the
+     * other back with the old metadata after a restart.
+     */
+    private void putObjectMetadataForAccount(String accountId, String bucketName, String key,
+                                             String versionId, S3Object object) {
+        String latestKey = objectKey(bucketName, key);
+        String objectVersionId = object.getVersionId();
+        if (versionId == null) {
+            putObjectForAccount(accountId, latestKey, object);
+            if (objectVersionId != null) {
+                putObjectForAccount(accountId, versionedKey(bucketName, key, objectVersionId), object);
+            }
+            return;
+        }
+        putObjectForAccount(accountId, versionedKey(bucketName, key, versionId), object);
+        boolean isCurrentVersion = resolveObjectForAccount(accountId, latestKey)
+                .map(latest -> versionId.equals(latest.getVersionId()))
+                .orElse(false);
+        if (isCurrentVersion) {
+            putObjectForAccount(accountId, latestKey, object);
+        }
     }
 
     private String objectKey(String bucketName, String key) {
