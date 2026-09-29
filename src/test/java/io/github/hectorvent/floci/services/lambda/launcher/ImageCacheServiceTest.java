@@ -12,6 +12,7 @@ import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.UnauthorizedException;
 import com.github.dockerjava.api.model.Info;
+import com.github.dockerjava.api.model.PullResponseItem;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
@@ -507,6 +508,65 @@ class ImageCacheServiceTest {
     }
 
     @Test
+    void anImageIdLaunchesWithoutAPullUnderEveryBehaviour() {
+        String imageId = "sha256:" + "d".repeat(64);
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(LOCAL_IMAGE, image(imageId));
+        ImageCacheService service = newService(daemon.client);
+
+        for (ImagePullBehavior behavior : ImagePullBehavior.values()) {
+            assertEquals(new LaunchImage(imageId, null), service.resolveForLaunch(imageId, behavior));
+        }
+        assertEquals(0, daemon.pulls.get());
+    }
+
+    @Test
+    void anImageIdThatIsGoneFailsALaunchWithoutAPull() {
+        FakeDaemon daemon = new FakeDaemon();
+
+        assertThrows(DockerClientException.class, () -> newService(daemon.client)
+                .resolveForLaunch("sha256:" + "e".repeat(64), ImagePullBehavior.ALWAYS));
+        assertEquals(0, daemon.pulls.get());
+    }
+
+    @Test
+    void aLaunchReportsTheDigestItsPullResolvedTheTagTo() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new",
+                REGISTRY_REPO + "@sha256:platform-manifest", REGISTRY_REPO + "@sha256:index"));
+        daemon.registryDigests.put(REGISTRY_IMAGE, "sha256:index");
+        ImageCacheService service = newService(daemon.client);
+
+        assertEquals(new LaunchImage("sha256:new", "sha256:index"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT));
+        assertEquals(new LaunchImage("sha256:new", "sha256:index"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED),
+                "a later cached launch of the same image keeps the digest its pull reported");
+    }
+
+    @Test
+    void aCachedLaunchDoesNotReportTheDigestOfAnImageTheTagNoLongerNames() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
+        daemon.registryDigests.put(REGISTRY_IMAGE, "sha256:old-manifest");
+        ImageCacheService service = newService(daemon.client);
+        service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT);
+
+        daemon.store(REGISTRY_IMAGE, image("sha256:rebuilt"));
+
+        assertEquals(new LaunchImage("sha256:rebuilt", null),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
+    }
+
+    @Test
+    void manifestDigestIsEmptyWhenTheRepositoryHasSeveralDigests() {
+        InspectImageResponse image = image("sha256:id",
+                REGISTRY_REPO + "@sha256:platform-manifest", REGISTRY_REPO + "@sha256:index");
+
+        assertEquals(Optional.empty(), ImageCacheService.manifestDigest(REGISTRY_IMAGE, image));
+    }
+
+    @Test
     void manifestDigestIsTheRepoDigestOfTheRepositoryTheReferenceNames() {
         InspectImageResponse pulled = image("sha256:id",
                 "mirror.example:5000/app@sha256:mirror-manifest", REGISTRY_REPO + "@sha256:manifest");
@@ -549,6 +609,7 @@ class ImageCacheServiceTest {
         final DockerClient client = mock(DockerClient.class);
         final Map<String, InspectImageResponse> local = new HashMap<>();
         final Map<String, InspectImageResponse> registry = new HashMap<>();
+        final Map<String, String> registryDigests = new HashMap<>();
         final AtomicInteger pulls = new AtomicInteger();
 
         FakeDaemon() {
@@ -568,13 +629,19 @@ class ImageCacheServiceTest {
                 String reference = invocation.getArgument(0);
                 PullImageCmd pull = mock(PullImageCmd.class);
                 when(pull.withAuthConfig(any())).thenReturn(pull);
-                when(pull.exec(any(PullImageResultCallback.class))).thenAnswer(ignored -> {
+                when(pull.exec(any(PullImageResultCallback.class))).thenAnswer(execution -> {
                     pulls.incrementAndGet();
                     InspectImageResponse image = registry.get(reference);
                     if (image == null) {
                         throw new NotFoundException("manifest unknown: " + reference);
                     }
                     store(reference, image);
+                    String digest = registryDigests.get(reference);
+                    if (digest != null) {
+                        PullResponseItem status = mock(PullResponseItem.class);
+                        when(status.getStatus()).thenReturn("Digest: " + digest);
+                        execution.<PullImageResultCallback>getArgument(0).onNext(status);
+                    }
                     return mock(PullImageResultCallback.class);
                 });
                 return pull;

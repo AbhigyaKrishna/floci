@@ -8,12 +8,14 @@ import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.AuthConfig;
 import com.github.dockerjava.api.model.Info;
+import com.github.dockerjava.api.model.PullResponseItem;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -21,6 +23,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -37,11 +40,13 @@ public class ImageCacheService {
     static final long INITIAL_BACKOFF_MS = 500L;
     private static final List<String> DOCKER_HUB_PREFIXES = List.of("docker.io/", "index.docker.io/", "library/");
     private static final Pattern IMAGE_ID = Pattern.compile("sha256:[0-9a-f]{64}");
+    private static final String DIGEST_STATUS = "Digest: ";
 
     private final DockerClient dockerClient;
     private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
     private final Map<ImageKey, String> resolvedImages = new ConcurrentHashMap<>();
     private final Set<ImageKey> pulledImages = ConcurrentHashMap.newKeySet();
+    private final Map<ImageKey, PulledManifest> pulledManifests = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     private volatile String daemonPlatform;
 
@@ -97,6 +102,9 @@ public class ImageCacheService {
      * moves the tag again cannot change what this one runs.
      */
     public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior) {
+        if (isImageId(imageUri)) {
+            return new LaunchImage(existingImageId(imageUri), null);
+        }
         ImageKey imageKey = new ImageKey(imageUri, daemonPlatform());
         Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
         synchronized (lock) {
@@ -108,7 +116,7 @@ public class ImageCacheService {
             };
             String imageId = resolvedImageReference(imageUri, image);
             resolvedImages.put(imageKey, imageId);
-            return new LaunchImage(imageId, manifestDigest(imageUri, image).orElse(null));
+            return new LaunchImage(imageId, launchDigest(imageKey, image).orElse(null));
         }
     }
 
@@ -166,6 +174,7 @@ public class ImageCacheService {
     private InspectImageResponse pull(ImageKey imageKey, String platform) {
         String imageUri = imageKey.imageUri();
         LOG.infov("Pulling image: {0}", imageUri);
+        AtomicReference<ManifestDigestCallback> lastAttempt = new AtomicReference<>();
         try {
             runWithRetry(imageUri, MAX_PULL_ATTEMPTS, INITIAL_BACKOFF_MS, () -> {
                 PullImageCmd pullImage = dockerClient.pullImageCmd(imageUri)
@@ -173,7 +182,9 @@ public class ImageCacheService {
                 if (platform != null) {
                     pullImage.withPlatform(platform);
                 }
-                pullImage.exec(new PullImageResultCallback())
+                ManifestDigestCallback callback = new ManifestDigestCallback();
+                lastAttempt.set(callback);
+                pullImage.<PullImageResultCallback>exec(callback)
                         .awaitCompletion(5, TimeUnit.MINUTES);
             });
         } catch (InterruptedException e) {
@@ -182,14 +193,39 @@ public class ImageCacheService {
         }
         InspectImageResponse pulled = inspectLocalImage(imageUri);
         pulledImages.add(imageKey);
+        String digest = lastAttempt.get().digest;
+        if (pulled != null && digest != null) {
+            pulledManifests.put(imageKey, new PulledManifest(pulled.getId(), digest));
+        } else {
+            pulledManifests.remove(imageKey);
+        }
         LOG.infov("Image pulled successfully: {0}", imageUri);
         return pulled;
     }
 
     /**
+     * The digest of the manifest a launch's reference resolved to. When the image is the one the
+     * last pull of that reference produced, it is the digest the registry reported for that pull;
+     * otherwise it falls back to the image's repo digests.
+     */
+    private Optional<String> launchDigest(ImageKey imageKey, InspectImageResponse image) {
+        String imageUri = imageKey.imageUri();
+        if (imageUri.indexOf('@') < 0) {
+            PulledManifest pulled = pulledManifests.get(imageKey);
+            if (pulled != null && pulled.imageId().equals(image.getId())) {
+                return Optional.of(pulled.digest());
+            }
+        }
+        return manifestDigest(imageUri, image);
+    }
+
+    /**
      * The digest of the manifest the reference resolved to, from the repository it names. A
      * reference pinned by digest is its own answer; otherwise it is the image's repo digest for
-     * that repository, which Docker records when it pulls or pushes the image.
+     * that repository, which Docker records when it pulls or pushes the image. An image can hold
+     * several digests for one repository (an index and a platform manifest, or manifests pulled
+     * under different tags), and nothing local says which one the tag names, so that case has
+     * no answer.
      */
     static Optional<String> manifestDigest(String imageUri, InspectImageResponse image) {
         int at = imageUri.indexOf('@');
@@ -201,13 +237,19 @@ public class ImageCacheService {
             return Optional.empty();
         }
         String repository = normalizedRepository(imageUri);
+        Set<String> digests = new LinkedHashSet<>();
         for (String repoDigest : repoDigests) {
             int separator = repoDigest.indexOf('@');
             if (separator > 0 && normalizedRepository(repoDigest.substring(0, separator)).equals(repository)) {
-                return Optional.of(repoDigest.substring(separator + 1));
+                digests.add(repoDigest.substring(separator + 1));
             }
         }
-        return Optional.empty();
+        if (digests.size() > 1) {
+            LOG.debugv("Image {0} holds several digests for {1}, reporting none: {2}",
+                    image.getId(), imageUri, digests);
+            return Optional.empty();
+        }
+        return digests.stream().findFirst();
     }
 
     /** The repository a reference names, without its tag and with Docker Hub's implied prefixes. */
@@ -355,6 +397,23 @@ public class ImageCacheService {
     }
 
     private record ImageKey(String imageUri, String platform) {}
+
+    /** The image a pull left the reference naming, and the manifest digest the registry reported for it. */
+    private record PulledManifest(String imageId, String digest) {}
+
+    /** Records the manifest digest the daemon reports once a pull has resolved the reference. */
+    private static final class ManifestDigestCallback extends PullImageResultCallback {
+        private volatile String digest;
+
+        @Override
+        public void onNext(PullResponseItem item) {
+            String status = item.getStatus();
+            if (status != null && status.startsWith(DIGEST_STATUS)) {
+                digest = status.substring(DIGEST_STATUS.length()).trim();
+            }
+            super.onNext(item);
+        }
+    }
 
     private AuthConfig resolveAuth(String imageUri) {
         String host = extractRegistryHost(imageUri);

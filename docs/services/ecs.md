@@ -784,9 +784,12 @@ with a warning in the log. Whichever behavior applies, the cached image is the o
 names at launch, so a `docker pull` or `docker build` on the Docker host is also picked up.
 
 Each container reports the digest of the manifest it runs as `imageDigest` in `DescribeTasks`
-(and `ImageID` in the task metadata endpoint). An image that has never been pulled from or pushed
-to the repository its reference names, such as one built locally, has no manifest digest and
-reports none. Floci does not pin a service's digests across the tasks of one deployment, so a tag
+(and `ImageID` in the task metadata endpoint): the digest the registry reported when the tag was
+pulled, or, for a cached image Floci has not pulled, the image's one digest for that repository.
+An image that has never been pulled from or pushed to the repository its reference names, such as
+one built locally, has no manifest digest and reports none, as does a cached image holding several
+digests for the repository, since nothing local says which one the tag names. A task definition
+image given as a bare image id (`sha256:...`) runs that local image without a pull. Floci does not pin a service's digests across the tasks of one deployment, so a tag
 moved while a service is scaling can put tasks of the same deployment on different images.
 
 ### Task IAM role credentials

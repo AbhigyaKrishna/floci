@@ -55,12 +55,16 @@ class EcsImagePullDockerIntegrationTest {
             "application/vnd.docker.distribution.manifest.list.v2+json",
             "application/vnd.docker.distribution.manifest.v2+json");
 
-    /** Real containers, and security-group enforcement back to its shipped default of off. */
+    /**
+     * Real containers, security-group enforcement back to its shipped default of off, and the
+     * shipped pull behaviour, which the shared test config swaps for prefer-cached.
+     */
     public static final class DockerEcsProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
             return Map.of("floci.services.ecs.mock", "false",
-                    "floci.network.security-group-enforcement.enabled", "false");
+                    "floci.network.security-group-enforcement.enabled", "false",
+                    "floci.services.ecs.image-pull-behavior", "default");
         }
     }
 
