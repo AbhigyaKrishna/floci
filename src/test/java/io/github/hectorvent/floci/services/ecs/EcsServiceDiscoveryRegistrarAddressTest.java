@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
@@ -37,7 +39,7 @@ class EcsServiceDiscoveryRegistrarAddressTest {
     private final CloudMapService cloudMapService = mock(CloudMapService.class);
     private final EcsContainerManager containerManager = mock(EcsContainerManager.class);
     private final EcsServiceDiscoveryRegistrar registrar =
-            new EcsServiceDiscoveryRegistrar(cloudMapService, containerManager);
+            new EcsServiceDiscoveryRegistrar(cloudMapService, containerManager, storageFactory());
 
     @Test
     void awsvpcTaskRegistersTheAddressItsContainerHolds() {
@@ -131,5 +133,12 @@ class EcsServiceDiscoveryRegistrarAddressTest {
         task.setPrivateIpAddress(eniAddress);
         task.setContainers(List.of(container));
         return task;
+    }
+
+    private static StorageFactory storageFactory() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
+        return storageFactory;
     }
 }
