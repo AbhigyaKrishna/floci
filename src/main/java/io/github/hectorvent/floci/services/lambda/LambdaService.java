@@ -55,6 +55,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -1320,8 +1321,13 @@ public class LambdaService implements ResourceProvider {
     }
 
     static List<String> parseFunctionResponseTypes(Map<String, Object> request) {
-        if (!(request.get("FunctionResponseTypes") instanceof List<?> types)) {
+        Object raw = request.get("FunctionResponseTypes");
+        if (raw == null) {
             return new ArrayList<>();
+        }
+        if (!(raw instanceof List<?> types)) {
+            throw new AwsException("SerializationException",
+                    "FunctionResponseTypes must be a JSON array or null", 400);
         }
         if (types.size() > 1) {
             throw new AwsException("InvalidParameterValueException",
@@ -1777,49 +1783,63 @@ public class LambdaService implements ResourceProvider {
 
         boolean wasEnabled = esm.isEnabled();
 
+        // The stored mapping is shared with the pollers, so every member is validated before any
+        // of them is applied: a request that fails validation must leave the mapping unchanged.
+        List<Consumer<EventSourceMapping>> changes = new ArrayList<>();
+
         if (request.containsKey("BatchSize")) {
-            esm.setBatchSize(toInt(request.get("BatchSize"), esm.getBatchSize()));
+            int batchSize = toInt(request.get("BatchSize"), esm.getBatchSize());
+            changes.add(m -> m.setBatchSize(batchSize));
         }
         if (request.containsKey("MaximumBatchingWindowInSeconds")) {
-            esm.setMaximumBatchingWindowInSeconds(parseMaximumBatchingWindow(request));
+            Integer batchingWindow = parseMaximumBatchingWindow(request);
+            changes.add(m -> m.setMaximumBatchingWindowInSeconds(batchingWindow));
         }
         if (request.containsKey("Enabled")) {
             boolean nowEnabled = !Boolean.FALSE.equals(request.get("Enabled"));
-            esm.setEnabled(nowEnabled);
-            esm.setState(nowEnabled ? "Enabled" : "Disabled");
+            changes.add(m -> {
+                m.setEnabled(nowEnabled);
+                m.setState(nowEnabled ? "Enabled" : "Disabled");
+            });
         }
         if (request.containsKey("ScalingConfig")) {
             // AWS: passing ScalingConfig resets it. An empty object or one
             // with MaximumConcurrency=null clears the cap.
-            esm.setScalingConfig(parseScalingConfig(request, esm.getEventSourceArn()));
+            ScalingConfig scalingConfig = parseScalingConfig(request, esm.getEventSourceArn());
+            changes.add(m -> m.setScalingConfig(scalingConfig));
         }
 
         if (request.containsKey("BisectBatchOnFunctionError")) {
-            Object raw = request.get("BisectBatchOnFunctionError");
-            esm.setBisectBatchOnFunctionError(raw instanceof Boolean b ? b : null);
+            Boolean bisect = request.get("BisectBatchOnFunctionError") instanceof Boolean b ? b : null;
+            changes.add(m -> m.setBisectBatchOnFunctionError(bisect));
         }
 
         if (request.containsKey("MaximumRetryAttempts")) {
-            esm.setMaximumRetryAttempts(parseMaximumRetryAttempts(request));
+            Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
+            changes.add(m -> m.setMaximumRetryAttempts(maximumRetryAttempts));
         }
         if (request.containsKey("MaximumRecordAgeInSeconds")) {
-            esm.setMaximumRecordAgeInSeconds(parseMaximumRecordAgeInSeconds(request));
+            Integer maximumRecordAge = parseMaximumRecordAgeInSeconds(request);
+            changes.add(m -> m.setMaximumRecordAgeInSeconds(maximumRecordAge));
         }
 
         if (request.containsKey("DestinationConfig")) {
-            esm.setDestinationConfig(parseDestinationConfig(request));
+            EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
+            changes.add(m -> m.setDestinationConfig(destinationConfig));
         }
 
         if (request.containsKey("FilterCriteria")) {
             // AWS: passing FilterCriteria replaces the whole set; an empty object or an empty
             // Filters array clears all filters.
-            esm.setFilterCriteria(parseFilterCriteria(request, objectMapper));
+            EventSourceMapping.FilterCriteria filterCriteria = parseFilterCriteria(request, objectMapper);
+            changes.add(m -> m.setFilterCriteria(filterCriteria));
         }
 
-        if (request.containsKey("FunctionResponseTypes")) {
+        if (request.get("FunctionResponseTypes") != null) {
             // AWS: passing FunctionResponseTypes replaces the list; an empty list turns
-            // ReportBatchItemFailures off.
-            esm.setFunctionResponseTypes(parseFunctionResponseTypes(request));
+            // ReportBatchItemFailures off. A JSON null is an absent member and changes nothing.
+            List<String> functionResponseTypes = parseFunctionResponseTypes(request);
+            changes.add(m -> m.setFunctionResponseTypes(functionResponseTypes));
         }
 
         if (request.containsKey("FunctionName")) {
@@ -1831,8 +1851,10 @@ public class LambdaService implements ResourceProvider {
                             "Function ARN region '" + fnRef.region() + "' does not match event source region '" + esm.getRegion() + "'", 400);
                 }
                 ResolvedFunctionTarget target = resolveFunctionTarget(esm.getRegion(), fnRef);
-                esm.setFunctionArn(target.functionArn());
-                esm.setFunctionName(target.functionName());
+                changes.add(m -> {
+                    m.setFunctionArn(target.functionArn());
+                    m.setFunctionName(target.functionName());
+                });
             }
         }
 
@@ -1850,7 +1872,7 @@ public class LambdaService implements ResourceProvider {
                 }
                 validatedTopics.add(s);
             }
-            esm.setTopics(validatedTopics);
+            changes.add(m -> m.setTopics(validatedTopics));
         }
 
         if (request.containsKey("SourceAccessConfigurations")) {
@@ -1870,12 +1892,13 @@ public class LambdaService implements ResourceProvider {
                     Map<String, Object> typedMap = (Map<String, Object>) m;
                     typedAccess.add(typedMap);
                 }
-                esm.setSourceAccessConfigurations(typedAccess);
+                changes.add(m -> m.setSourceAccessConfigurations(typedAccess));
             } else {
-                esm.setSourceAccessConfigurations(null);
+                changes.add(m -> m.setSourceAccessConfigurations(null));
             }
         }
 
+        changes.forEach(change -> change.accept(esm));
         esm.setLastModified(System.currentTimeMillis());
         esmStore.save(esm);
 

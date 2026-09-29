@@ -44,6 +44,19 @@ class LambdaEsmFunctionResponseTypesValidationTest {
     }
 
     @Test
+    void nullMemberParsesAsEmpty() {
+        assertEquals(List.of(), LambdaService.parseFunctionResponseTypes(request(null)));
+    }
+
+    @Test
+    void scalarMemberIsASerializationError() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> LambdaService.parseFunctionResponseTypes(request("ReportBatchItemFailures")));
+        assertEquals("SerializationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
     void unknownValueIsRejected() {
         AwsException ex = assertRejected(List.of("ReportItemFailures"));
         assertTrue(ex.getMessage().contains("enum value set: [ReportBatchItemFailures]"), ex.getMessage());
