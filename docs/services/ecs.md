@@ -528,9 +528,10 @@ nothing manages:
   `FLOCI_DOCKER_RESOURCE_NAMESPACE` carry the same owner label and would remove each other's task
   containers: give each its own namespace, or set
   `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP=false` to skip this sweep, as EC2's
-  `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` does for instance containers. Registrations
-  are still released either way, since each Floci releases only what its own persisted state
-  recorded.
+  `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` does for instance containers. It also
+  skips the startup removal of task-role credentials proxies, which carry the same label.
+  Registrations are still released either way, since each Floci releases only what its own
+  persisted state recorded.
 - Every load balancer target and Cloud Map instance a previous run's tasks registered is
   deregistered. Floci registers task containers by address, and Docker hands a dead container's
   address to the next container it starts, so a stale target would route to an unrelated

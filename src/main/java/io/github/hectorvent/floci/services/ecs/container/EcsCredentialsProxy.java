@@ -74,9 +74,16 @@ public class EcsCredentialsProxy implements ContainerTeardown {
      * SecurityGroupFirewallManager} uses: several Floci processes can share one Docker daemon, and
      * a label match alone would let one instance's restart tear down another's still-running,
      * still-in-use proxy.
+     *
+     * <p>Skipped with {@code reconcile-containers-on-startup} off, like the task container sweep:
+     * that is the setting for instances sharing one owner identity, where a proxy carrying this
+     * owner label may still serve another instance's running tasks.
      */
     @PostConstruct
     void reapSurvivingProxies() {
+        if (!config.services().ecs().reconcileContainersOnStartup()) {
+            return;
+        }
         try {
             dockerClient.listContainersCmd().withShowAll(true)
                     .withLabelFilter(Map.of(OWNS_NETWORK_LABEL, "true"))
