@@ -57,18 +57,25 @@ class LambdaEsmTagsTest {
                 try {
                     lambda.deleteEventSourceMapping(DeleteEventSourceMappingRequest.builder()
                             .uuid(esmUuid).build());
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                    // Best-effort teardown: the ordered tests delete the mapping themselves,
+                    // so a ResourceNotFoundException here is the expected case.
+                }
             }
             try {
                 lambda.deleteFunction(DeleteFunctionRequest.builder()
                         .functionName(FUNCTION_NAME).build());
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+                // Best-effort teardown: a leftover function does not affect other suites.
+            }
             lambda.close();
         }
         if (sqs != null) {
             try {
                 sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+                // Best-effort teardown: a leftover queue does not affect other suites.
+            }
             sqs.close();
         }
     }

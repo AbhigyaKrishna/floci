@@ -177,14 +177,14 @@ public class LambdaEventSourceMappingCfnProvisioner implements CfnResourceProvis
                             "Updating SelfManagedEventSource requires resource replacement, which is not supported.", 400);
                 }
             }
-            lambdaService.updateEventSourceMapping(uuid, req);
-            String esmArn = LambdaArnUtils.eventSourceMappingArn(ctx.region(), ctx.accountId(), uuid);
+            EventSourceMapping updated = lambdaService.updateEventSourceMapping(uuid, req);
+            String esmArn = LambdaArnUtils.eventSourceMappingArn(updated.getRegion(), updated.getAccountId(), uuid);
             r.setPhysicalId(uuid);
             r.getAttributes().put("Id", uuid);
             r.getAttributes().put("EventSourceMappingArn", esmArn);
         } else {
-            var esm = lambdaService.createEventSourceMapping(ctx.region(), req);
-            String esmArn = LambdaArnUtils.eventSourceMappingArn(ctx.region(), ctx.accountId(), esm.getUuid());
+            EventSourceMapping esm = lambdaService.createEventSourceMapping(ctx.region(), req);
+            String esmArn = LambdaArnUtils.eventSourceMappingArn(esm.getRegion(), esm.getAccountId(), esm.getUuid());
             r.setPhysicalId(esm.getUuid());
             r.getAttributes().put("Id", esm.getUuid());
             r.getAttributes().put("EventSourceMappingArn", esmArn);

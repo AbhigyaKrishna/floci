@@ -1580,7 +1580,7 @@ class EsmIntegrationTest {
 
     @Test
     @Order(85)
-    void tagApisReportUnknownOrForeignRegionEventSourceMappingAsNotFound() {
+    void tagApisReportUnknownOrForeignEventSourceMappingArnAsNotFound() {
         given().get("/2017-03-31/tags/" + esmArn(REGION, UUID.randomUUID().toString()))
         .then()
             .statusCode(404)
@@ -1598,6 +1598,11 @@ class EsmIntegrationTest {
             .contentType("application/json")
             .body("{\"Tags\": {\"k\": \"v\"}}")
         .when().post("/2017-03-31/tags/" + esmArn("eu-west-1", uuid))
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        given().get("/2017-03-31/tags/" + esmArn(REGION, uuid).replaceFirst("^arn:aws:", "arn:aws-cn:"))
         .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
@@ -1627,5 +1632,33 @@ class EsmIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    @Order(87)
+    void tagResourceRejectsNonStringTagValuesOnEventSourceMapping() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                { "FunctionName": "%s", "EventSourceArn": "%s" }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when().post(LAMBDA_BASE + "/event-source-mappings")
+        .then().statusCode(202).extract().path("UUID");
+        String arn = esmArn(REGION, uuid);
+
+        given()
+            .contentType("application/json")
+            .body("{\"Tags\": {\"k\": 1}}")
+        .when().post("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        given().get("/2017-03-31/tags/" + arn)
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
     }
 }

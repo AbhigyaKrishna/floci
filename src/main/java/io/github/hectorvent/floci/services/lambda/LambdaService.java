@@ -1282,7 +1282,7 @@ public class LambdaService implements ResourceProvider {
         esm.setSelfManagedEventSource(selfManagedEventSource);
         esm.setTopics(topics);
         esm.setSourceAccessConfigurations(sourceAccessConfigurations);
-        esm.setTags(eventSourceMappingTags(request));
+        esm.setTags(requestTags(request));
         esm.setLastModified(System.currentTimeMillis());
 
         if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
@@ -2217,12 +2217,16 @@ public class LambdaService implements ResourceProvider {
                 environment.get("Variables"), "Environment.Variables");
     }
 
-    private static Map<String, String> eventSourceMappingTags(Map<String, Object> request) {
-        Map<String, String> tags = new HashMap<>();
+    /**
+     * The request's {@code Tags} member as a string-to-string map, or {@code null} when it is
+     * absent. A non-object member or a non-string tag value is a {@code SerializationException}.
+     */
+    static Map<String, String> requestTags(Map<String, Object> request) {
         Map<String, Object> requested = structureMember(request, "Tags");
         if (requested == null) {
-            return tags;
+            return null;
         }
+        Map<String, String> tags = new HashMap<>();
         for (Map.Entry<String, Object> entry : requested.entrySet()) {
             if (!(entry.getValue() instanceof String value)) {
                 throw new AwsException("SerializationException", "Tags values must be strings", 400);
@@ -3166,8 +3170,8 @@ public class LambdaService implements ResourceProvider {
 
     /**
      * The mapping named by an {@code event-source-mapping:} tag-endpoint ARN, or {@code null}
-     * when the ARN names some other resource. A mapping in another region or account is
-     * reported as missing, as AWS does.
+     * when the ARN names some other resource. An ARN in another partition, region or account
+     * than the mapping's is reported as missing, as AWS does.
      */
     private EventSourceMapping taggedEventSourceMapping(String resourceArn) {
         if (resourceArn == null || !resourceArn.startsWith("arn:")) {
@@ -3185,7 +3189,8 @@ public class LambdaService implements ResourceProvider {
             return null;
         }
         return esmStore.get(uuid)
-                .filter(esm -> arn.region().equals(esm.getRegion()) && arn.accountId().equals(esm.getAccountId()))
+                .filter(esm -> resourceArn.equals(LambdaArnUtils.eventSourceMappingArn(
+                        esm.getRegion(), esm.getAccountId(), esm.getUuid())))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The resource you requested does not exist.", 404));
     }
