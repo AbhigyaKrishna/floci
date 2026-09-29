@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -174,7 +175,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         }),
                 storageFactory.create("s3", "s3-objects.json",
                         new TypeReference<Map<String, S3Object>>() {
-                        }),
+                        }, WriteProfile.APPEND_HEAVY),
                 storageFactory.create("s3", "s3-annotations.json",
                         new TypeReference<Map<String, ObjectAnnotation>>() {
                         }),
