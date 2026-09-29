@@ -102,6 +102,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -2977,11 +2978,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             synchronized (privateIpAllocationLock) {
+                List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
                 for (int i = 0; i < count; i++) {
                     String instanceId = "i-" + randomHex(17);
-                    String privateIp = suppliedEni != null
-                            ? suppliedEni.getPrivateIpAddress()
-                            : assignPrivateIp(region, finalSubnetId);
+                    String privateIp = privateIps.get(i);
 
                     Instance inst = new Instance();
                     inst.setInstanceId(instanceId);
@@ -3314,7 +3314,44 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         "The availability zone '" + availabilityZone + "' has no subnet in this region.", 400));
     }
 
+    /**
+     * Every private address a launch needs, allocated before any of its instances is stored, so
+     * a subnet without room for the whole launch fails it without leaving the instances that did
+     * fit behind. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private List<String> allocateLaunchAddresses(String region, String subnetId, NetworkInterface suppliedEni,
+                                                 int count) {
+        List<String> addresses = new ArrayList<>(count);
+        if (suppliedEni != null) {
+            for (int i = 0; i < count; i++) {
+                addresses.add(suppliedEni.getPrivateIpAddress());
+            }
+            return addresses;
+        }
+        try {
+            for (int i = 0; i < count; i++) {
+                addresses.add(assignPrivateIp(region, subnetId, addresses));
+            }
+        } catch (AwsException e) {
+            if (vpcNetworkManager != null) {
+                for (String address : addresses) {
+                    vpcNetworkManager.releasePrivateIp(region, subnetId, address);
+                }
+            }
+            throw e;
+        }
+        return addresses;
+    }
+
     private String assignPrivateIp(String region, String subnetId) {
+        return assignPrivateIp(region, subnetId, List.of());
+    }
+
+    /**
+     * @param pending addresses already handed out to resources that are not stored yet, which the
+     *                synthesised fallback must not hand out again
+     */
+    private String assignPrivateIp(String region, String subnetId, Collection<String> pending) {
         // A Docker-backed subnet allocates the real thing: an address on the network the
         // instance's container will actually hold. Only when there is no such network does
         // this fall back to the synthesised address below, which nothing can connect to.
@@ -3342,6 +3379,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             // The addresses persisted resources already hold, so a restart, which forgets the
             // cursor, never hands out an address that is still in use.
             Set<String> inUse = privateIpsInUse(region, subnetId);
+            inUse.addAll(pending);
             long start = Math.clamp(subnetIpCursors.getOrDefault(cursorKey, SYNTHETIC_FIRST_OFFSET), first, last);
             long span = last - first + 1;
             for (long step = 0; step < span; step++) {

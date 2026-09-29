@@ -2127,6 +2127,28 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void aLaunchTooLargeForTheSubnetStoresNoneOfItsInstances() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.74.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.74.0.0/28", "us-east-1a").getSubnetId();
+        int volumesBefore = service.describeVolumes("us-east-1", List.of(), Map.of()).size();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                        12, 12, null, List.of(), subnetId, null, List.of(), null, null));
+
+        assertEquals("InsufficientFreeAddressesInSubnet", error.getErrorCode());
+        assertTrue(service.describeInstances("us-east-1", List.of(),
+                Map.of("subnet-id", List.of(subnetId))).isEmpty());
+        assertEquals(volumesBefore, service.describeVolumes("us-east-1", List.of(), Map.of()).size());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                11, 11, null, List.of(), subnetId, null, List.of(), null, null);
+        assertEquals(11, reservation.getInstances().stream().map(Instance::getPrivateIpAddress).distinct().count());
+    }
+
+    @Test
     void concurrentCreatesInASmallSubnetNeverShareASynthesisedAddress() throws Exception {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
