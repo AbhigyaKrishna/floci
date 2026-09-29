@@ -77,6 +77,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -137,8 +138,9 @@ public class EcsContainerManager {
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
     // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
     private final String runId = UUID.randomUUID().toString();
-    // A sweep failure is retried before each service task launch; only the first one is a WARN.
-    private volatile boolean leftoverSweepFailureReported;
+    // A sweep failure is retried before each task launch; each distinct failure is a WARN once.
+    private volatile boolean leftoverListFailureReported;
+    private final Set<String> leftoverRemovalFailuresReported = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -1049,8 +1051,9 @@ public class EcsContainerManager {
      * label decides that rather than the creation time, which Docker reports to the second and from
      * a clock that can drift from this process's.
      *
-     * A failure is logged as a WARN the first time and at DEBUG on every retry after it, so an
-     * unreachable Docker daemon does not log on every scheduler tick.
+     * Each distinct failure, a failed listing or a container that would not go, is logged as a
+     * WARN the first time and at DEBUG on every retry that repeats it, so an unreachable Docker
+     * daemon does not log on every launch attempt while a new failure is still reported.
      *
      * @return whether every leftover is gone: false when Docker could not list or remove one
      */
@@ -1067,7 +1070,6 @@ public class EcsContainerManager {
     /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
     public boolean removeLeftoverContainers(String currentRunId) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
-        Logger.Level failureLevel = leftoverSweepFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN;
         List<com.github.dockerjava.api.model.Container> containers;
         try {
             // Docker's container summary, not the ECS model Container this class imports.
@@ -1077,11 +1079,12 @@ public class EcsContainerManager {
                     .withLabelFilter(Map.of("io.floci.service", "ecs", ContainerStorageHelper.OWNER_LABEL, owner))
                     .exec();
         } catch (Exception e) {
-            leftoverSweepFailureReported = true;
-            LOG.logv(failureLevel, "Could not list the ECS containers a previous run left behind: {0}",
-                    e.getMessage());
+            LOG.logv(leftoverListFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN,
+                    "Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
+            leftoverListFailureReported = true;
             return false;
         }
+        leftoverListFailureReported = false;
         boolean allRemoved = true;
         for (com.github.dockerjava.api.model.Container container : containers) {
             if (container.getLabels() != null && currentRunId.equals(container.getLabels().get(RUN_LABEL))) {
@@ -1089,14 +1092,19 @@ public class EcsContainerManager {
             }
             try {
                 lifecycleManager.removeIfExistsStrict(container.getId());
+                leftoverRemovalFailuresReported.remove(container.getId());
                 LOG.infov("Removed ECS container {0} ({1}) left by a previous run", container.getId(),
                         container.getNames() == null ? "" : String.join(",", container.getNames()));
             } catch (Exception e) {
                 allRemoved = false;
-                leftoverSweepFailureReported = true;
-                LOG.logv(failureLevel, "Could not remove ECS container {0} left by a previous run: {1}",
+                Logger.Level level = leftoverRemovalFailuresReported.add(container.getId())
+                        ? Logger.Level.WARN : Logger.Level.DEBUG;
+                LOG.logv(level, "Could not remove ECS container {0} left by a previous run: {1}",
                         container.getId(), e.getMessage());
             }
+        }
+        if (allRemoved) {
+            leftoverRemovalFailuresReported.clear();
         }
         return allRemoved;
     }

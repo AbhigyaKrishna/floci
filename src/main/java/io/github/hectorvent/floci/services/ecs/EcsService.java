@@ -116,7 +116,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
     private final Object reconcilerLock = new Object();
-    // False until a previous run's task containers are confirmed gone; no service task starts before.
+    // False until a previous run's task containers are confirmed gone; no task starts before.
     private volatile boolean leftoverContainersRemoved = true;
     private volatile boolean leftoverContainersBlockReported;
 
@@ -234,7 +234,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * target would follow its address to whichever container Docker hands it to next. Only what
      * the registrars recorded registering is released, never a target or instance registered by
      * hand. A container Docker would not remove is retried by {@link #leftoverContainersCleared()}
-     * whenever a service needs a task, and no service task starts until it is gone.
+     * before each task launch, and no task starts until it is gone.
      */
     void releasePreviousRunLeftovers() {
         if (dockerMode) {
@@ -1319,6 +1319,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
             if (dockerMode) {
                 try {
+                    if (!leftoverContainersCleared()) {
+                        throw new IllegalStateException(
+                                "the containers a previous run of Floci left on the Docker daemon could not be removed yet");
+                    }
                     task.setPullStartedAt(Instant.now());
                     EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
                     task.setPullStoppedAt(Instant.now());
@@ -3961,9 +3965,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Whether a service task may start: true once the containers a previous run left behind are
-     * gone, retrying the sweep otherwise. Only a service that needs a task calls it, so an
-     * unreachable Docker daemon costs nothing while no task is due, and it is reported once.
+     * Whether a task may start: true once the containers a previous run left behind are gone,
+     * retrying the sweep otherwise. It runs before every task launch, RunTask and StartTask
+     * included, and the service scheduler asks it before planning one, so a service it blocks
+     * creates no failed task on every tick. Nothing retries it while no task is due, so an
+     * unreachable Docker daemon costs nothing then, and a blocked launch is reported once.
      */
     private boolean leftoverContainersCleared() {
         if (leftoverContainersRemoved) {
@@ -3974,8 +3980,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             LOG.info("The containers a previous ECS run left behind are gone; starting service tasks");
         } else {
             LOG.log(leftoverContainersBlockReported ? Logger.Level.DEBUG : Logger.Level.WARN,
-                    "Not starting ECS service tasks while a previous run's containers remain;"
-                            + " retrying whenever a service needs a task");
+                    "Not starting ECS tasks while a previous run's containers remain;"
+                            + " retrying before each task launch");
             leftoverContainersBlockReported = true;
         }
         return leftoverContainersRemoved;

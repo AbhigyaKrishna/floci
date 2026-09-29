@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -81,6 +85,33 @@ class EcsServiceRestartLeftoversTest {
         restarted.reconcile();
 
         verify(containerManager).removeLeftoverContainers();
+    }
+
+    @Test
+    void runTaskRetriesTheSweepAndStartsNothingBesideAPreviousRunsContainers() {
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        when(containerManager.removeLeftoverContainers()).thenReturn(false, false, true);
+        EcsService restarted = service(new SharedStorageFactory(), false, containerManager,
+                mock(EcsLoadBalancerRegistrar.class), null);
+        restarted.createCluster("app-cluster", Map.of(), REGION);
+        ContainerDefinition container = new ContainerDefinition();
+        container.setName("web");
+        container.setImage("nginx:alpine");
+        restarted.registerTaskDefinition("web", List.of(container), NetworkMode.bridge, null, null,
+                null, null, List.of(), REGION);
+
+        restarted.releasePreviousRunLeftovers();
+        EcsTask blocked = restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null,
+                null, null, REGION).getFirst();
+
+        assertEquals("STOPPED", blocked.getLastStatus());
+        assertThat(blocked.getStoppedReason(), containsString("previous run"));
+        verify(containerManager, never()).startTask(any(), any(), any(), anyString());
+
+        restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
+
+        verify(containerManager, times(3)).removeLeftoverContainers();
+        verify(containerManager).startTask(any(), any(), any(), anyString());
     }
 
     @Test
