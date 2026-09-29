@@ -114,6 +114,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // what every such caller already expects.
     private final EcsServiceDiscoveryRegistrar discoveryRegistrar;
     private final boolean dockerMode;
+    private final boolean sweepLeftoverContainers;
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
@@ -204,6 +205,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
+        this.sweepLeftoverContainers = dockerMode && config.services().ecs().reconcileContainersOnStartup();
         this.baseUrl = config.effectiveBaseUrl();
         this.lbRegistrar = lbRegistrar;
         this.storageFactory = storageFactory;
@@ -236,10 +238,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * target would follow its address to whichever container Docker hands it to next. Only what
      * the registrars recorded registering is released, never a target or instance registered by
      * hand. A container Docker would not remove is retried by {@link #leftoverContainersCleared()}
-     * before each task launch, and no task starts until it is gone.
+     * before each task launch, and no task starts until it is gone. With
+     * {@code reconcile-containers-on-startup} off, containers are left alone and tasks start at once.
      */
     void releasePreviousRunLeftovers() {
-        if (dockerMode) {
+        if (sweepLeftoverContainers) {
             leftoverContainersRemoved = containerManager.removeLeftoverContainers();
         }
         if (lbRegistrar != null) {
