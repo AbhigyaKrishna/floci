@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -70,17 +71,54 @@ class EcsServiceDiscoveryRegistrarAddressTest {
         verify(containerManager, never()).resolvePeerAddress(any(Container.class));
     }
 
-    @SuppressWarnings("unchecked")
+    @Test
+    void awsvpcTaskAdvertisesTheContainerPortItsAddressAnswersOn() {
+        EcsTask task = task("10.70.1.10");
+        task.getContainers().getFirst().setNetworkBindings(
+                List.of(new NetworkBinding("0.0.0.0", 8080, 49153, "tcp")));
+        when(containerManager.resolvePeerAddress(any(Container.class))).thenReturn(Optional.of("172.31.0.19"));
+
+        registrar.registerTask(task, serviceWithContainerPort(8080), REGION);
+
+        Map<String, String> attributes = registeredAttributes();
+        assertEquals("172.31.0.19", attributes.get("AWS_INSTANCE_IPV4"));
+        assertEquals("8080", attributes.get("AWS_INSTANCE_PORT"));
+    }
+
+    @Test
+    void bridgeTaskAdvertisesThePublishedHostPort() {
+        EcsTask task = task(null);
+        task.getContainers().getFirst().setNetworkBindings(
+                List.of(new NetworkBinding("0.0.0.0", 8080, 49153, "tcp")));
+        when(containerManager.resolveContainerHost(any(Container.class))).thenReturn("127.0.0.1");
+
+        registrar.registerTask(task, serviceWithContainerPort(8080), REGION);
+
+        assertEquals("49153", registeredAttributes().get("AWS_INSTANCE_PORT"));
+    }
+
     private String registeredAddress() {
+        return registeredAttributes().get("AWS_INSTANCE_IPV4");
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, String> registeredAttributes() {
         ArgumentCaptor<Map<String, String>> attributes = ArgumentCaptor.forClass(Map.class);
         verify(cloudMapService).registerInstance(eq("srv-abc123"), anyString(), isNull(),
                 attributes.capture(), eq(REGION));
-        return attributes.getValue().get("AWS_INSTANCE_IPV4");
+        return attributes.getValue();
     }
 
     private static EcsServiceModel service() {
         EcsServiceModel svc = new EcsServiceModel();
         svc.setServiceRegistries(List.of(Map.of("registryArn", REGISTRY_ARN, "containerName", "app")));
+        return svc;
+    }
+
+    private static EcsServiceModel serviceWithContainerPort(int containerPort) {
+        EcsServiceModel svc = new EcsServiceModel();
+        svc.setServiceRegistries(List.of(Map.of("registryArn", REGISTRY_ARN, "containerName", "app",
+                "containerPort", containerPort)));
         return svc;
     }
 

@@ -489,8 +489,10 @@ Known differences from AWS:
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
 - An awsvpc task registers its container's Docker network address, not its ENI address. On
   AWS the two are the same interface. In Floci a task's containers never join the subnet's
-  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The ENI
-  address is registered only when there is no running container to ask, as in mock mode.
+  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The
+  registrar falls back to the ENI address only when it cannot read an address from a running
+  container. The registered port is the container port, since that is what the container
+  listens on at its own address, even when Floci also published it on a host port.
 - `EC2_INSTANCE_ID` is not recorded. Every Floci task runs as a container rather than on a
   registered EC2 host, which is the Fargate case on AWS, where the attribute is also absent.
 - An instance's health status never moves. AWS registers a task `UNHEALTHY` and promotes it to
