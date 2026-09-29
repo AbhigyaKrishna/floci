@@ -5,16 +5,21 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
+import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsRegisteredInstances;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -153,8 +158,81 @@ public class EcsServiceDiscoveryRegistrar {
         }
     }
 
+    /**
+     * Deregisters, from the given Cloud Map services, each instance at one of a starting task's
+     * addresses that no ECS task recorded. The counterpart of
+     * {@link EcsLoadBalancerRegistrar#evictUnrecordedTargets}: such an instance was left by a task
+     * that is gone, as one registered by a Floci version that kept no record, and would now resolve
+     * the service's name to this task. An instance a live task recorded stays.
+     */
+    public void evictUnrecordedInstances(EcsTask task, Collection<String> cloudMapServiceIds,
+                                         Collection<EcsTaskAddress> addresses, String region) {
+        if (cloudMapServiceIds.isEmpty() || addresses.isEmpty()) {
+            return;
+        }
+        Set<String> recorded = new HashSet<>();
+        for (EcsRegisteredInstances entry : ledger.scan(key -> true)) {
+            if (entry.cloudMapServiceIds() != null) {
+                entry.cloudMapServiceIds().forEach(id -> recorded.add(id + "/" + entry.instanceId()));
+            }
+        }
+        for (String cloudMapServiceId : cloudMapServiceIds) {
+            List<Instance> instances;
+            try {
+                instances = cloudMapService.listInstances(cloudMapServiceId);
+            } catch (Exception e) {
+                // A Cloud Map service deleted while an ECS service still names it: nothing to evict.
+                LOG.debugv("Could not list the instances of Cloud Map service {0}: {1}", cloudMapServiceId,
+                        e.getMessage());
+                continue;
+            }
+            for (Instance instance : instances) {
+                Map<String, String> attributes = instance.getAttributes() != null ? instance.getAttributes() : Map.of();
+                String ip = attributes.get("AWS_INSTANCE_IPV4");
+                Integer port = parsePort(attributes.get("AWS_INSTANCE_PORT"));
+                if (ip == null || addresses.stream().noneMatch(a -> a.matches(ip, port))
+                        || recorded.contains(cloudMapServiceId + "/" + instance.getInstanceId())) {
+                    continue;
+                }
+                try {
+                    cloudMapService.deregisterInstance(cloudMapServiceId, instance.getInstanceId(), region);
+                    LOG.warnv("Deregistered stale Cloud Map instance {0} of {1} at {2}: no ECS task registered it,"
+                            + " and its address now belongs to ECS task {3}", instance.getInstanceId(),
+                            cloudMapServiceId, ip, task.getTaskArn());
+                } catch (Exception e) {
+                    LOG.warnv("Could not deregister stale Cloud Map instance {0} of {1}: {2}",
+                            instance.getInstanceId(), cloudMapServiceId, e.getMessage());
+                }
+            }
+        }
+    }
+
     public boolean hasRegistries(EcsServiceModel svc) {
         return !registries(svc).isEmpty();
+    }
+
+    /** The Cloud Map services the ECS service's registries name. */
+    public List<String> cloudMapServiceIds(EcsServiceModel svc) {
+        List<String> ids = new ArrayList<>();
+        for (Map<String, Object> registry : registries(svc)) {
+            String id = cloudMapServiceId(registry);
+            if (id != null) {
+                ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    private static Integer parsePort(String port) {
+        if (port == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(port);
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring a Cloud Map instance port that is not a number: {0}", port);
+            return null;
+        }
     }
 
     private List<Map<String, Object>> registries(EcsServiceModel svc) {

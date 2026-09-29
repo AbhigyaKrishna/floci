@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
@@ -188,19 +189,74 @@ class EcsLoadBalancerRegistrarTest {
     }
 
     @Test
-    void aTargetRegisteredByHandAtTheTasksAddressIsNeverRecordedOrRemoved() {
+    void aTargetAlreadyAtTheTasksAddressIsAdoptedAndRemovedWhenTheTaskStops() {
+        // Left by a task of a run that kept no record: the next task to take the address adopts it.
         String tgArn = createTargetGroup("reg-tg-preexisting");
         elbV2Service.registerTargets(REGION, tgArn, List.of(target("127.0.0.1", 39000)));
         EcsTask task = taskWithContainer("web", 8080, 39000);
         EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
 
         registrar.registerTask(task, svc, REGION);
+        assertEquals(1, elbV2Service.describeTargetHealth(REGION, tgArn, null).size());
         registrar.deregisterTask(task, svc, REGION);
-        registrar.releaseRecordedTargets();
+
+        assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
+                "the target at the stopped task's address should be deregistered");
+    }
+
+    @Test
+    void evictUnrecordedTargetsRemovesAStaleTargetAtTheTasksAddressFromEveryGroup() {
+        String alphaTg = createTargetGroup("reg-tg-evict-alpha");
+        String betaTg = createTargetGroup("reg-tg-evict-beta");
+        elbV2Service.registerTargets(REGION, alphaTg, List.of(target("172.19.0.4", 80), target("172.19.0.3", 80)));
+        elbV2Service.registerTargets(REGION, betaTg, List.of(target("172.19.0.4", 8080)));
+        EcsTask betaTask = taskWithContainer("web", 8080, 8080);
+
+        registrar.evictUnrecordedTargets(betaTask, List.of(alphaTg, betaTg),
+                List.of(new EcsTaskAddress("172.19.0.4", null)), REGION);
+
+        List<TargetHealth> alpha = elbV2Service.describeTargetHealth(REGION, alphaTg, null);
+        assertEquals(1, alpha.size(), "only the target at another address should stay in alpha's group");
+        assertEquals("172.19.0.3", alpha.get(0).getTarget().getId());
+        assertTrue(elbV2Service.describeTargetHealth(REGION, betaTg, null).isEmpty(),
+                "a target at the task's address, on any port, should be evicted");
+    }
+
+    @Test
+    void evictUnrecordedTargetsKeepsATargetALiveTaskRecorded() {
+        String tgArn = createTargetGroup("reg-tg-evict-recorded");
+        EcsTask owner = taskWithContainer("web", 8080, 40000);
+        registrar.registerTask(owner, serviceWithLb(tgArn, "web", 8080), REGION);
+        EcsTask other = taskWithContainer("web", 8080, 40000);
+
+        registrar.evictUnrecordedTargets(other, List.of(tgArn),
+                List.of(EcsTaskAddress.of("127.0.0.1", 40000)), REGION);
+
+        assertEquals(1, elbV2Service.describeTargetHealth(REGION, tgArn, null).size(),
+                "a target a live task recorded should stay");
+        registrar.deregisterTask(owner, serviceWithLb(tgArn, "web", 8080), REGION);
+    }
+
+    @Test
+    void evictUnrecordedTargetsMatchesALoopbackAddressOnlyByItsHostPort() {
+        String tgArn = createTargetGroup("reg-tg-evict-loopback");
+        elbV2Service.registerTargets(REGION, tgArn, List.of(target("127.0.0.1", 41000), target("127.0.0.1", 41001)));
+
+        registrar.evictUnrecordedTargets(taskWithContainer("web", 8080, 41000), List.of(tgArn),
+                List.of(EcsTaskAddress.of("127.0.0.1", 41000)), REGION);
 
         List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
-        assertEquals(1, health.size(), "the target registered by hand should survive the stop and the release");
-        assertEquals(39000, health.get(0).getTarget().getPort());
+        assertEquals(1, health.size(), "the loopback target on another host port should stay");
+        assertEquals(41001, health.get(0).getTarget().getPort());
+    }
+
+    @Test
+    void evictUnrecordedTargetsToleratesADeletedTargetGroup() {
+        String tgArn = createTargetGroup("reg-tg-evict-gone");
+        elbV2Service.deleteTargetGroup(REGION, tgArn);
+
+        registrar.evictUnrecordedTargets(taskWithContainer("web", 8080, 42000), List.of(tgArn),
+                List.of(new EcsTaskAddress("172.19.0.9", null)), REGION);
     }
 
     /** Stands in for the process dying between the registration and anything after it. */

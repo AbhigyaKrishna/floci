@@ -515,9 +515,17 @@ nothing manages:
   container. ECS records each registration it makes in its persisted state and releases exactly
   those, so a target or instance registered through the ELBv2 or Cloud Map API, even into the
   same target group or Cloud Map service, stays. A registration is recorded before it is made,
-  so one cut short by the process dying is still released, and a target already in its group
-  when a task starts is left to whoever registered it and never recorded. Registrations made by a Floci
-  version that kept no record are not recognised either, and must be deregistered by hand once.
+  so one cut short by the process dying is still released. A target already in its group when a
+  task starts is recorded as the task's own, since its address and port reach only that task, so
+  it is deregistered when the task stops, as ECS does on AWS.
+- Registrations no ECS task recorded, as those a Floci version without the record made, are
+  removed once they would misroute: when a task starts, every target and Cloud Map instance at
+  one of its addresses (its container's address on the Docker network, or its ENI address) that no
+  running task recorded is deregistered from each target group and Cloud Map service an ECS
+  service names, and a warning names it. Such an entry was left by a task that is gone, and
+  would otherwise send another service's traffic to the new task. A loopback address, which every
+  task published on the host shares, matches only on the task's host ports. Target groups and
+  Cloud Map services no ECS service names are never touched.
 
 #### Unknown services
 

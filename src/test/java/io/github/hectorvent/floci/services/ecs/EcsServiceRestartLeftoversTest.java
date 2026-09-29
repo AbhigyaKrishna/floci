@@ -7,17 +7,22 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
+import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry;
+import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -147,6 +152,47 @@ class EcsServiceRestartLeftoversTest {
         } finally {
             service.stopManagedContainers();
         }
+    }
+
+    @Test
+    void aStartingTaskEvictsTheUnrecordedRegistrationsAtItsAddress() {
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        when(containerManager.removeLeftoverContainers()).thenReturn(true);
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            Container container = new Container();
+            container.setName("web");
+            container.setNetworkBindings(List.of(new NetworkBinding("0.0.0.0", 80, 80, "tcp")));
+            task.setContainers(List.of(container));
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("web", "docker-id"), Map.of());
+        });
+        when(containerManager.resolveContainerHost(any())).thenReturn("172.19.0.4");
+        EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
+        EcsServiceDiscoveryRegistrar discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
+        when(discoveryRegistrar.cloudMapServiceIds(any())).thenReturn(List.of("srv-alpha"));
+        EcsService ecs = service(new SharedStorageFactory(), false, containerManager, lbRegistrar,
+                discoveryRegistrar);
+        ecs.releasePreviousRunLeftovers();
+        ecs.createCluster("app-cluster", Map.of(), REGION);
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("web");
+        definition.setImage("nginx:alpine");
+        ecs.registerTaskDefinition("web", List.of(definition), NetworkMode.bridge, null, null,
+                null, null, List.of(), REGION);
+        EcsLoadBalancer lb = new EcsLoadBalancer();
+        lb.setTargetGroupArn(TARGET_GROUP_ARN);
+        lb.setContainerName("web");
+        lb.setContainerPort(80);
+        ecs.createService("app-cluster", "alpha", "web", 0, LaunchType.EC2, List.of(lb), null, REGION);
+
+        // A task of no service at all: any container can take the address a stale entry points at.
+        EcsTask task = ecs.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION)
+                .getFirst();
+
+        assertEquals("RUNNING", task.getLastStatus());
+        Set<EcsTaskAddress> addresses = Set.of(new EcsTaskAddress("172.19.0.4", null));
+        verify(lbRegistrar).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN), addresses, REGION);
+        verify(discoveryRegistrar).evictUnrecordedInstances(task, Set.of("srv-alpha"), addresses, REGION);
     }
 
     private static void persistServiceWithLoadBalancer(StorageFactory storage) {

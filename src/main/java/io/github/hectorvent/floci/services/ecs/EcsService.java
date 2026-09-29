@@ -37,11 +37,13 @@ import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.ListTasksRequest;
 import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
+import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
@@ -1336,6 +1338,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         if (!stopRequested) {
                             registerTaskWithLoadBalancers(task, cluster, region);
                             registerTaskForServiceDiscovery(task, cluster, region);
+                            evictStaleRegistrationsAt(task, region);
                         }
                         if (eventPublisher != null) {
                             eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
@@ -1805,6 +1808,69 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc != null && discoveryRegistrar.hasRegistries(svc)) {
             discoveryRegistrar.registerTask(task, svc, region);
         }
+    }
+
+    /**
+     * Removes the load balancer targets and Cloud Map instances that point at a freshly-started
+     * task's addresses but that no ECS task recorded, from every target group and Cloud Map service
+     * an ECS service in the region names. Docker hands a dead container's address to the next
+     * container it starts, so a registration its task never released, as one made by a Floci
+     * version that kept no record, would otherwise route another service's traffic to this task.
+     * Runs for every task, not only a service's: any container can take the address.
+     */
+    private void evictStaleRegistrationsAt(EcsTask task, String region) {
+        Set<String> targetGroupArns = new LinkedHashSet<>();
+        Set<String> cloudMapServiceIds = new LinkedHashSet<>();
+        for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
+            EcsServiceModel svc = entry.getValue();
+            if (!region.equals(extractRegionFromServiceKey(entry.getKey())) || "INACTIVE".equals(svc.getStatus())) {
+                continue;
+            }
+            for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
+                if (lb.getTargetGroupArn() != null && !lb.getTargetGroupArn().isBlank()) {
+                    targetGroupArns.add(lb.getTargetGroupArn());
+                }
+            }
+            if (discoveryRegistrar != null) {
+                cloudMapServiceIds.addAll(discoveryRegistrar.cloudMapServiceIds(svc));
+            }
+        }
+        if (targetGroupArns.isEmpty() && cloudMapServiceIds.isEmpty()) {
+            return;
+        }
+        Set<EcsTaskAddress> addresses = taskAddresses(task);
+        if (lbRegistrar != null) {
+            lbRegistrar.evictUnrecordedTargets(task, targetGroupArns, addresses, region);
+        }
+        if (discoveryRegistrar != null) {
+            discoveryRegistrar.evictUnrecordedInstances(task, cloudMapServiceIds, addresses, region);
+        }
+    }
+
+    /** The addresses a running task holds: its ENI address and each container's address on Docker. */
+    private Set<EcsTaskAddress> taskAddresses(EcsTask task) {
+        Set<EcsTaskAddress> addresses = new LinkedHashSet<>();
+        String eniAddress = task.getPrivateIpAddress();
+        if (eniAddress != null && !eniAddress.isBlank() && !EcsTaskAddress.isLoopback(eniAddress)) {
+            addresses.add(new EcsTaskAddress(eniAddress, null));
+        }
+        if (task.getContainers() == null) {
+            return addresses;
+        }
+        for (Container container : task.getContainers()) {
+            String host = containerManager.resolveContainerHost(container);
+            if (host == null || host.isBlank()) {
+                continue;
+            }
+            if (!EcsTaskAddress.isLoopback(host)) {
+                addresses.add(new EcsTaskAddress(host, null));
+            } else if (container.getNetworkBindings() != null) {
+                for (NetworkBinding binding : container.getNetworkBindings()) {
+                    addresses.add(EcsTaskAddress.of(host, binding.hostPort()));
+                }
+            }
+        }
+        return addresses;
     }
 
     /**
