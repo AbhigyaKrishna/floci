@@ -46,7 +46,6 @@ public class ImageCacheService {
     private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
     private final Map<ImageKey, String> resolvedImages = new ConcurrentHashMap<>();
     private final Set<ImageKey> pulledImages = ConcurrentHashMap.newKeySet();
-    private final Map<ImageKey, PulledManifest> pulledManifests = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
     private volatile String daemonPlatform;
 
@@ -85,7 +84,7 @@ public class ImageCacheService {
                 return resolvedImage;
             }
             resolvedImage = resolvedImageReference(imageUri,
-                    pull(imageKey, explicitPlatform ? requestedPlatform : null));
+                    pull(imageKey, explicitPlatform ? requestedPlatform : null).image());
             resolvedImages.put(imageKey, resolvedImage);
             return resolvedImage;
         }
@@ -108,15 +107,18 @@ public class ImageCacheService {
         ImageKey imageKey = new ImageKey(imageUri, daemonPlatform());
         Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
         synchronized (lock) {
-            InspectImageResponse image = switch (behavior) {
+            LocalImage image = switch (behavior) {
                 case DEFAULT -> pullOrUseCached(imageKey);
                 case ALWAYS -> pull(imageKey, null);
                 case ONCE -> pulledImages.contains(imageKey) ? cachedOrPull(imageKey) : pull(imageKey, null);
                 case PREFER_CACHED -> cachedOrPull(imageKey);
             };
-            String imageId = resolvedImageReference(imageUri, image);
+            String imageId = resolvedImageReference(imageUri, image.image());
             resolvedImages.put(imageKey, imageId);
-            return new LaunchImage(imageId, launchDigest(imageKey, image).orElse(null));
+            String digest = image.pulledDigest() != null && imageUri.indexOf('@') < 0
+                    ? image.pulledDigest()
+                    : manifestDigest(imageUri, image.image()).orElse(null);
+            return new LaunchImage(imageId, digest);
         }
     }
 
@@ -142,7 +144,7 @@ public class ImageCacheService {
         return resolvedImageReference(imageId, image);
     }
 
-    private InspectImageResponse pullOrUseCached(ImageKey imageKey) {
+    private LocalImage pullOrUseCached(ImageKey imageKey) {
         try {
             return pull(imageKey, null);
         } catch (RuntimeException e) {
@@ -152,13 +154,13 @@ public class ImageCacheService {
             }
             LOG.warnv("Could not pull image {0}, using the cached image {1}: {2}",
                     imageKey.imageUri(), cached.getId(), e.getMessage());
-            return cached;
+            return new LocalImage(cached, null);
         }
     }
 
-    private InspectImageResponse cachedOrPull(ImageKey imageKey) {
+    private LocalImage cachedOrPull(ImageKey imageKey) {
         InspectImageResponse cached = cachedImage(imageKey);
-        return cached != null ? cached : pull(imageKey, null);
+        return cached != null ? new LocalImage(cached, null) : pull(imageKey, null);
     }
 
     private InspectImageResponse cachedImage(ImageKey imageKey) {
@@ -171,7 +173,7 @@ public class ImageCacheService {
      *
      * @param platform the platform to ask the registry for, or null for the daemon's own
      */
-    private InspectImageResponse pull(ImageKey imageKey, String platform) {
+    private LocalImage pull(ImageKey imageKey, String platform) {
         String imageUri = imageKey.imageUri();
         LOG.infov("Pulling image: {0}", imageUri);
         AtomicReference<ManifestDigestCallback> lastAttempt = new AtomicReference<>();
@@ -193,39 +195,19 @@ public class ImageCacheService {
         }
         InspectImageResponse pulled = inspectLocalImage(imageUri);
         pulledImages.add(imageKey);
-        String digest = lastAttempt.get().digest;
-        if (pulled != null && digest != null) {
-            pulledManifests.put(imageKey, new PulledManifest(pulled.getId(), digest));
-        } else {
-            pulledManifests.remove(imageKey);
-        }
         LOG.infov("Image pulled successfully: {0}", imageUri);
-        return pulled;
-    }
-
-    /**
-     * The digest of the manifest a launch's reference resolved to. When the image is the one the
-     * last pull of that reference produced, it is the digest the registry reported for that pull;
-     * otherwise it falls back to the image's repo digests.
-     */
-    private Optional<String> launchDigest(ImageKey imageKey, InspectImageResponse image) {
-        String imageUri = imageKey.imageUri();
-        if (imageUri.indexOf('@') < 0) {
-            PulledManifest pulled = pulledManifests.get(imageKey);
-            if (pulled != null && pulled.imageId().equals(image.getId())) {
-                return Optional.of(pulled.digest());
-            }
-        }
-        return manifestDigest(imageUri, image);
+        return new LocalImage(pulled, lastAttempt.get().digest);
     }
 
     /**
      * The digest of the manifest the reference resolved to, from the repository it names. A
      * reference pinned by digest is its own answer; otherwise it is the image's repo digest for
      * that repository, which Docker records when it pulls or pushes the image. An image can hold
-     * several digests for one repository (an index and a platform manifest, or manifests pulled
-     * under different tags), and nothing local says which one the tag names, so that case has
-     * no answer.
+     * several digests for one repository: on the classic image store, manifests that share one
+     * image config; on the containerd store, an index and its platform manifest. The containerd
+     * store's image id is the digest of the manifest the tag names, so a digest equal to the id
+     * is the answer there. Otherwise nothing local says which one the tag names, and a launch that
+     * did not pull reports none rather than a digest the tag may no longer name.
      */
     static Optional<String> manifestDigest(String imageUri, InspectImageResponse image) {
         int at = imageUri.indexOf('@');
@@ -245,6 +227,9 @@ public class ImageCacheService {
             }
         }
         if (digests.size() > 1) {
+            if (digests.contains(image.getId())) {
+                return Optional.of(image.getId());
+            }
             LOG.debugv("Image {0} holds several digests for {1}, reporting none: {2}",
                     image.getId(), imageUri, digests);
             return Optional.empty();
@@ -398,8 +383,13 @@ public class ImageCacheService {
 
     private record ImageKey(String imageUri, String platform) {}
 
-    /** The image a pull left the reference naming, and the manifest digest the registry reported for it. */
-    private record PulledManifest(String imageId, String digest) {}
+    /**
+     * The image a reference names locally.
+     *
+     * @param pulledDigest the manifest digest the registry reported when this launch pulled the
+     *        image, null when the image came from the cache
+     */
+    private record LocalImage(InspectImageResponse image, String pulledDigest) {}
 
     /** Records the manifest digest the daemon reports once a pull has resolved the reference. */
     private static final class ManifestDigestCallback extends PullImageResultCallback {

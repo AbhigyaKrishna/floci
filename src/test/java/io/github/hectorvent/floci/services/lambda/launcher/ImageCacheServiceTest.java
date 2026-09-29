@@ -532,16 +532,39 @@ class ImageCacheServiceTest {
     @Test
     void aLaunchReportsTheDigestItsPullResolvedTheTagTo() {
         FakeDaemon daemon = new FakeDaemon();
-        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new",
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:config",
                 REGISTRY_REPO + "@sha256:platform-manifest", REGISTRY_REPO + "@sha256:index"));
         daemon.registryDigests.put(REGISTRY_IMAGE, "sha256:index");
-        ImageCacheService service = newService(daemon.client);
 
-        assertEquals(new LaunchImage("sha256:new", "sha256:index"),
-                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT));
-        assertEquals(new LaunchImage("sha256:new", "sha256:index"),
-                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED),
-                "a later cached launch of the same image keeps the digest its pull reported");
+        assertEquals(new LaunchImage("sha256:config", "sha256:index"),
+                newService(daemon.client).resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT));
+    }
+
+    @Test
+    void aCachedLaunchReportsNoDigestWhenAnOutsidePullMovedTheTagToAnotherManifestOfTheSameImage() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:config", REGISTRY_REPO + "@sha256:first-manifest"));
+        daemon.registryDigests.put(REGISTRY_IMAGE, "sha256:first-manifest");
+        ImageCacheService service = newService(daemon.client);
+        service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.DEFAULT);
+
+        // A docker pull outside Floci moves the tag to a second manifest of the same image config,
+        // which the classic image store keeps under the same image id.
+        daemon.store(REGISTRY_IMAGE, image("sha256:config",
+                REGISTRY_REPO + "@sha256:first-manifest", REGISTRY_REPO + "@sha256:second-manifest"));
+
+        assertEquals(new LaunchImage("sha256:config", null),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
+    }
+
+    @Test
+    void aCachedLaunchReportsTheDigestTheContainerdStoreNamesTheImageBy() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(REGISTRY_IMAGE, image("sha256:index",
+                REGISTRY_REPO + "@sha256:platform-manifest", REGISTRY_REPO + "@sha256:index"));
+
+        assertEquals(new LaunchImage("sha256:index", "sha256:index"),
+                newService(daemon.client).resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.PREFER_CACHED));
     }
 
     @Test
