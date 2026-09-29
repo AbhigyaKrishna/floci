@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -47,8 +48,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 class EcsImagePullDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String BUSYBOX_IMAGE = "public.ecr.aws/docker/library/busybox:latest";
-    private static final String REGISTRY_IMAGE = "public.ecr.aws/docker/library/registry:2";
     private static final String MANIFEST_TYPES = String.join(",",
             "application/vnd.oci.image.index.v1+json",
             "application/vnd.oci.image.manifest.v1+json",
@@ -108,8 +107,8 @@ class EcsImagePullDockerIntegrationTest {
         String image = registry + "/" + repository + ":latest";
         images.add(image);
 
-        pull(BUSYBOX_IMAGE);
-        dockerClient.tagImageCmd(BUSYBOX_IMAGE, registry + "/" + repository, "latest").exec();
+        pull(TestImages.BUSYBOX);
+        dockerClient.tagImageCmd(TestImages.BUSYBOX, registry + "/" + repository, "latest").exec();
         push(registry + "/" + repository);
         String firstDigest = registryDigest(registry, repository);
 
@@ -172,9 +171,9 @@ class EcsImagePullDockerIntegrationTest {
     }
 
     private String startRegistry() throws InterruptedException {
-        pull(REGISTRY_IMAGE);
+        pull(TestImages.REGISTRY);
         ExposedPort registryPort = ExposedPort.tcp(5000);
-        registryContainerId = dockerClient.createContainerCmd(REGISTRY_IMAGE)
+        registryContainerId = dockerClient.createContainerCmd(TestImages.REGISTRY)
                 .withExposedPorts(registryPort)
                 .withHostConfig(HostConfig.newHostConfig().withPortBindings(new PortBinding(
                         Ports.Binding.bindIp("127.0.0.1"), registryPort)))
