@@ -2051,7 +2051,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 getStoredObjectEntry(bucketName, key, null);
         S3Object obj = ownedObject.value();
         obj.setTags(tags != null ? tags : new java.util.HashMap<>());
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, null, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
         LOG.debugv("Put tags on object: {0}/{1}", bucketName, key);
     }
 
@@ -2070,7 +2070,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 getStoredObjectEntry(bucketName, key, null);
         S3Object obj = ownedObject.value();
         obj.setTags(new java.util.HashMap<>());
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, null, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
         LOG.debugv("Deleted tags from object: {0}/{1}", bucketName, key);
     }
 
@@ -3100,7 +3100,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         obj.setObjectLockMode(mode);
         obj.setRetainUntilDate(retainUntil);
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, versionId, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
         LOG.debugv("Set retention on {0}/{1}: mode={2}, until={3}", bucketName, key, mode, retainUntil);
     }
 
@@ -3113,7 +3113,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 getStoredObjectEntry(bucketName, key, versionId);
         S3Object obj = ownedObject.value();
         obj.setLegalHoldStatus(status);
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, versionId, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
         LOG.debugv("Set legal hold on {0}/{1}: {2}", bucketName, key, status);
     }
 
@@ -3387,10 +3387,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
                 object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
             }
-            objectStore.put(objectKey(bucket, key), object);
-            if (object.getVersionId() != null) {
-                objectStore.put(versionedKey(bucket, key, object.getVersionId()), object);
-            }
+            String bucketOwnerAccount = resolveBucketEntry(bucket)
+                    .map(AccountAwareStorageBackend.OwnedEntry::account)
+                    .orElseThrow(() -> new AwsException("NoSuchBucket",
+                            "The specified bucket does not exist.", 404));
+            putObjectMetadataForAccount(bucketOwnerAccount, bucket, key, object);
 
             // Cleanup
             cleanupMultipart(uploadId);
@@ -3747,7 +3748,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String newAcl = resolvedAcl != null ? resolvedAcl : (bodyAcl.isBlank() ? null : bodyAcl);
         rejectPublicAclWhenBlocked(bucketName, newAcl);
         obj.setAcl(newAcl);
-        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, versionId, obj);
+        putObjectMetadataForAccount(ownedObject.account(), bucketName, key, obj);
     }
 
     /**
@@ -4833,25 +4834,27 @@ public class S3Service implements Resettable, ResourceProvider {
      * Persists a metadata change to one stored object. The current version of a versioned object
      * is indexed under both its version key and the latest key, so both entries are written: the
      * journaled object store replays each entry on its own, and writing one would bring the
-     * other back with the old metadata after a restart.
+     * other back with the old metadata after a restart. The latest key is written only while it
+     * still refers to this object, checked under the bucket lock that puts and deletes hold, so a
+     * concurrent overwrite or delete marker is never replaced by the object it superseded.
      */
-    private void putObjectMetadataForAccount(String accountId, String bucketName, String key,
-                                             String versionId, S3Object object) {
-        String latestKey = objectKey(bucketName, key);
-        String objectVersionId = object.getVersionId();
-        if (versionId == null) {
-            putObjectForAccount(accountId, latestKey, object);
-            if (objectVersionId != null) {
-                putObjectForAccount(accountId, versionedKey(bucketName, key, objectVersionId), object);
+    private void putObjectMetadataForAccount(String accountId, String bucketName, String key, S3Object object) {
+        Bucket bucket = resolveBucket(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            String latestKey = objectKey(bucketName, key);
+            String versionId = object.getVersionId();
+            S3Object latest = resolveObjectForAccount(accountId, latestKey).orElse(null);
+            boolean isCurrent = latest == object
+                    || (versionId != null && latest != null && !latest.isDeleteMarker()
+                            && versionId.equals(latest.getVersionId()));
+            if (versionId != null) {
+                putObjectForAccount(accountId, versionedKey(bucketName, key, versionId), object);
             }
-            return;
-        }
-        putObjectForAccount(accountId, versionedKey(bucketName, key, versionId), object);
-        boolean isCurrentVersion = resolveObjectForAccount(accountId, latestKey)
-                .map(latest -> versionId.equals(latest.getVersionId()))
-                .orElse(false);
-        if (isCurrentVersion) {
-            putObjectForAccount(accountId, latestKey, object);
+            if (isCurrent) {
+                putObjectForAccount(accountId, latestKey, object);
+            }
         }
     }
 
