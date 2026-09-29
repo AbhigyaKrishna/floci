@@ -163,7 +163,8 @@ public class EcsServiceDiscoveryRegistrar {
      * addresses that no ECS task recorded. The counterpart of
      * {@link EcsLoadBalancerRegistrar#evictUnrecordedTargets}: such an instance was left by a task
      * that is gone, as one registered by a Floci version that kept no record, and would now resolve
-     * the service's name to this task. An instance a live task recorded stays.
+     * the service's name to this task. An instance a live task recorded stays, and an address
+     * scoped to a VPC counts only in a Cloud Map service whose namespace is in that VPC.
      */
     public void evictUnrecordedInstances(EcsTask task, Collection<String> cloudMapServiceIds,
                                          Collection<EcsTaskAddress> addresses, String region) {
@@ -178,7 +179,11 @@ public class EcsServiceDiscoveryRegistrar {
         }
         for (String cloudMapServiceId : cloudMapServiceIds) {
             List<Instance> instances;
+            List<EcsTaskAddress> scoped;
             try {
+                String vpc = cloudMapService.getNamespace(
+                        cloudMapService.getService(cloudMapServiceId).getNamespaceId()).getVpc();
+                scoped = addresses.stream().filter(a -> a.appliesTo(vpc)).toList();
                 instances = cloudMapService.listInstances(cloudMapServiceId);
             } catch (Exception e) {
                 // A Cloud Map service deleted while an ECS service still names it: nothing to evict.
@@ -190,7 +195,7 @@ public class EcsServiceDiscoveryRegistrar {
                 Map<String, String> attributes = instance.getAttributes() != null ? instance.getAttributes() : Map.of();
                 String ip = attributes.get("AWS_INSTANCE_IPV4");
                 Integer port = parsePort(attributes.get("AWS_INSTANCE_PORT"));
-                if (ip == null || addresses.stream().noneMatch(a -> a.matches(ip, port))
+                if (ip == null || scoped.stream().noneMatch(a -> a.matches(ip, port))
                         || recorded.contains(cloudMapServiceId + "/" + instance.getInstanceId())) {
                     continue;
                 }

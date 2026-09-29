@@ -208,18 +208,31 @@ class EcsLoadBalancerRegistrarTest {
     void evictUnrecordedTargetsRemovesAStaleTargetAtTheTasksAddressFromEveryGroup() {
         String alphaTg = createTargetGroup("reg-tg-evict-alpha");
         String betaTg = createTargetGroup("reg-tg-evict-beta");
-        elbV2Service.registerTargets(REGION, alphaTg, List.of(target("172.19.0.4", 80), target("172.19.0.3", 80)));
+        elbV2Service.registerTargets(REGION, alphaTg, List.of(target("172.19.0.4", 8080), target("172.19.0.3", 8080)));
         elbV2Service.registerTargets(REGION, betaTg, List.of(target("172.19.0.4", 8080)));
         EcsTask betaTask = taskWithContainer("web", 8080, 8080);
 
         registrar.evictUnrecordedTargets(betaTask, List.of(alphaTg, betaTg),
-                List.of(new EcsTaskAddress("172.19.0.4", null)), REGION);
+                List.of(new EcsTaskAddress("172.19.0.4", 8080)), REGION);
 
         List<TargetHealth> alpha = elbV2Service.describeTargetHealth(REGION, alphaTg, null);
         assertEquals(1, alpha.size(), "only the target at another address should stay in alpha's group");
         assertEquals("172.19.0.3", alpha.get(0).getTarget().getId());
         assertTrue(elbV2Service.describeTargetHealth(REGION, betaTg, null).isEmpty(),
-                "a target at the task's address, on any port, should be evicted");
+                "a target at the task's address and port should be evicted");
+    }
+
+    @Test
+    void evictUnrecordedTargetsKeepsATargetOnAPortTheTaskDoesNotServe() {
+        String tgArn = createTargetGroup("reg-tg-evict-port");
+        elbV2Service.registerTargets(REGION, tgArn, List.of(target("172.19.0.5", 8080), target("172.19.0.5", 9000)));
+
+        registrar.evictUnrecordedTargets(taskWithContainer("web", 8080, 8080), List.of(tgArn),
+                List.of(new EcsTaskAddress("172.19.0.5", 8080)), REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size(), "the target on a port the task does not serve should stay");
+        assertEquals(9000, health.get(0).getTarget().getPort());
     }
 
     @Test
@@ -256,7 +269,7 @@ class EcsLoadBalancerRegistrarTest {
         elbV2Service.deleteTargetGroup(REGION, tgArn);
 
         registrar.evictUnrecordedTargets(taskWithContainer("web", 8080, 42000), List.of(tgArn),
-                List.of(new EcsTaskAddress("172.19.0.9", null)), REGION);
+                List.of(new EcsTaskAddress("172.19.0.9", 8080)), REGION);
     }
 
     /** Stands in for the process dying between the registration and anything after it. */

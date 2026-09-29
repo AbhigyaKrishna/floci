@@ -222,6 +222,24 @@ class EcsServiceDiscoveryRegistrarTest {
                 .map(Instance::getInstanceId).toList());
     }
 
+    @Test
+    void evictUnrecordedInstancesMatchesAnEniAddressOnlyInItsOwnVpc() {
+        String namespace = uniqueName("svcdisc") + ".internal";
+        Service cloudMapSvc = createDnsService(namespace, "api");
+        cloudMapService.registerInstance(cloudMapSvc.getId(), "by-hand", null,
+                Map.of("AWS_INSTANCE_IPV4", "10.0.1.5"), REGION);
+
+        registrar.evictUnrecordedInstances(task("10.0.1.5", "api", 8080, 8080), List.of(cloudMapSvc.getId()),
+                List.of(new EcsTaskAddress("10.0.1.5", null, "vpc-elsewhere")), REGION);
+        assertEquals(List.of("by-hand"), cloudMapService.listInstances(cloudMapSvc.getId()).stream()
+                .map(Instance::getInstanceId).toList(), "an instance in another VPC's namespace should stay");
+
+        registrar.evictUnrecordedInstances(task("10.0.1.5", "api", 8080, 8080), List.of(cloudMapSvc.getId()),
+                List.of(new EcsTaskAddress("10.0.1.5", null, "vpc-svcdisc")), REGION);
+        assertTrue(cloudMapService.listInstances(cloudMapSvc.getId()).isEmpty(),
+                "an instance at the task's ENI address in its own VPC should be evicted");
+    }
+
     /** Stands in for the process dying between the registration and anything after it. */
     private static final class ProcessKilled extends Error {
     }

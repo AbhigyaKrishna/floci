@@ -1838,21 +1838,54 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (targetGroupArns.isEmpty() && cloudMapServiceIds.isEmpty()) {
             return;
         }
-        Set<EcsTaskAddress> addresses = taskAddresses(task);
-        if (lbRegistrar != null) {
-            lbRegistrar.evictUnrecordedTargets(task, targetGroupArns, addresses, region);
+        if (lbRegistrar != null && !targetGroupArns.isEmpty()) {
+            lbRegistrar.evictUnrecordedTargets(task, targetGroupArns, targetAddresses(task), region);
         }
-        if (discoveryRegistrar != null) {
-            discoveryRegistrar.evictUnrecordedInstances(task, cloudMapServiceIds, addresses, region);
+        if (discoveryRegistrar != null && !cloudMapServiceIds.isEmpty()) {
+            discoveryRegistrar.evictUnrecordedInstances(task, cloudMapServiceIds, instanceAddresses(task, region),
+                    region);
         }
     }
 
-    /** The addresses a running task holds: its ENI address and each container's address on Docker. */
-    private Set<EcsTaskAddress> taskAddresses(EcsTask task) {
+    /**
+     * The address and port pairs at which a load balancer target reaches a running task: each
+     * container's address, on the ports its bindings declare. The ENI address is not among them,
+     * since ECS registers no target at it and it is unique only within its VPC, and a target on a
+     * port the task does not serve sends it nothing.
+     */
+    private Set<EcsTaskAddress> targetAddresses(EcsTask task) {
+        Set<EcsTaskAddress> addresses = new LinkedHashSet<>();
+        if (task.getContainers() == null) {
+            return addresses;
+        }
+        for (Container container : task.getContainers()) {
+            String host = containerManager.resolveContainerHost(container);
+            if (host == null || host.isBlank() || container.getNetworkBindings() == null) {
+                continue;
+            }
+            for (NetworkBinding binding : container.getNetworkBindings()) {
+                addresses.add(new EcsTaskAddress(host, binding.hostPort()));
+                if (!EcsTaskAddress.isLoopback(host)) {
+                    addresses.add(new EcsTaskAddress(host, binding.containerPort()));
+                }
+            }
+        }
+        return addresses;
+    }
+
+    /**
+     * The addresses at which a Cloud Map instance resolves to a running task: its ENI address,
+     * within the task's VPC only, and each container's address on Docker, on any port since a
+     * DNS answer carries none. A loopback address counts only on the task's host ports.
+     */
+    private Set<EcsTaskAddress> instanceAddresses(EcsTask task, String region) {
         Set<EcsTaskAddress> addresses = new LinkedHashSet<>();
         String eniAddress = task.getPrivateIpAddress();
         if (eniAddress != null && !eniAddress.isBlank() && !EcsTaskAddress.isLoopback(eniAddress)) {
-            addresses.add(new EcsTaskAddress(eniAddress, null));
+            String vpcId = containerManager.taskVpcId(task, region);
+            if (vpcId != null) {
+                addresses.add(new EcsTaskAddress(eniAddress, null, vpcId));
+            }
         }
         if (task.getContainers() == null) {
             return addresses;

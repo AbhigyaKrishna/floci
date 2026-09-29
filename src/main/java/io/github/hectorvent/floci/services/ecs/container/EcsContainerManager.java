@@ -1001,6 +1001,30 @@ public class EcsContainerManager {
     }
 
     /**
+     * The VPC an awsvpc task's interface was created in, read from its subnet, or {@code null}
+     * for a task without one or whose subnet is gone.
+     */
+    public String taskVpcId(EcsTask task, String region) {
+        if (task.getNetworkInterfaceId() == null || ec2Service == null) {
+            return null;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            return null;
+        }
+        try {
+            return ec2Service.describeSubnets(region, List.of(awsvpc.getSubnets().getFirst()), Map.of()).stream()
+                    .findFirst()
+                    .map(subnet -> subnet.getVpcId())
+                    .orElse(null);
+        } catch (AwsException e) {
+            LOG.debugv("Could not look up the VPC of ECS task {0}: {1}", task.getTaskArn(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Restates an EC2 lookup failure as the error RunTask declares. A caller naming a subnet or a
      * security group that is not there asked for something the task cannot have, and
      * {@code InvalidSubnetID.NotFound} is not in RunTask's error list, so an SDK sees it as an

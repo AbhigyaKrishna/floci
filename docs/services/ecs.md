@@ -519,13 +519,16 @@ nothing manages:
   task starts is recorded as the task's own, since its address and port reach only that task, so
   it is deregistered when the task stops, as ECS does on AWS.
 - Registrations no ECS task recorded, as those a Floci version without the record made, are
-  removed once they would misroute: when a task starts, every target and Cloud Map instance at
-  one of its addresses (its container's address on the Docker network, or its ENI address) that no
-  running task recorded is deregistered from each target group and Cloud Map service an ECS
-  service names, and a warning names it. Such an entry was left by a task that is gone, and
-  would otherwise send another service's traffic to the new task. A loopback address, which every
-  task published on the host shares, matches only on the task's host ports. Target groups and
-  Cloud Map services no ECS service names are never touched.
+  removed once they would misroute: when a task starts, each registration that points at it and
+  that no running task recorded is deregistered from the target groups and Cloud Map services an
+  ECS service names, and a warning names it. Such an entry was left by a task that is gone, and
+  would otherwise send another service's traffic to the new task. A target points at the task
+  when it is at its container's address on the Docker network and on a port the container
+  publishes. A Cloud Map instance points at it when it is at that container address, on any port
+  since a DNS answer carries none, or at the task's ENI address in a namespace of the task's own
+  VPC, as ENI addresses are unique only within a VPC. A loopback address, which every task
+  published on the host shares, matches only on the task's host ports. Target groups and Cloud
+  Map services no ECS service names are never touched.
 
 #### Unknown services
 

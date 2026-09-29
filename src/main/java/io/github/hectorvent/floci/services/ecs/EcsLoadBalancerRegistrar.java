@@ -130,7 +130,7 @@ public class EcsLoadBalancerRegistrar {
 
     /**
      * Deregisters, from the given target groups, each target at one of a starting task's addresses
-     * that no ECS task recorded. The address was free until this task took it, so such a target
+     * and ports that no ECS task recorded. The address was free until this task took it, so such a target
      * was left by a task that is gone, as one registered by a Floci version that kept no record,
      * and would now send the group's traffic to this task, which belongs to some other service.
      * A target a live task recorded stays, whichever group it is in.

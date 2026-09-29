@@ -164,9 +164,11 @@ class EcsServiceRestartLeftoversTest {
             container.setName("web");
             container.setNetworkBindings(List.of(new NetworkBinding("0.0.0.0", 80, 80, "tcp")));
             task.setContainers(List.of(container));
+            task.setPrivateIpAddress("10.0.1.5");
             return new EcsTaskHandle(task.getTaskArn(), Map.of("web", "docker-id"), Map.of());
         });
         when(containerManager.resolveContainerHost(any())).thenReturn("172.19.0.4");
+        when(containerManager.taskVpcId(any(), anyString())).thenReturn("vpc-app");
         EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
         EcsServiceDiscoveryRegistrar discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
         when(discoveryRegistrar.cloudMapServiceIds(any())).thenReturn(List.of("srv-alpha"));
@@ -190,9 +192,12 @@ class EcsServiceRestartLeftoversTest {
                 .getFirst();
 
         assertEquals("RUNNING", task.getLastStatus());
-        Set<EcsTaskAddress> addresses = Set.of(new EcsTaskAddress("172.19.0.4", null));
-        verify(lbRegistrar).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN), addresses, REGION);
-        verify(discoveryRegistrar).evictUnrecordedInstances(task, Set.of("srv-alpha"), addresses, REGION);
+        // A target only on the ports the container serves, and never at the VPC-scoped ENI address.
+        verify(lbRegistrar).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN),
+                Set.of(new EcsTaskAddress("172.19.0.4", 80)), REGION);
+        verify(discoveryRegistrar).evictUnrecordedInstances(task, Set.of("srv-alpha"),
+                Set.of(new EcsTaskAddress("10.0.1.5", null, "vpc-app"), new EcsTaskAddress("172.19.0.4", null)),
+                REGION);
     }
 
     private static void persistServiceWithLoadBalancer(StorageFactory storage) {
