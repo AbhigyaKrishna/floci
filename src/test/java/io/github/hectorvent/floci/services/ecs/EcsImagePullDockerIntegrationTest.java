@@ -192,8 +192,8 @@ class EcsImagePullDockerIntegrationTest {
                 if (response.statusCode() == 200) {
                     return registry;
                 }
-            } catch (IOException notYetListening) {
-                // The registry takes a moment to bind after the container starts.
+            } catch (IOException expected) {
+                // Safe to retry: the registry takes a moment to bind after the container starts.
             }
             Thread.sleep(100);
         }
