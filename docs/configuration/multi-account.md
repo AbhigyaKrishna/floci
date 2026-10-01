@@ -176,7 +176,7 @@ FLOCI_AUTH_VALIDATE_SIGNATURES=true
 FLOCI_AUTH_PRESIGN_SECRET=your-secret   # for pre-signed URL verification
 ```
 
-With `FLOCI_AUTH_VALIDATE_SIGNATURES` or `FLOCI_SERVICES_S3_ENFORCE_AUTH` enabled, header-signed S3 requests and presigned POSTs using a synthetic 12-digit account key fail with `403 InvalidAccessKeyId`. Sign S3 requests with `test`/`test` or credentials created through Floci IAM or STS (including the session token for STS credentials). For multi-account S3 access, use IAM or STS credentials for the target account; `test`/`test` routes to `FLOCI_DEFAULT_ACCOUNT_ID` (see [S3 Signature Verification](../services/s3.md#signature-verification)).
+With `FLOCI_AUTH_VALIDATE_SIGNATURES` or `FLOCI_SERVICES_S3_ENFORCE_AUTH` enabled, header-signed S3 requests using a synthetic 12-digit account key fail with `403 InvalidAccessKeyId`, while presigned POSTs using that key fail with `403 SignatureDoesNotMatch`. Sign S3 requests with `test`/`test` or credentials created through Floci IAM or STS (including the session token for STS credentials). For multi-account S3 access, use IAM or STS credentials for the target account; `test`/`test` routes to `FLOCI_DEFAULT_ACCOUNT_ID` (see [S3 Signature Verification](../services/s3.md#signature-verification)).
 
 When `validate-signatures` is `false` (the default), S3 signatures are verified only under `FLOCI_SERVICES_S3_ENFORCE_AUTH`. Account routing remains AKID-based regardless of this setting.
 
