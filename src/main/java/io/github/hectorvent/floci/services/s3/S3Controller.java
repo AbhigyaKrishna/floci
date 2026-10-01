@@ -3546,11 +3546,6 @@ public class S3Controller {
     }
 
     /**
-     * Enforces real S3 presigned-POST auth: a {@code policy} field must be present and
-     * SigV4-signed by a known secret key referenced through {@code x-amz-credential}, matching
-     * real S3's behavior of rejecting fabricated or absent credentials with 403 AccessDenied.
-     */
-    /**
      * Whether a browser POST carries any SigV4 form field. Under {@code floci.auth.validate-signatures}
      * such a POST must verify, while one with none of them is anonymous and is left to
      * {@code enforce-auth}, which decides anonymous access from the bucket policy and ACL.
@@ -3561,6 +3556,11 @@ public class S3Controller {
                 .anyMatch(value -> value != null && !value.isEmpty());
     }
 
+    /**
+     * Enforces real S3 presigned-POST auth: a {@code policy} field must be present and
+     * SigV4-signed by a known secret key referenced through {@code x-amz-credential}, matching
+     * real S3's behavior of rejecting fabricated or absent credentials with 403 AccessDenied.
+     */
     private void validatePresignedPostAuth(Map<String, String> fields, String bucket, String key, int contentLength) {
         String policy = fields.get("policy");
         String credential = fields.get("x-amz-credential");
