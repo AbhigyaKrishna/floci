@@ -467,7 +467,7 @@ public class ApiGatewayExecuteController {
                     iamIdentity);
             case "AWS" -> invokeAwsIntegration(scope, region, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
-            case "HTTP_PROXY" -> invokeHttpProxy(scope, apiId, httpMethod, path, proxy, stageName,
+            case "HTTP_PROXY" -> invokeHttpProxy(scope, apiId, httpMethod, path, stageName,
                     matched, integration, headers, uriInfo, body, iamIdentity);
             case "HTTP" -> invokeHttpIntegration(scope, region, apiId, httpMethod, path, proxy, stageName,
                     matched, integration, headers, uriInfo, body, authorizerResult);
@@ -542,7 +542,7 @@ public class ApiGatewayExecuteController {
      * {@code integration.request.*} parameter mapping applies on the way out.
      */
     private Response invokeHttpProxy(GatewayResponseScope scope, String apiId, String httpMethod, String path,
-                                     String proxy, String stageName, ApiGatewayResource resource,
+                                     String stageName, ApiGatewayResource resource,
                                      Integration integration, HttpHeaders headers,
                                      UriInfo uriInfo, byte[] body,
                                      ExecuteApiSigV4Authorizer.CallerIdentity iamIdentity) {
@@ -570,8 +570,8 @@ public class ApiGatewayExecuteController {
             queryMap.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, String> pathMap = new LinkedHashMap<>();
-        if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
+        pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
         // integration.request.{header,querystring,path}.X ← method.request.*, applied here rather
         // than by the v2 RequestParameterMapper: that mapper reads the unrelated v2 syntax

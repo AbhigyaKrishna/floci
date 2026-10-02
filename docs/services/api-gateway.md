@@ -303,6 +303,12 @@ A `MOCK` integration renders its request template and uses the `statusCode` it p
 
 `HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
 
+A greedy resource captures only the path segments after its parent. For example,
+`/api/v1/auth/signup/{proxy+}` captures `checkpoint/status` from
+`/api/v1/auth/signup/checkpoint/status`, so an integration URI ending in
+`/api/v1/auth/signup/{proxy}` forwards the prefix once. Greedy parameter names other
+than `proxy` are supported, including in `integration.request.path.*` mappings.
+
 A backend response body larger than the 10 MB API Gateway payload quota yields `413` with `{"message":"Request Entity Too Large"}`. The same limit applies to HTTP API `HTTP_PROXY` integrations.
 
 Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` reaches the backend as two `tag` parameters rather than one `tag=a,b`, a header sent twice arrives twice, and a backend that returns two `Set-Cookie` headers relays two to the caller. Comma-joining them would not be reversible, since a cookie's `Expires` attribute contains a comma of its own. An explicit `integration.request.header.X` or `integration.request.querystring.X` mapping overwrites, so it replaces any repeated inbound values with the single mapped one.
