@@ -5,8 +5,8 @@ import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigateway.model.AuthorizerType;
 import software.amazon.awssdk.services.apigateway.model.BadRequestException;
 import software.amazon.awssdk.services.apigateway.model.IntegrationType;
-import software.amazon.awssdk.services.apigateway.model.PatchOperation;
 import software.amazon.awssdk.services.apigateway.model.NotFoundException;
+import software.amazon.awssdk.services.apigateway.model.PatchOperation;
 
 import java.util.Map;
 
