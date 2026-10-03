@@ -907,7 +907,9 @@ public class ApiGatewayExecuteController {
             for (Map.Entry<String, String> param : requestParameters.entrySet()) {
                 String dest = param.getKey();
                 String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap, mappingContext);
-                if (resolved == null) continue;
+                if (resolved == null) {
+                    continue;
+                }
                 if (dest.startsWith("integration.request.header.")) {
                     outHeaders.put(dest.substring("integration.request.header.".length()), resolved);
                 } else if (dest.startsWith("integration.request.querystring.")) {
@@ -1389,9 +1391,9 @@ public class ApiGatewayExecuteController {
         String arnRegion = region != null ? region : regionResolver.getDefaultRegion();
         String domainName = AwsEndpoints.executeApiHost(apiId, arnRegion);
         long nowMillis = System.currentTimeMillis();
-        String requestTime = java.time.format.DateTimeFormatter
+        String requestTime = DateTimeFormatter
                 .ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC));
+                .format(ZonedDateTime.now(ZoneOffset.UTC));
 
         ObjectNode ctx = event.putObject("requestContext");
         ctx.put("accountId", regionResolver.getAccountId());
@@ -2109,7 +2111,9 @@ public class ApiGatewayExecuteController {
     private String resolveRequestParameter(String source, Map<String, String> queryParams,
                                             Map<String, String> pathParams, Map<String, String> headers,
                                             Map<String, Object> context) {
-        if (source == null) return null;
+        if (source == null) {
+            return null;
+        }
         if (source.startsWith("method.request.querystring.")) {
             return queryParams.get(source.substring("method.request.querystring.".length()));
         }
