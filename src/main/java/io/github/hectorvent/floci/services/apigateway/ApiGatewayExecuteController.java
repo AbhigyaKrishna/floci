@@ -577,6 +577,11 @@ public class ApiGatewayExecuteController {
         pathMap.putAll(extractPathParams(resource.getPath(), path));
         pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
+        // Mapping sources always read the original request, independent of destination order.
+        Map<String, String> outHeaders = new LinkedHashMap<>(headerMap);
+        Map<String, String> outQuery = new LinkedHashMap<>(queryMap);
+        Map<String, String> outPath = new LinkedHashMap<>(pathMap);
+
         // REST integration.request.* mappings are applied here rather
         // than by the v2 RequestParameterMapper: that mapper reads the unrelated v2 syntax
         // ("append:header.x" → "$request.header.y") and would silently ignore these REST mappings.
@@ -595,18 +600,18 @@ public class ApiGatewayExecuteController {
                 if (dest.startsWith("integration.request.header.")) {
                     String name = dest.substring("integration.request.header.".length());
                     // A missing context value must not fall back to a client-supplied trusted header.
-                    headerMap.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+                    outHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
                     multiValueHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
                     if (resolved != null) {
-                        headerMap.put(name, resolved);
+                        outHeaders.put(name, resolved);
                         multiValueHeaders.put(name, List.of(resolved));
                     }
                 } else if (dest.startsWith("integration.request.querystring.")) {
                     String name = dest.substring("integration.request.querystring.".length());
-                    queryMap.put(name, resolved);
+                    outQuery.put(name, resolved);
                     multiValueQuery.put(name, List.of(resolved));
                 } else if (dest.startsWith("integration.request.path.")) {
-                    pathMap.put(dest.substring("integration.request.path.".length()), resolved);
+                    outPath.put(dest.substring("integration.request.path.".length()), resolved);
                 }
             }
         }
@@ -623,10 +628,10 @@ public class ApiGatewayExecuteController {
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path,
-                        pathMap.getOrDefault("proxy", ""), resource.getPath(),
+                        outPath.getOrDefault("proxy", ""), resource.getPath(),
                         requestId,
                         headerMap.getOrDefault("X-Forwarded-For", "127.0.0.1"),
-                        headerMap, queryMap, pathMap, body,
+                        outHeaders, outQuery, outPath, body,
                         Map.of(), Map.of(),
                         multiValueHeaders, multiValueQuery);
 

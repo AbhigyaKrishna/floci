@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
@@ -165,6 +166,47 @@ class ApiGatewayHttpContextMappingIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"HTTP_PROXY,true,true", "HTTP_PROXY,true,false", "HTTP_PROXY,false,true", "HTTP_PROXY,false,false",
+            "HTTP,true,true", "HTTP,true,false", "HTTP,false,true", "HTTP,false,false"})
+    void requestMappingsReadOriginalInputs(String type, boolean hasClaim, boolean copiesFirst) throws Exception {
+        configureAuthorizer(0, hasClaim ? Map.of("userClaims", "verified-claims") : Map.of());
+        Map<String, String> replacements = new LinkedHashMap<>();
+        replacements.put("integration.request.header.X-User-Claims", "context.authorizer.userClaims");
+        replacements.put("integration.request.header.X-Principal", "context.authorizer.principalId");
+        replacements.put("integration.request.querystring.claims", "'mapped-query'");
+        replacements.put("integration.request.path.principal", "context.authorizer.principalId");
+        replacements.put("integration.request.path.proxy", "'mapped-path'");
+        Map<String, String> copies = new LinkedHashMap<>();
+        copies.put("integration.request.header.X-Original-Claims", "method.request.header.x-user-claims");
+        copies.put("integration.request.header.X-Original-Query", "method.request.querystring.claims");
+        copies.put("integration.request.header.X-Original-Path", "method.request.path.proxy");
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.putAll(copiesFirst ? copies : replacements);
+        parameters.putAll(copiesFirst ? replacements : copies);
+        configureIntegration(type, "GET", parameters);
+        deploy();
+
+        for (String endpoint : List.of("/execute-api/" + apiId + "/test/",
+                "/restapis/" + apiId + "/test/_user_request_/")) {
+            JsonNode response = MAPPER.readTree(given().header("Authorization", "Bearer allowed")
+                    .header("x-user-claims", "client-claims")
+                    .get(endpoint + "orders/42?claims=client-query")
+                    .then().statusCode(200).extract().asByteArray());
+            JsonNode headers = response.path("headers");
+            assertEquals("client-claims", headers.path("x-original-claims").path(0).asText());
+            assertEquals("client-query", headers.path("x-original-query").path(0).asText());
+            assertEquals("orders/42", headers.path("x-original-path").path(0).asText());
+            assertEquals("/users/verified-user/mapped-path", response.path("path").asText());
+            assertEquals("claims=mapped-query", response.path("query").asText());
+            if (hasClaim) {
+                assertEquals(MAPPER.valueToTree(List.of("verified-claims")), headers.path("x-user-claims"));
+            } else {
+                assertFalse(headers.has("x-user-claims"));
+            }
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"HTTP_PROXY", "HTTP"})
     void retainsContextOnRepeatedRequestsWithAuthorizerTtl(String type) throws Exception {
         configureAuthorizer(300);
@@ -280,6 +322,10 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         parameters.put("integration.request.querystring.client", "method.request.querystring.client");
         parameters.put("integration.request.path.principal", "context.authorizer.principalId");
         parameters.put("integration.request.path.proxy", "method.request.path.proxy");
+        configureIntegration(type, method, parameters);
+    }
+
+    private void configureIntegration(String type, String method, Map<String, String> parameters) {
         // POST makes the HTTP integration's rendered request body observable at the echo backend.
         String integrationMethod = "HTTP".equals(type) && "GET".equals(method) ? "POST" : method;
         given().contentType(ContentType.JSON)

@@ -324,6 +324,9 @@ missing or is not a scalar. The backend therefore cannot receive a client-suppli
 of an absent authorizer claim. An unresolved `method.request.*` mapping retains the existing
 HTTP proxy passthrough behavior.
 
+`method.request.*` sources always read the original inbound headers, query parameters and path
+parameters. Mapped destinations do not change another mapping's source, regardless of mapping order.
+
 Use alphanumeric or underscore authorizer context keys, as required by the
 [AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
 For example, return `userClaims` in the authorizer context and map
