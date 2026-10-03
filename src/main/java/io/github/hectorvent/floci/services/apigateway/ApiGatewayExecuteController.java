@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Stage;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.apigatewayv2.AuthorizerPolicyEvaluator;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
@@ -114,6 +115,7 @@ public class ApiGatewayExecuteController {
     private final JwtSignatureVerifier jwtSignatureVerifier;
     private final RequestContext requestContext;
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
+    private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -127,7 +129,8 @@ public class ApiGatewayExecuteController {
                                        ApiGatewayExecuteRouteContext routeContext,
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
-                                       ExecuteApiSigV4Authorizer sigV4Authorizer) {
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer,
+                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -143,6 +146,7 @@ public class ApiGatewayExecuteController {
         this.jwtSignatureVerifier = jwtSignatureVerifier;
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
+        this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -2937,26 +2941,10 @@ public class ApiGatewayExecuteController {
                         .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
-            JsonNode statements = policyDocument.path("Statement");
-            if (statements.isMissingNode() || statements.isNull()
-                    || !statements.isArray() || statements.isEmpty()) {
-                LOG.warnv("Authorizer response missing or empty Statement array for API {0}", apiId);
-                return new RequestAuthorizerResult(Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
-                        .type(MediaType.APPLICATION_JSON).build(), null);
-            }
-
-            String effect = statements.get(0).path("Effect").asText("Deny");
-            if ("Deny".equalsIgnoreCase(effect)) {
+            String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, path);
+            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn)) {
                 return new RequestAuthorizerResult(Response.status(403)
                         .entity(jsonMessage("User is not authorized to access this resource"))
-                        .type(MediaType.APPLICATION_JSON).build(), null);
-            }
-
-            if (!"Allow".equalsIgnoreCase(effect)) {
-                LOG.warnv("Authorizer response has unrecognized Effect '{0}' for API {1}", effect, apiId);
-                return new RequestAuthorizerResult(Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
                         .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
