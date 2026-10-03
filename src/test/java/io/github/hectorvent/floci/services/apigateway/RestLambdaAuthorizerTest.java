@@ -72,10 +72,10 @@ class RestLambdaAuthorizerTest {
     @Test
     void scalarContextRetainsTypesAndIsImmutable() throws Exception {
         byte[] payload = mapper.writeValueAsBytes(Map.of("principalId", "principal", "context",
-                Map.of("userClaims", "trusted", "number", 2, "boolean", true), "policyDocument",
+                Map.of("tenant-id", "trusted", "number", 2, "boolean", true), "policyDocument",
                 Map.of("Statement", Map.of("Effect", "Allow", "Action", "execute-api:Invoke", "Resource", "*"))));
         RestLambdaAuthorizer.Result result = authorizer.parse(payload);
-        assertEquals(Map.of("userClaims", "trusted", "number", 2, "boolean", true), result.context());
+        assertEquals(Map.of("tenant-id", "trusted", "number", 2, "boolean", true), result.context());
         assertThrows(UnsupportedOperationException.class, () -> result.context().put("claims", "forged"));
         assertTrue(authorizer.permits(result, "method", Map.of()));
     }

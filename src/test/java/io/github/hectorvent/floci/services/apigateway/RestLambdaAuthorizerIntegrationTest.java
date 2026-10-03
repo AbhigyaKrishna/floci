@@ -11,8 +11,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,7 +83,7 @@ class RestLambdaAuthorizerIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"principal", "object", "array", "key", "policy"})
+    @ValueSource(strings = {"principal", "object", "array", "null", "policy"})
     void invalidOutputFailsBeforeIntegration(String scenario) throws Exception {
         configure("TOKEN", 0, "method.request.header.Authorization");
         Map<String, Object> output = new LinkedHashMap<>();
@@ -91,11 +93,89 @@ class RestLambdaAuthorizerIntegrationTest {
             case "principal" -> output.remove("principalId");
             case "object" -> output.put("context", Map.of("claims", Map.of("nested", "value")));
             case "array" -> output.put("context", Map.of("claims", List.of("value")));
-            case "key" -> output.put("context", Map.of("X-Claims", "value"));
+            case "null" -> output.put("context", Collections.singletonMap("claims", null));
             default -> output.put("policyDocument", Map.of("Statement", List.of(Map.of("Effect", "Allow"))));
         }
         respond(output);
         given().header("Authorization", "token").get(execute("allowed")).then().statusCode(500);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"default,missing", "300,missing", "300,empty", "300,blank"})
+    void cachedRequestAuthorizerRequiresIdentitySourceAtCreation(String ttl, String source) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("name", "invalid-request-authorizer");
+        request.put("type", "REQUEST");
+        request.put("authorizerUri", AUTHORIZER_URI);
+        if (!"default".equals(ttl)) {
+            request.put("authorizerResultTtlInSeconds", Integer.parseInt(ttl));
+        }
+        if (!"missing".equals(source)) {
+            request.put("identitySource", "blank".equals(source) ? "   " : "");
+        }
+        given().contentType(ContentType.JSON).body(request)
+                .post("/restapis/" + apiId + "/authorizers").then().statusCode(400);
+        given().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200).body("item.size()", equalTo(0));
+    }
+
+    @Test
+    void uncachedRequestAuthorizerCanOmitIdentitySource() throws Exception {
+        configure("REQUEST", 0, null);
+        allowAll();
+        given().get(execute("allowed")).then().statusCode(200);
+        verifyInvocation(1);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"300,method.request.header.Authorization,/identitySource,   ",
+            "0,,/authorizerResultTtlInSeconds,300"})
+    void invalidRequestAuthorizerUpdateLeavesConfigurationUnchanged(int ttl, String source, String path, String value) {
+        configure("REQUEST", ttl, source);
+        given().contentType(ContentType.JSON).body(Map.of("patchOperations", List.of(
+                        Map.of("op", "replace", "path", "/name", "value", "changed"),
+                        Map.of("op", "replace", "path", path, "value", value != null ? value : ""))))
+                .patch("/restapis/" + apiId + "/authorizers/" + authorizerId).then().statusCode(400);
+        given().get("/restapis/" + apiId + "/authorizers/" + authorizerId).then().statusCode(200)
+                .body("name", equalTo("contract"), "authorizerResultTtlInSeconds", equalTo(ttl));
+    }
+
+    @Test
+    void requestAuthorizerCanEnableCachingAndIdentitySourceInOnePatch() {
+        configure("REQUEST", 0, null);
+        given().contentType(ContentType.JSON).body(Map.of("patchOperations", List.of(
+                        Map.of("op", "replace", "path", "/authorizerResultTtlInSeconds", "value", "300"),
+                        Map.of("op", "replace", "path", "/identitySource", "value", "method.request.header.Authorization"))))
+                .patch("/restapis/" + apiId + "/authorizers/" + authorizerId).then().statusCode(200)
+                .body("authorizerResultTtlInSeconds", equalTo(300),
+                        "identitySource", equalTo("method.request.header.Authorization"));
+    }
+
+    @Test
+    void cachedHyphenatedContextReachesLambdaProxy() throws Exception {
+        configure("TOKEN", 300, "method.request.header.Authorization");
+        respond(Map.of("principalId", "verified", "context", Map.of("tenant-id", "tenant-one", "plan.level", 2),
+                "policyDocument", policy(List.of(statement("Allow", "execute-api:Invoke", "*")))));
+        String resourceId = given().get("/restapis/" + apiId + "/resources").then().extract()
+                .path("item.find { it.path == '/allowed' }.id");
+        given().contentType(ContentType.JSON).body(Map.of("type", "AWS_PROXY", "httpMethod", "POST",
+                        "uri", AUTHORIZER_URI.replace(FUNCTION, "context-proxy")))
+                .put(methodPath(resourceId) + "/integration").then().statusCode(201);
+        when(lambdaService.invoke(eq("us-east-1"), eq("context-proxy"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    ObjectMapper mapper = new ObjectMapper();
+                    String context = mapper.readTree((byte[]) invocation.getArgument(2))
+                            .path("requestContext").path("authorizer").toString();
+                    return new InvokeResult(200, null,
+                            mapper.writeValueAsBytes(Map.of("statusCode", 200, "body", context)), null, "proxy-request");
+                });
+        deploy("test");
+        for (int request = 0; request < 2; request++) {
+            given().header("Authorization", "token").get(execute("allowed"))
+                    .then().statusCode(200).body("'tenant-id'", equalTo("tenant-one"),
+                            "'plan.level'", equalTo("2"), "principalId", equalTo("verified"));
+        }
+        verifyInvocation(1);
     }
 
     @Test
@@ -238,9 +318,12 @@ class RestLambdaAuthorizerIntegrationTest {
     }
 
     private void configure(String type, int ttl, String identitySource) {
-        authorizerId = given().contentType(ContentType.JSON).body(Map.of("name", "contract", "type", type,
-                        "authorizerUri", AUTHORIZER_URI, "identitySource", identitySource,
-                        "authorizerResultTtlInSeconds", ttl))
+        Map<String, Object> request = new LinkedHashMap<>(Map.of("name", "contract", "type", type,
+                "authorizerUri", AUTHORIZER_URI, "authorizerResultTtlInSeconds", ttl));
+        if (identitySource != null) {
+            request.put("identitySource", identitySource);
+        }
+        authorizerId = given().contentType(ContentType.JSON).body(request)
                 .post("/restapis/" + apiId + "/authorizers").then().statusCode(201).extract().path("id");
         List<String> resources = given().get("/restapis/" + apiId + "/resources")
                 .then().extract().path("item.findAll { it.path != '/' }.id");

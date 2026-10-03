@@ -119,9 +119,8 @@ public class RestLambdaAuthorizer {
         Map<String, Object> values = new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> property : context.properties()) {
             JsonNode value = property.getValue();
-            if (!property.getKey().matches("[A-Za-z0-9_]+")
-                    || (!value.isTextual() && !value.isNumber() && !value.isBoolean())) {
-                throw new IllegalArgumentException("Authorizer context must contain scalar values and valid keys");
+            if (!value.isTextual() && !value.isNumber() && !value.isBoolean()) {
+                throw new IllegalArgumentException("Authorizer context must contain scalar values");
             }
             values.put(property.getKey(), objectMapper.convertValue(value, Object.class));
         }
