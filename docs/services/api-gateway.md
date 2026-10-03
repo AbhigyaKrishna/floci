@@ -312,8 +312,11 @@ than `proxy` are supported, including in `integration.request.path.*` mappings.
 REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
 and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
 `httpMethod`, `path` (including the stage), `protocol`, `requestId`, `resourceId`, `resourcePath`,
-`stage`, `identity.sourceIp` and `identity.userAgent`. `context.requestId` uses the same ID as
-the HTTP integration's VTL templates. `context.authorizer.principalId` and
+`stage`, `domainName`, `domainPrefix`, `extendedRequestId`, `requestTime` and `requestTimeEpoch`.
+Identity fields include the immediate TCP peer's `sourceIp`, `userAgent`, a resolved API key's
+`apiKey` and `apiKeyId`, and the verified IAM caller's `accessKey`, `accountId`, `caller`, `user`
+and `userArn`. `context.requestId` uses the same ID as the authorizer and integration templates.
+A valid UUID in `x-amzn-RequestId` overrides that ID; `extendedRequestId` is generated independently. `context.authorizer.principalId` and
 `context.authorizer.<property>` come from the successful authorizer result; authenticated Cognito
 claims are available as `context.authorizer.claims.<property>`. String, number and boolean values
 are forwarded as strings. Missing values and objects are not mapped. An explicit header mapping
@@ -326,6 +329,9 @@ HTTP proxy passthrough behavior.
 
 `method.request.*` sources always read the original inbound headers, query parameters and path
 parameters. Mapped destinations do not change another mapping's source, regardless of mapping order.
+`method.request.multivalueheader.*` and `method.request.multivaluequerystring.*` preserve repeated
+values in either HTTP integration type. `stageVariables.*`, the raw `method.request.body` and
+`method.request.body.<JSONPath>` are supported too.
 
 Use alphanumeric or underscore authorizer context keys, as required by the
 [AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
