@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -26,6 +28,25 @@ class WebSocketAuthorizerPolicyTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("io.github.hectorvent.floci.services.apigatewayv2.AuthorizerPolicyFixtures#policies")
     void evaluatesAllStatementsAgainstConnectArn(String scenario, String statements, int expectedStatus) throws Exception {
+        assertPolicy(statements, expectedStatus, "127.0.0.1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"203.0.113.42", "2001:db8::42"})
+    void sourceIpConditionsUseConnectionAddress(String sourceIp) throws Exception {
+        String statements = "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Deny\",\"Action\":\"*\",\"Resource\":\"*\","
+                + "\"Condition\":{\"IpAddress\":{\"aws:SourceIp\":\"" + sourceIp + "\"}}}]";
+        assertPolicy(statements, 403, sourceIp);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void missingConnectionAddressFailsClosed(String sourceIp) throws Exception {
+        assertPolicy("[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]", 500, sourceIp);
+    }
+
+    private void assertPolicy(String statements, int expectedStatus, String sourceIp) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         ApiGatewayV2Service gateway = mock(ApiGatewayV2Service.class);
         LambdaService lambda = mock(LambdaService.class);
@@ -49,7 +70,7 @@ class WebSocketAuthorizerPolicyTest {
         WebSocketAuthorizerService service = new WebSocketAuthorizerService(gateway, lambda, builder, mapper,
                 new AuthorizerPolicyEvaluator(new IamPolicyEvaluator(mapper)));
         WebSocketAuthorizerService.AuthorizerResult result = service.invokeAndEvaluate("us-east-1", "api", "test", "auth",
-                "connection", 0, Map.of(), Map.of(), "127.0.0.1", "agent", Map.of());
+                "connection", 0, Map.of(), Map.of(), sourceIp, "agent", Map.of());
         assertEquals(expectedStatus, result.statusCode());
         assertEquals(expectedStatus == 200, result.allowed());
         if (result.allowed()) {

@@ -19,6 +19,8 @@ public final class AuthorizerPolicyFixtures {
         String deny = statement("Deny", "execute-api:Invoke", "${arn}");
         String unrelatedAllow = statement("Allow", "execute-api:Invoke", "${arn}/other");
         String unrelatedDeny = statement("Deny", "execute-api:Invoke", "${arn}/other");
+        String localAddresses = "[\"127.0.0.0/8\",\"::1/128\"]";
+        String otherAddress = "\"198.51.100.0/24\"";
         return Stream.of(
                 Arguments.of("exact allow", "[" + allow + "]", 200),
                 Arguments.of("implicit deny", "[" + unrelatedAllow + "]", 403),
@@ -47,10 +49,27 @@ public final class AuthorizerPolicyFixtures {
                 Arguments.of("invalid action list", "[{\"Effect\":\"Allow\",\"Action\":[\"*\",1],\"Resource\":\"*\"}]", 500),
                 Arguments.of("invalid condition operator", "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\","
                         + "\"Condition\":{\"StringEquals\":\"invalid\"}}]", 500),
+                Arguments.of("matching source IP deny", "[" + allow + ","
+                        + ipStatement("Deny", "IpAddress", localAddresses) + "]", 403),
+                Arguments.of("nonmatching source IP deny", "[" + allow + ","
+                        + ipStatement("Deny", "IpAddress", otherAddress) + "]", 200),
+                Arguments.of("matching source IP allow", "[" + ipStatement("Allow", "IpAddress", localAddresses) + "]", 200),
+                Arguments.of("nonmatching source IP allow", "[" + ipStatement("Allow", "IpAddress", otherAddress) + "]", 403),
+                Arguments.of("negated source IP deny", "[" + allow + ","
+                        + ipStatement("Deny", "NotIpAddress", otherAddress) + "]", 403),
+                Arguments.of("empty condition", "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\","
+                        + "\"Condition\":{}}]", 500),
+                Arguments.of("empty later condition", "[" + allow + ",{\"Effect\":\"Deny\",\"Action\":\"*\","
+                        + "\"Resource\":\"*\",\"Condition\":{}}]", 500),
                 Arguments.of("invalid condition", "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\",\"Condition\":true}]", 500));
     }
 
     private static String statement(String effect, String action, String resource) {
         return "{\"Effect\":\"" + effect + "\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
+    }
+
+    private static String ipStatement(String effect, String operator, String addresses) {
+        return "{\"Effect\":\"" + effect + "\",\"Action\":\"execute-api:Invoke\",\"Resource\":\"${arn}\","
+                + "\"Condition\":{\"" + operator + "\":{\"aws:SourceIp\":" + addresses + "}}}";
     }
 }

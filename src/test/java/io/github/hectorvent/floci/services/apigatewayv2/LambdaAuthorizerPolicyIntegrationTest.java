@@ -19,6 +19,7 @@ import java.net.http.WebSocket;
 import java.net.http.WebSocketHandshakeException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
@@ -56,7 +57,8 @@ class LambdaAuthorizerPolicyIntegrationTest {
         stubAuthorizer(statements);
         when(lambdaService.invoke(eq("us-east-1"), eq(BACKEND_FUNCTION), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(result("{\"statusCode\":200,\"body\":\"allowed\"}"));
-        given().get("/execute-api/" + apiId + "/test/items").then().statusCode(expectedStatus);
+        given().header("X-Forwarded-For", "198.51.100.42")
+                .get("/execute-api/" + apiId + "/test/items").then().statusCode(expectedStatus);
         verify(lambdaService, times(expectedStatus == 200 ? 1 : 0))
                 .invoke(eq("us-east-1"), eq(BACKEND_FUNCTION), any(byte[].class), eq(InvocationType.RequestResponse));
     }
@@ -68,19 +70,31 @@ class LambdaAuthorizerPolicyIntegrationTest {
         stubAuthorizer(statements);
         URI uri = URI.create(WebSocketTestSupport.buildWsUrl(baseUri, apiId, "test"));
         try (HttpClient client = HttpClient.newHttpClient()) {
-            if (expectedStatus == 200) {
-                WebSocket socket = client.newWebSocketBuilder().buildAsync(uri, new WebSocket.Listener() {})
-                        .get(10, TimeUnit.SECONDS);
-                socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
-                socket.abort();
-            } else {
-                ExecutionException exception = assertThrows(ExecutionException.class,
-                        () -> client.newWebSocketBuilder().buildAsync(uri, new WebSocket.Listener() {})
-                                .get(10, TimeUnit.SECONDS));
-                WebSocketHandshakeException handshake = assertInstanceOf(WebSocketHandshakeException.class, exception.getCause());
-                assertEquals(expectedStatus, handshake.getResponse().statusCode());
+            CompletableFuture<WebSocket> handshakeFuture = client.newWebSocketBuilder()
+                    .header("X-Forwarded-For", "198.51.100.42")
+                    .buildAsync(uri, new WebSocket.Listener() {});
+            try {
+                assertHandshake(handshakeFuture, expectedStatus);
+            } finally {
+                if (handshakeFuture.isDone() && !handshakeFuture.isCompletedExceptionally()) {
+                    handshakeFuture.join().abort();
+                } else {
+                    handshakeFuture.cancel(true);
+                }
             }
         }
+    }
+
+    private void assertHandshake(CompletableFuture<WebSocket> handshakeFuture, int expectedStatus) throws Exception {
+        if (expectedStatus == 200) {
+            WebSocket socket = handshakeFuture.get(10, TimeUnit.SECONDS);
+            socket.sendClose(WebSocket.NORMAL_CLOSURE, "done").get(10, TimeUnit.SECONDS);
+            return;
+        }
+        ExecutionException exception = assertThrows(ExecutionException.class,
+                () -> handshakeFuture.get(10, TimeUnit.SECONDS));
+        WebSocketHandshakeException handshake = assertInstanceOf(WebSocketHandshakeException.class, exception.getCause());
+        assertEquals(expectedStatus, handshake.getResponse().statusCode());
     }
 
     private void configureApi(String protocol) {

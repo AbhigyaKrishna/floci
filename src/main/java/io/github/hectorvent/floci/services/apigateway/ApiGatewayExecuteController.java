@@ -35,6 +35,10 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.net.SocketAddress;
+import io.vertx.ext.web.RoutingContext;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -116,6 +120,7 @@ public class ApiGatewayExecuteController {
     private final RequestContext requestContext;
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
     private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
+    private final CurrentVertxRequest currentVertxRequest;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -130,7 +135,8 @@ public class ApiGatewayExecuteController {
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
                                        ExecuteApiSigV4Authorizer sigV4Authorizer,
-                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator) {
+                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
+                                       CurrentVertxRequest currentVertxRequest) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -147,6 +153,7 @@ public class ApiGatewayExecuteController {
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
         this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
+        this.currentVertxRequest = currentVertxRequest;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -2942,7 +2949,7 @@ public class ApiGatewayExecuteController {
             }
 
             String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, path);
-            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn)) {
+            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn, requestSourceIp())) {
                 return new RequestAuthorizerResult(Response.status(403)
                         .entity(jsonMessage("User is not authorized to access this resource"))
                         .type(MediaType.APPLICATION_JSON).build(), null);
@@ -2967,6 +2974,14 @@ public class ApiGatewayExecuteController {
     private ObjectNode requestAuthorizerContext(JsonNode response) {
         JsonNode context = response.path("context");
         return context.isObject() && !context.isEmpty() ? (ObjectNode) context : null;
+    }
+
+    private String requestSourceIp() {
+        RoutingContext routingContext = currentVertxRequest != null ? currentVertxRequest.getCurrent() : null;
+        HttpServerRequest request = routingContext != null ? routingContext.request() : null;
+        // Read the transport address: a caller-controlled forwarding header must not bypass an IP-based Deny.
+        SocketAddress address = request != null ? request.remoteAddress() : null;
+        return address != null ? address.host() : null;
     }
 
     /**

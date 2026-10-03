@@ -142,13 +142,13 @@ public class WebSocketAuthorizerService {
         }
 
         // Parse the policy document
-        return parseAuthorizerResponse(invokeResult, apiId, proxyEventBuilder.buildMethodArn(region, apiId, stageName));
+        return parseAuthorizerResponse(invokeResult, apiId, proxyEventBuilder.buildMethodArn(region, apiId, stageName), sourceIp);
     }
 
     /**
      * Parse the authorizer Lambda response and extract the policy decision.
      */
-    private AuthorizerResult parseAuthorizerResponse(InvokeResult invokeResult, String apiId, String methodArn) {
+    private AuthorizerResult parseAuthorizerResponse(InvokeResult invokeResult, String apiId, String methodArn, String sourceIp) {
         // Check for function error
         if (invokeResult.getFunctionError() != null) {
             LOG.warnv("Lambda authorizer returned function error for API {0}: {1}",
@@ -170,7 +170,7 @@ public class WebSocketAuthorizerService {
                 return AuthorizerResult.error();
             }
 
-            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn)) {
+            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn, sourceIp)) {
                 return AuthorizerResult.deny();
             }
 

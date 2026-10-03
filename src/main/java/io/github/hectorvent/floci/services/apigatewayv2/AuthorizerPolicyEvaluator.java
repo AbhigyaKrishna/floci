@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Map;
 
 /** Evaluates Lambda authorizer policies against the requested execute-api resource. */
 @ApplicationScoped
@@ -21,11 +23,16 @@ public class AuthorizerPolicyEvaluator {
     /**
      * Returns whether a matching Allow grants invocation without a matching explicit Deny.
      *
-     * @throws IllegalArgumentException when the authorizer policy is malformed
+     * @throws IllegalArgumentException when the policy is malformed or the request source IP is unavailable
      */
-    public boolean permits(JsonNode policyDocument, String methodArn) {
+    public boolean permits(JsonNode policyDocument, String methodArn, String sourceIp) {
         validatePolicy(policyDocument);
-        return iamPolicyEvaluator.evaluate(List.of(policyDocument.toString()), "execute-api:Invoke", methodArn)
+        if (sourceIp == null || sourceIp.isBlank()) {
+            throw new IllegalArgumentException("Authorizer request source IP is unavailable");
+        }
+        Map<String, List<String>> conditionContext = Map.of("aws:SourceIp", List.of(sourceIp));
+        return iamPolicyEvaluator.evaluate(CallerContext.of(List.of(policyDocument.toString())), null,
+                "execute-api:Invoke", methodArn, conditionContext)
                 == IamPolicyEvaluator.Decision.ALLOW;
     }
 
@@ -82,8 +89,8 @@ public class AuthorizerPolicyEvaluator {
     }
 
     private void validateCondition(JsonNode condition) {
-        if (!condition.isObject()) {
-            throw new IllegalArgumentException("Authorizer Condition must be an object");
+        if (!condition.isObject() || condition.isEmpty()) {
+            throw new IllegalArgumentException("Authorizer Condition must be a nonempty object");
         }
         for (JsonNode operator : condition) {
             if (!operator.isObject() || operator.isEmpty()) {
