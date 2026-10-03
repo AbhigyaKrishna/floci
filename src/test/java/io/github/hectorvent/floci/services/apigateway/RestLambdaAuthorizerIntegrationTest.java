@@ -16,9 +16,16 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -134,6 +141,43 @@ class RestLambdaAuthorizerIntegrationTest {
         given().header("Authorization", "token").get(execute("allowed")).then().statusCode(200);
         verifyInvocation(3);
         given().delete("/restapis/" + apiId + "/stages/missing/cache/authorizers").then().statusCode(404);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TOKEN", "REQUEST"})
+    void flushPreventsInFlightInvocationFromRestoringStaleContext(String type) throws Exception {
+        configure(type, 300, "method.request.header.Authorization");
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger invocations = new AtomicInteger();
+        when(lambdaService.invoke(eq("us-east-1"), eq(FUNCTION), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    boolean first = invocations.incrementAndGet() == 1;
+                    if (first) {
+                        started.countDown();
+                        assertTrue(release.await(10, TimeUnit.SECONDS), "Authorizer invocation was not released");
+                    }
+                    byte[] payload = new ObjectMapper().writeValueAsBytes(Map.of("principalId", "verified",
+                            "policyDocument", policy(List.of(statement("Allow", "execute-api:Invoke", "*"))),
+                            "context", Map.of("userClaims", first ? "stale" : "fresh")));
+                    return new InvokeResult(200, null, payload, null, "lambda-request");
+                });
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> request = executor.submit(() -> given().header("Authorization", "token")
+                    .get(execute("allowed")).then().statusCode(200).body("claims", equalTo("stale")));
+            try {
+                assertTrue(started.await(10, TimeUnit.SECONDS), "Authorizer invocation did not start");
+                given().delete("/restapis/" + apiId + "/stages/test/cache/authorizers").then().statusCode(202);
+            } finally {
+                release.countDown();
+            }
+            request.get(10, TimeUnit.SECONDS);
+        }
+        for (int i = 0; i < 2; i++) {
+            given().header("Authorization", "token").get(execute("allowed"))
+                    .then().statusCode(200).body("claims", equalTo("fresh"));
+        }
+        verifyInvocation(2);
     }
 
     @Test

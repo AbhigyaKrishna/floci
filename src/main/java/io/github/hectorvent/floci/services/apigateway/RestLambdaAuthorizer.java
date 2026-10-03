@@ -11,9 +11,11 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Validates and caches REST Lambda authorizer policies, then evaluates each requested method. */
@@ -25,6 +27,7 @@ public class RestLambdaAuthorizer {
     private final IamPolicyEvaluator policyEvaluator;
     private final Clock clock;
     private final ConcurrentHashMap<CacheKey, Entry> cache = new ConcurrentHashMap<>();
+    private final Set<Invocation> pendingInvocations = new HashSet<>();
 
     @Inject
     public RestLambdaAuthorizer(ObjectMapper objectMapper, IamPolicyEvaluator policyEvaluator) {
@@ -145,11 +148,40 @@ public class RestLambdaAuthorizer {
         return entry.result();
     }
 
-    // As in the AppSync authorizer cache, sweep, eviction and insertion must share the capacity check.
-    synchronized void put(CacheKey key, Result result) {
-        if (key.ttlSeconds() <= 0) {
-            return;
+    synchronized Invocation beginInvocation(CacheKey key) {
+        Invocation invocation = new Invocation(key);
+        if (key.ttlSeconds() > 0) {
+            pendingInvocations.add(invocation);
         }
+        return invocation;
+    }
+
+    final class Invocation implements AutoCloseable {
+        private final CacheKey key;
+
+        private Invocation(CacheKey key) {
+            this.key = key;
+        }
+
+        void cache(Result result) {
+            synchronized (RestLambdaAuthorizer.this) {
+                // Flush removes pending invocations too, so a pre-flush result cannot refill the cache.
+                if (pendingInvocations.remove(this)) {
+                    put(key, result);
+                }
+            }
+        }
+
+        @Override
+        public void close() {
+            synchronized (RestLambdaAuthorizer.this) {
+                pendingInvocations.remove(this);
+            }
+        }
+    }
+
+    // Called under the same lock as invocation registration and stage invalidation.
+    private void put(CacheKey key, Result result) {
         Instant now = clock.instant();
         cache.entrySet().removeIf(entry -> !entry.getValue().expiresAt().isAfter(now));
         if (!cache.containsKey(key) && cache.size() >= MAX_ENTRIES) {
@@ -159,7 +191,8 @@ public class RestLambdaAuthorizer {
         cache.put(key, new Entry(result, now.plusSeconds(key.ttlSeconds())));
     }
 
-    void flush(Scope scope) {
+    synchronized void flush(Scope scope) {
+        pendingInvocations.removeIf(invocation -> invocation.key.scope().equals(scope));
         cache.keySet().removeIf(key -> key.scope().equals(scope));
     }
 }

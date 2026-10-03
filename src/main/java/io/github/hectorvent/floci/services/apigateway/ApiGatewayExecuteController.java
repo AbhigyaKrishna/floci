@@ -355,6 +355,7 @@ public class ApiGatewayExecuteController {
                 apiGatewayV2Service.getApi(v2Region, apiId);
                 return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, v2Region);
             } catch (AwsException ignored) {
+                routeContext.routeToRestApi();
                 return Response.status(restApiError.getHttpStatus())
                         .entity(jsonMessage(restApiError.getMessage()))
                         .type(MediaType.APPLICATION_JSON).build();
@@ -1014,13 +1015,15 @@ public class ApiGatewayExecuteController {
                     auth.getIdentitySource(), ttl, identities != null ? identities : List.of());
             RestLambdaAuthorizer.Result verified = restLambdaAuthorizer.get(key);
             if (verified == null) {
-                InvokeResult invocation = lambdaService.invoke(region, function,
-                        event.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
-                if (invocation.getFunctionError() != null) {
-                    return lambdaAuthorizerFailure(scope, invocation);
+                try (RestLambdaAuthorizer.Invocation pending = restLambdaAuthorizer.beginInvocation(key)) {
+                    InvokeResult invocation = lambdaService.invoke(region, function,
+                            event.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+                    if (invocation.getFunctionError() != null) {
+                        return lambdaAuthorizerFailure(scope, invocation);
+                    }
+                    verified = restLambdaAuthorizer.parse(invocation.getPayload());
+                    pending.cache(verified);
                 }
-                verified = restLambdaAuthorizer.parse(invocation.getPayload());
-                restLambdaAuthorizer.put(key, verified);
             }
             String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, requestPath);
             Map<String, List<String>> conditions = Map.of("aws:SourceIp", List.of(routeContext.sourceIp()),
@@ -2076,7 +2079,17 @@ public class ApiGatewayExecuteController {
 
     private String restDomainName(String apiId, String region, HttpHeaders headers) {
         String host = headers != null ? headers.getHeaderString("Host") : null;
-        return host != null ? URI.create("http://" + host).getHost() : AwsEndpoints.executeApiHost(apiId, region);
+        if (host != null) {
+            try {
+                String domain = URI.create("http://" + host).getHost();
+                if (domain != null) {
+                    return domain;
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Invalid client hosts must not break integration events or intended gateway errors.
+            }
+        }
+        return AwsEndpoints.executeApiHost(apiId, region);
     }
 
     private Map<String, Object> restRequestIdentity(GatewayResponseScope scope) {

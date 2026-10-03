@@ -12,6 +12,7 @@ import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -298,6 +299,34 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         if ("HTTP".equals(type)) {
             assertEquals(requestId, MAPPER.readTree(response.path("body").asText()).path("requestId").asText());
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bad_host", "bad_host:8080"})
+    void malformedHostDoesNotBreakMappingOrGatewayErrors(String host) throws Exception {
+        configureAuthorizer(0);
+        configureIntegration("HTTP_PROXY", "GET", Map.of(
+                "integration.request.header.X-Domain", "context.domainName",
+                "integration.request.path.principal", "context.authorizer.principalId",
+                "integration.request.path.proxy", "method.request.path.proxy"));
+        deploy();
+        given().header("Host", host).header("Authorization", "Bearer allowed")
+                .get("/execute-api/" + apiId + "/test/orders/42").then().statusCode(200)
+                .body("headers.x-domain[0]", equalTo(apiId + ".execute-api.us-east-1.amazonaws.com"));
+        given().contentType(ContentType.JSON).body(Map.of("responseParameters", Map.of(
+                        "gatewayresponse.header.X-Domain", "context.domainName")))
+                .put("/restapis/" + apiId + "/gatewayresponses/UNAUTHORIZED").then().statusCode(201);
+        given().header("Host", host).get("/execute-api/" + apiId + "/test/orders/42")
+                .then().statusCode(401).header("X-Domain", equalTo(apiId + ".execute-api.us-east-1.amazonaws.com"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/execute-api/missing-api/test/orders", "/restapis/missing-api/test/_user_request_/orders"})
+    void missingRestApiErrorsHaveRequestIdentifiers(String path) {
+        String requestId = UUID.randomUUID().toString();
+        Response response = given().header("x-amzn-RequestId", requestId)
+                .get(path).then().statusCode(404).header("x-amzn-RequestId", equalTo(requestId)).extract().response();
+        assertDoesNotThrow(() -> UUID.fromString(response.header("x-amz-apigw-id")));
     }
 
     @ParameterizedTest

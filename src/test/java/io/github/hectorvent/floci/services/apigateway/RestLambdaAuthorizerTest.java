@@ -29,13 +29,13 @@ class RestLambdaAuthorizerTest {
     void expiresAtTtlBoundaryAndZeroTtlDoesNotCache() {
         RestLambdaAuthorizer.Result result = new RestLambdaAuthorizer.Result("principal", "{}", Map.of("claims", "trusted"));
         RestLambdaAuthorizer.CacheKey key = key("account", "region", "api", "stage", "deployment", "token", 10);
-        authorizer.put(key, result);
+        cache(key, result);
         when(clock.instant()).thenReturn(now.plusSeconds(9));
         assertSame(result, authorizer.get(key));
         when(clock.instant()).thenReturn(now.plusSeconds(10));
         assertNull(authorizer.get(key));
         RestLambdaAuthorizer.CacheKey disabled = key("account", "region", "api", "stage", "deployment", "token", 0);
-        authorizer.put(disabled, result);
+        cache(disabled, result);
         assertNull(authorizer.get(disabled));
     }
 
@@ -48,8 +48,8 @@ class RestLambdaAuthorizerTest {
                 key("account", "region", "other", "stage", "deployment", "token", 300),
                 key("account", "region", "api", "other", "deployment", "token", 300));
         RestLambdaAuthorizer.Result result = new RestLambdaAuthorizer.Result("principal", "{}", Map.of());
-        authorizer.put(target, result);
-        others.forEach(key -> authorizer.put(key, result));
+        cache(target, result);
+        others.forEach(key -> cache(key, result));
         assertNull(authorizer.get(key("account", "region", "api", "stage", "new-deployment", "token", 300)));
         assertNull(authorizer.get(key("account", "region", "api", "stage", "deployment", "other-token", 300)));
         authorizer.flush(target.scope());
@@ -78,6 +78,37 @@ class RestLambdaAuthorizerTest {
         assertEquals(Map.of("userClaims", "trusted", "number", 2, "boolean", true), result.context());
         assertThrows(UnsupportedOperationException.class, () -> result.context().put("claims", "forged"));
         assertTrue(authorizer.permits(result, "method", Map.of()));
+    }
+
+    @Test
+    void flushInvalidatesOnlyPendingInvocationsInItsScope() {
+        RestLambdaAuthorizer.CacheKey target = key("account", "region", "api", "stage", "deployment", "token", 300);
+        RestLambdaAuthorizer.CacheKey other = key("account", "region", "api", "other", "deployment", "token", 300);
+        RestLambdaAuthorizer.Result result = new RestLambdaAuthorizer.Result("principal", "{}", Map.of());
+        try (RestLambdaAuthorizer.Invocation beforeFlush = authorizer.beginInvocation(target);
+             RestLambdaAuthorizer.Invocation unaffected = authorizer.beginInvocation(other)) {
+            authorizer.flush(target.scope());
+            cache(target, result);
+            beforeFlush.cache(new RestLambdaAuthorizer.Result("stale", "{}", Map.of()));
+            unaffected.cache(result);
+            assertSame(result, authorizer.get(target));
+            assertSame(result, authorizer.get(other));
+        }
+    }
+
+    @Test
+    void closedInvocationCannotInsertResult() {
+        RestLambdaAuthorizer.CacheKey key = key("account", "region", "api", "stage", "deployment", "token", 300);
+        RestLambdaAuthorizer.Invocation invocation = authorizer.beginInvocation(key);
+        invocation.close();
+        invocation.cache(new RestLambdaAuthorizer.Result("principal", "{}", Map.of()));
+        assertNull(authorizer.get(key));
+    }
+
+    private void cache(RestLambdaAuthorizer.CacheKey key, RestLambdaAuthorizer.Result result) {
+        try (RestLambdaAuthorizer.Invocation invocation = authorizer.beginInvocation(key)) {
+            invocation.cache(result);
+        }
     }
 
     private static RestLambdaAuthorizer.CacheKey key(String account, String region, String api, String stage,
