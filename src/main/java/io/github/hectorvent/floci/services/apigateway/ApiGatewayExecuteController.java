@@ -584,15 +584,23 @@ public class ApiGatewayExecuteController {
         if (requestParameters != null) {
             for (Map.Entry<String, String> param : requestParameters.entrySet()) {
                 String dest = param.getKey();
-                String resolved = resolveRequestParameter(param.getValue(), queryMap, pathMap, headerMap, mappingContext);
-                if (resolved == null) continue;
+                String source = param.getValue();
+                String resolved = resolveRequestParameter(source, queryMap, pathMap, headerMap, mappingContext);
+                boolean isContextHeader = dest.startsWith("integration.request.header.")
+                        && source != null && source.startsWith("context.");
+                if (resolved == null && !isContextHeader) {
+                    continue;
+                }
                 // An explicit mapping overwrites, so it replaces any repeated inbound values too.
                 if (dest.startsWith("integration.request.header.")) {
                     String name = dest.substring("integration.request.header.".length());
+                    // A missing context value must not fall back to a client-supplied trusted header.
                     headerMap.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
                     multiValueHeaders.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
-                    headerMap.put(name, resolved);
-                    multiValueHeaders.put(name, List.of(resolved));
+                    if (resolved != null) {
+                        headerMap.put(name, resolved);
+                        multiValueHeaders.put(name, List.of(resolved));
+                    }
                 } else if (dest.startsWith("integration.request.querystring.")) {
                     String name = dest.substring("integration.request.querystring.".length());
                     queryMap.put(name, resolved);

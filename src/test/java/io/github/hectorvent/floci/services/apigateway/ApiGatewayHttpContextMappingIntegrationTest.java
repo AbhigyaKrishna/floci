@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -110,6 +111,8 @@ class ApiGatewayHttpContextMappingIntegrationTest {
                 "/restapis/" + apiId + "/test/_user_request_/")) {
             JsonNode response = MAPPER.readTree(given().header("Authorization", "Bearer allowed")
                     .header("x-user-claims", "forged", "also-forged")
+                    .header("x-missing", "forged-missing")
+                    .header("x-object", "forged-object")
                     .header("x-request-id", "client-id")
                     .header("X-Source", "client-value")
                     .get(endpoint + "orders/42?client=acme")
@@ -129,6 +132,36 @@ class ApiGatewayHttpContextMappingIntegrationTest {
                         MAPPER.readTree(response.path("body").asText()).path("requestId").asText());
             }
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTP_PROXY", "HTTP"})
+    void missingAuthorizerClaimDoesNotFallBackToClientHeader(String type) throws Exception {
+        configureAuthorizer(0, Map.of());
+        configureIntegration(type, "GET");
+        deploy();
+
+        for (String endpoint : List.of("/execute-api/" + apiId + "/test/",
+                "/restapis/" + apiId + "/test/_user_request_/")) {
+            JsonNode response = MAPPER.readTree(given().header("Authorization", "Bearer allowed")
+                    .header("x-user-claims", "forged", "also-forged")
+                    .get(endpoint + "orders/42")
+                    .then().statusCode(200).extract().asByteArray());
+            assertFalse(response.path("headers").has("x-user-claims"));
+            assertEquals(MAPPER.valueToTree(List.of("verified-user")), response.path("headers").path("x-principal"));
+        }
+    }
+
+    @Test
+    void missingMethodRequestMappingPreservesInboundProxyHeader() throws Exception {
+        configureAuthorizer(0);
+        configureIntegration("HTTP_PROXY", "GET");
+        deploy();
+        JsonNode response = MAPPER.readTree(given().header("Authorization", "Bearer allowed")
+                .header("X-Unresolved", "client-value")
+                .get("/execute-api/" + apiId + "/test/orders/42")
+                .then().statusCode(200).extract().asByteArray());
+        assertEquals(MAPPER.valueToTree(List.of("client-value")), response.path("headers").path("x-unresolved"));
     }
 
     @ParameterizedTest
@@ -176,6 +209,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         configureIntegration(type, "OPTIONS");
         deploy();
         JsonNode response = MAPPER.readTree(given().header("Authorization", "Bearer forged")
+                .header("x-user-claims", "forged", "also-forged")
                 .options("/execute-api/" + apiId + "/test/orders/42")
                 .then().statusCode(200).extract().asByteArray());
         assertFalse(response.path("headers").has("x-user-claims"));
@@ -200,6 +234,11 @@ class ApiGatewayHttpContextMappingIntegrationTest {
     }
 
     private void configureAuthorizer(int ttl) throws Exception {
+        configureAuthorizer(ttl, Map.of("userClaims", "verified-claims", "principalId", "forged-principal",
+                "numberKey", 123, "booleanKey", true, "objectKey", Map.of("nested", "value")));
+    }
+
+    private void configureAuthorizer(int ttl, Map<String, Object> context) throws Exception {
         String authorizerId = given().contentType(ContentType.JSON)
                 .body(Map.of("name", "claims", "type", "TOKEN", "authorizerUri", AUTHORIZER_URI,
                         "identitySource", "method.request.header.Authorization", "authorizerResultTtlInSeconds", ttl))
@@ -215,8 +254,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
                     byte[] payload = MAPPER.writeValueAsBytes(Map.of("principalId", "verified-user",
                             "policyDocument", Map.of("Version", "2012-10-17", "Statement", List.of(Map.of(
                                     "Action", "execute-api:Invoke", "Effect", effect, "Resource", "*"))),
-                            "context", Map.of("userClaims", "verified-claims", "principalId", "forged-principal",
-                                    "numberKey", 123, "booleanKey", true, "objectKey", Map.of("nested", "value"))));
+                            "context", context));
                     return new InvokeResult(200, null, payload, null, "authorizer-request");
                 });
     }
@@ -236,6 +274,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         parameters.put("integration.request.header.X-Context-Api", "context.apiId");
         parameters.put("integration.request.header.X-Context-Resource", "context.resourceId");
         parameters.put("integration.request.header.X-From-Client", "method.request.header.X-Source");
+        parameters.put("integration.request.header.X-Unresolved", "method.request.querystring.missing");
         parameters.put("integration.request.header.X-Static", "'static-value'");
         parameters.put("integration.request.querystring.claims", "context.authorizer.userClaims");
         parameters.put("integration.request.querystring.client", "method.request.querystring.client");
