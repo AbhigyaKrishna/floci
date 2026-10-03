@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
+// REST and v2 both define Authorizer; the less-used REST type is qualified below.
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
@@ -46,9 +47,9 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.*;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLDecoder;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
