@@ -309,6 +309,23 @@ A greedy resource captures only the path segments after its parent. For example,
 `/api/v1/auth/signup/{proxy}` forwards the prefix once. Greedy parameter names other
 than `proxy` are supported, including in `integration.request.path.*` mappings.
 
+REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
+and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
+`httpMethod`, `path` (including the stage), `protocol`, `requestId`, `resourceId`, `resourcePath`,
+`stage`, `identity.sourceIp` and `identity.userAgent`. `context.requestId` uses the same ID as
+the HTTP integration's VTL templates. `context.authorizer.principalId` and
+`context.authorizer.<property>` come from the successful authorizer result; authenticated Cognito
+claims are available as `context.authorizer.claims.<property>`. String, number and boolean values
+are forwarded as strings. Missing values and objects are not mapped. An explicit header mapping
+replaces all inbound values of that header, regardless of casing.
+
+Use alphanumeric or underscore authorizer context keys, as required by the
+[AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
+For example, return `userClaims` in the authorizer context and map
+`integration.request.header.X-User-Claims` from `context.authorizer.userClaims`. The HTTP header
+name can contain hyphens. REST Lambda authorizer result caching is not implemented; setting
+`authorizerResultTtlInSeconds` does not currently suppress repeat Lambda invocations.
+
 A backend response body larger than the 10 MB API Gateway payload quota yields `413` with `{"message":"Request Entity Too Large"}`. The same limit applies to HTTP API `HTTP_PROXY` integrations.
 
 Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` reaches the backend as two `tag` parameters rather than one `tag=a,b`, a header sent twice arrives twice, and a backend that returns two `Set-Cookie` headers relays two to the caller. Comma-joining them would not be reversible, since a cookie's `Expires` attribute contains a comma of its own. An explicit `integration.request.header.X` or `integration.request.querystring.X` mapping overwrites, so it replaces any repeated inbound values with the single mapped one.
