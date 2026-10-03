@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -38,6 +39,21 @@ class WebSocketAuthorizerPolicyTest {
                 + "{\"Effect\":\"Deny\",\"Action\":\"*\",\"Resource\":\"*\","
                 + "\"Condition\":{\"IpAddress\":{\"aws:SourceIp\":\"" + sourceIp + "\"}}}]";
         assertPolicy(statements, 403, sourceIp);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "2001:db8::42, 403",
+            "2001:db9::42, 200",
+            "203.0.113.42, 200"
+    })
+    void ipv6CidrDenyOverridesAllow(String sourceIp, int expectedStatus) throws Exception {
+        String statements = """
+                [{"Effect":"Allow","Action":"*","Resource":"*"},
+                 {"Effect":"Deny","Action":"*","Resource":"*",
+                  "Condition":{"IpAddress":{"aws:SourceIp":"2001:db8::/32"}}}]
+                """;
+        assertPolicy(statements, expectedStatus, sourceIp);
     }
 
     @ParameterizedTest

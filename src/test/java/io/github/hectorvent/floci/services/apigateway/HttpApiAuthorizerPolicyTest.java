@@ -25,6 +25,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -112,6 +113,24 @@ class HttpApiAuthorizerPolicyTest {
                 + "{\"Effect\":\"Deny\",\"Action\":\"*\",\"Resource\":\"*\","
                 + "\"Condition\":{\"IpAddress\":{\"aws:SourceIp\":\"" + sourceIp + "\"}}}]";
         assertPolicy("2.0", statements, 403);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "1.0, 2001:db8::42, 403",
+            "2.0, 2001:db8::42, 403",
+            "1.0, 2001:db9::42, 200",
+            "2.0, 2001:db9::42, 200",
+            "2.0, 203.0.113.42, 200"
+    })
+    void ipv6CidrDenyOverridesAllow(String version, String sourceIp, int expectedStatus) {
+        when(remoteAddress.host()).thenReturn(sourceIp);
+        String statements = """
+                [{"Effect":"Allow","Action":"*","Resource":"*"},
+                 {"Effect":"Deny","Action":"*","Resource":"*",
+                  "Condition":{"IpAddress":{"aws:SourceIp":"2001:db8::/32"}}}]
+                """;
+        assertPolicy(version, statements, expectedStatus);
     }
 
     @ParameterizedTest

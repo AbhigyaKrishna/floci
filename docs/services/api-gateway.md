@@ -537,9 +537,10 @@ and actions and resources may be strings or arrays with wildcards. No matching A
 returns 403; a malformed policy returns 500. HTTP API simple responses continue to
 use `isAuthorized` instead of an IAM policy.
 
-`aws:SourceIp` conditions use the request's transport address for HTTP APIs and the
-connection source IP for WebSocket handshakes. Caller-supplied `X-Forwarded-For`
-headers do not override this value. An empty `Condition` object or an unavailable
+`aws:SourceIp` conditions support IPv4 and IPv6 CIDR ranges. They use the request's
+transport address for HTTP APIs and the connection source IP for WebSocket handshakes.
+Caller-supplied `X-Forwarded-For` headers do not override this value. An empty
+`Condition` object or an unavailable
 request source IP returns 500 instead of evaluating without that context.
 
 ### Supported Operations
