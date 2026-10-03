@@ -114,6 +114,7 @@ public class ApiGatewayExecuteController {
     private final JwtSignatureVerifier jwtSignatureVerifier;
     private final RequestContext requestContext;
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
+    private final RestLambdaAuthorizer restLambdaAuthorizer;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -127,7 +128,7 @@ public class ApiGatewayExecuteController {
                                        ApiGatewayExecuteRouteContext routeContext,
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
-                                       ExecuteApiSigV4Authorizer sigV4Authorizer) {
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -143,6 +144,7 @@ public class ApiGatewayExecuteController {
         this.jwtSignatureVerifier = jwtSignatureVerifier;
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
+        this.restLambdaAuthorizer = restLambdaAuthorizer;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -1012,47 +1014,118 @@ public class ApiGatewayExecuteController {
             return new AuthorizerResult(null, result.principalId(), result.context());
         }
         if ("CUSTOM".equals(authorizationType)) {
-            String authorizerId = method.getAuthorizerId();
-            if (authorizerId == null) {
-                return new AuthorizerResult(null, null, null);
-            }
-
-            io.github.hectorvent.floci.services.apigateway.model.Authorizer auth = apiGatewayService.getAuthorizer(region, apiId, authorizerId);
-            String authorizerType = auth.getType();
-            String lambdaName = functionNameFromUri(auth.getAuthorizerUri());
-            if ((!"TOKEN".equals(authorizerType) && !"REQUEST".equals(authorizerType))
-                    || lambdaName == null || lambdaName.isBlank()) {
-                return new AuthorizerResult(gatewayResponseOr(Response.status(500).build(), scope,
-                        GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, null), null, null);
-            }
-
-            String event = toAuthorizerEvent(auth, headers, region, apiId, stageName, httpMethod, requestPath, resourcePath, resourceId, stage, uriInfo, resolvedApiKey);
-            try {
-                InvokeResult result = lambdaService.invoke(region, lambdaName, event.getBytes(), InvocationType.RequestResponse);
-                if (result.getFunctionError() != null) {
-                    return new AuthorizerResult(gatewayResponseOr(Response.status(403).build(), scope,
-                            GatewayResponseType.AUTHORIZER_FAILURE, null), null, null);
-                }
-
-                JsonNode policy = objectMapper.readTree(result.getPayload());
-                String effect = policy.path("policyDocument").path("Statement").get(0).path("Effect").asText("Deny");
-                if ("Deny".equalsIgnoreCase(effect)) {
-                    return new AuthorizerResult(
-                            gatewayResponse(scope, GatewayResponseType.ACCESS_DENIED, 403,
-                                    "User is not authorized to access this resource"),
-                            null,
-                            null);
-                }
-                String principalId = policy.path("principalId").asText(null);
-                Map<String, Object> context = extractAuthorizerContext(policy.path("context"));
-                return new AuthorizerResult(null, principalId, context);
-            } catch (Exception e) {
-                LOG.warnv("Authorizer failure: {0}", e.getMessage());
-                return new AuthorizerResult(gatewayResponseOr(Response.status(500).build(), scope,
-                        GatewayResponseType.AUTHORIZER_FAILURE, null), null, null);
-            }
+            return invokeLambdaAuthorizer(scope, region, apiId, stageName, httpMethod, requestPath,
+                    resourcePath, resourceId, stage, method, headers, uriInfo, resolvedApiKey);
         }
         return new AuthorizerResult(null, null, null);
+    }
+
+    private AuthorizerResult invokeLambdaAuthorizer(GatewayResponseScope scope, String region, String apiId,
+                                                     String stageName, String httpMethod, String requestPath,
+                                                     String resourcePath, String resourceId, Stage stage,
+                                                     MethodConfig method, HttpHeaders headers, UriInfo uriInfo,
+                                                     ResolvedApiKey resolvedApiKey) {
+        if (method.getAuthorizerId() == null) {
+            return authorizerError(scope, GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, 500);
+        }
+        try {
+            io.github.hectorvent.floci.services.apigateway.model.Authorizer auth =
+                    apiGatewayService.getAuthorizer(region, apiId, method.getAuthorizerId());
+            String function = functionNameFromUri(auth.getAuthorizerUri());
+            if ((!"TOKEN".equals(auth.getType()) && !"REQUEST".equals(auth.getType()))
+                    || function == null || function.isBlank()) {
+                return authorizerError(scope, GatewayResponseType.AUTHORIZER_CONFIGURATION_ERROR, 500);
+            }
+            int ttl = Integer.parseInt(auth.getAuthorizerResultTtlInSeconds());
+            String event = toAuthorizerEvent(auth, headers, region, apiId, stageName, httpMethod,
+                    requestPath, resourcePath, resourceId, stage, uriInfo, resolvedApiKey);
+            List<String> identities = authorizerIdentityValues(scope, auth, event);
+            if (("TOKEN".equals(auth.getType()) || ttl > 0) && identities == null) {
+                return authorizerError(scope, GatewayResponseType.UNAUTHORIZED, 401);
+            }
+            RestLambdaAuthorizer.CacheKey key = new RestLambdaAuthorizer.CacheKey(
+                    new RestLambdaAuthorizer.Scope(regionResolver.getAccountId(), region, apiId, stageName),
+                    stage.getDeploymentId(), auth.getId(), auth.getAuthorizerUri(), auth.getType(),
+                    auth.getIdentitySource(), ttl, identities != null ? identities : List.of());
+            RestLambdaAuthorizer.Result verified = restLambdaAuthorizer.get(key);
+            if (verified == null) {
+                InvokeResult invocation = lambdaService.invoke(region, function,
+                        event.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+                if (invocation.getFunctionError() != null) {
+                    return lambdaAuthorizerFailure(scope, invocation);
+                }
+                verified = restLambdaAuthorizer.parse(invocation.getPayload());
+                restLambdaAuthorizer.put(key, verified);
+            }
+            String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, requestPath);
+            Map<String, List<String>> conditions = Map.of("aws:SourceIp", List.of(routeContext.sourceIp()),
+                    "aws:SecureTransport", List.of(Boolean.toString("https".equals(uriInfo.getRequestUri().getScheme()))),
+                    "aws:CurrentTime", List.of(Instant.now().toString()));
+            if (!restLambdaAuthorizer.permits(verified, methodArn, conditions)) {
+                return authorizerError(scope, GatewayResponseType.ACCESS_DENIED, 403);
+            }
+            return new AuthorizerResult(null, verified.principalId(), verified.context());
+        } catch (Exception exception) {
+            LOG.warnv("Authorizer failure: {0}", exception.getMessage());
+            return authorizerError(scope, GatewayResponseType.AUTHORIZER_FAILURE, 500);
+        }
+    }
+
+    private AuthorizerResult lambdaAuthorizerFailure(GatewayResponseScope scope, InvokeResult invocation) throws IOException {
+        JsonNode error = objectMapper.readTree(invocation.getPayload());
+        boolean unauthorized = error != null && ("Unauthorized".equals(error.asText())
+                || "Unauthorized".equals(error.path("errorMessage").asText()));
+        return authorizerError(scope, unauthorized ? GatewayResponseType.UNAUTHORIZED
+                : GatewayResponseType.AUTHORIZER_FAILURE, unauthorized ? 401 : 500);
+    }
+
+    private AuthorizerResult authorizerError(GatewayResponseScope scope, GatewayResponseType type, int status) {
+        String message = switch (type) {
+            case UNAUTHORIZED -> "Unauthorized";
+            case ACCESS_DENIED -> "User is not authorized to access this resource";
+            default -> "Internal server error";
+        };
+        return new AuthorizerResult(gatewayResponse(scope, type, status, message), null, null);
+    }
+
+    private List<String> authorizerIdentityValues(GatewayResponseScope scope,
+            io.github.hectorvent.floci.services.apigateway.model.Authorizer auth, String event) throws IOException {
+        if (auth.getIdentitySource() == null || auth.getIdentitySource().isBlank()) {
+            return null;
+        }
+        List<String> identities = new ArrayList<>();
+        Map<String, Object> context = "REQUEST".equals(auth.getType())
+                ? objectMapper.convertValue(objectMapper.readTree(event).path("requestContext"), MAP_TYPE) : Map.of();
+        for (String source : auth.getIdentitySource().split(",", -1)) {
+            source = source.trim();
+            String value = authorizerIdentityValue(scope, auth.getType(), source, context);
+            if (value == null || value.isEmpty()) {
+                return null;
+            }
+            identities.add(value);
+        }
+        return identities;
+    }
+
+    private String authorizerIdentityValue(GatewayResponseScope scope, String type, String source,
+                                            Map<String, Object> context) {
+        if (source.startsWith("method.request.header.")) {
+            return scope.headers().getHeaderString(source.substring("method.request.header.".length()));
+        }
+        if (!"REQUEST".equals(type)) {
+            return null;
+        }
+        if (source.startsWith("method.request.querystring.")) {
+            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
+        }
+        if (source.startsWith("stageVariables.")) {
+            return scope.stage().getVariables().get(source.substring("stageVariables.".length()));
+        }
+        if (source.startsWith("context.")) {
+            Object resolved = contextValue(context, source.substring("context.".length()));
+            return resolved != null ? resolved.toString() : null;
+        }
+        return null;
     }
 
     private Response validateRequest(GatewayResponseScope scope, String region, String apiId, MethodConfig method,
@@ -1141,13 +1214,6 @@ public class ApiGatewayExecuteController {
         return null;
     }
 
-    private Map<String, Object> extractAuthorizerContext(JsonNode contextNode) {
-        if (contextNode == null || contextNode.isMissingNode() || contextNode.isNull() || !contextNode.isObject()) {
-            return null;
-        }
-        return objectMapper.convertValue(contextNode, MAP_TYPE);
-    }
-
     private String toAuthorizerEvent(io.github.hectorvent.floci.services.apigateway.model.Authorizer auth,
                                      HttpHeaders headers, String region, String apiId, String stageName,
                                      String httpMethod, String requestPath,
@@ -1204,7 +1270,7 @@ public class ApiGatewayExecuteController {
 
             // identity.apiKey / identity.apiKeyId: resolve from usage plans linked to this (apiId, stage)
             ObjectNode identity = ctx.putObject("identity");
-            identity.put("sourceIp", "127.0.0.1");
+            identity.put("sourceIp", routeContext.sourceIp());
             String userAgent = headers.getHeaderString("User-Agent");
             identity.put("userAgent", userAgent != null ? userAgent : "");
             if (resolvedApiKey != null) {
@@ -1359,7 +1425,7 @@ public class ApiGatewayExecuteController {
         identity.putNull("cognitoIdentityId");
         identity.putNull("cognitoIdentityPoolId");
         identity.putNull("principalOrgId");
-        identity.put("sourceIp", "127.0.0.1");
+        identity.put("sourceIp", routeContext.sourceIp());
         putOrNull(identity, "user", iamIdentity == null ? null : iamIdentity.userId());
         String userAgent = headers.getHeaderString("User-Agent");
         identity.put("userAgent", userAgent != null ? userAgent : "");
@@ -3622,7 +3688,7 @@ public class ApiGatewayExecuteController {
         context.put("status", status);
 
         Map<String, Object> identity = new LinkedHashMap<>();
-        identity.put("sourceIp", "127.0.0.1");
+        identity.put("sourceIp", routeContext.sourceIp());
         identity.put("userAgent", scope.headers() != null ? scope.headers().getHeaderString("User-Agent") : null);
         context.put("identity", identity);
 
