@@ -1,5 +1,10 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.InvalidPathException;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
+import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 import com.networknt.schema.ValidationMessage;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
@@ -106,6 +111,7 @@ public class ApiGatewayExecuteController {
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final Configuration jsonPathConfiguration;
     private final VtlTemplateEngine vtlEngine;
     private final AwsServiceRouter serviceRouter;
     private final WebSocketConnectionManager webSocketConnectionManager;
@@ -136,6 +142,10 @@ public class ApiGatewayExecuteController {
         this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.jsonPathConfiguration = Configuration.builder()
+                .jsonProvider(new JacksonJsonNodeJsonProvider(objectMapper))
+                .mappingProvider(new JacksonMappingProvider(objectMapper))
+                .build();
         this.vtlEngine = vtlEngine;
         this.serviceRouter = serviceRouter;
         this.webSocketConnectionManager = webSocketConnectionManager;
@@ -2220,7 +2230,7 @@ public class ApiGatewayExecuteController {
         if (source.equals("method.request.body")) {
             return new String(body, StandardCharsets.UTF_8);
         }
-        if (!source.startsWith("method.request.body.")) {
+        if (!source.startsWith("method.request.body.") && !source.startsWith("method.request.body[")) {
             return null;
         }
         try {
@@ -2228,13 +2238,14 @@ public class ApiGatewayExecuteController {
             if (root == null) {
                 return null;
             }
-            String path = "$." + source.substring("method.request.body.".length());
-            JsonNode value = VtlTemplateEngine.InputVariable.resolvePath(root, path);
+            String path = "$" + source.substring("method.request.body".length());
+            Object resolved = JsonPath.using(jsonPathConfiguration).parse(root).read(path);
+            JsonNode value = resolved instanceof JsonNode node ? node : objectMapper.valueToTree(resolved);
             if (value.isMissingNode() || value.isNull()) {
                 return null;
             }
             return value.isContainerNode() ? value.toString() : value.asText();
-        } catch (IOException exception) {
+        } catch (IOException | InvalidPathException exception) {
             LOG.debugv("Request body parameter {0} could not be resolved: {1}", source, exception.getMessage());
             return null;
         }

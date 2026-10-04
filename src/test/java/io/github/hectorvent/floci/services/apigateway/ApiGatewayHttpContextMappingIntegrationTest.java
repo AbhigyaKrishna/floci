@@ -341,6 +341,10 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         parameters.put("integration.request.querystring.copied", "method.request.multivaluequerystring.source");
         parameters.put("integration.request.header.X-Raw-Body", "method.request.body");
         parameters.put("integration.request.header.X-Body-Number", "method.request.body.items[0].number");
+        parameters.put("integration.request.header.X-Body-Items", "method.request.body.items[*]");
+        parameters.put("integration.request.header.X-Body-Numbers", "method.request.body.items[*].number");
+        parameters.put("integration.request.header.X-Body-Missing", "method.request.body.missing");
+        parameters.put("integration.request.header.X-Body-Invalid", "method.request.body.items[invalid]");
         parameters.put("integration.request.header.X-Body-Boolean", "method.request.body.enabled");
         parameters.put("integration.request.querystring.owner", "stageVariables.owner");
         parameters.put("integration.request.path.principal", "stageVariables.owner");
@@ -350,7 +354,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         given().contentType(ContentType.JSON).body(Map.of("patchOperations", List.of(Map.of(
                         "op", "add", "path", "/variables/owner", "value", "stage-owner"))))
                 .patch("/restapis/" + apiId + "/stages/test").then().statusCode(200);
-        String body = "{\"items\":[{\"number\":42}],\"enabled\":true}";
+        String body = "{\"items\":[{\"number\":42},{\"number\":7}],\"enabled\":true}";
         JsonNode response = MAPPER.readTree(given().contentType(ContentType.JSON).body(body)
                 .header("X-Source", "first", "second").queryParam("source", "one", "two")
                 .post("/execute-api/" + apiId + "/test/orders/42")
@@ -358,10 +362,33 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         assertEquals(MAPPER.valueToTree(List.of("first", "second")), response.path("headers").path("x-header-copy"));
         assertEquals(body, response.path("headers").path("x-raw-body").path(0).asText());
         assertEquals("42", response.path("headers").path("x-body-number").path(0).asText());
+        assertEquals("[{\"number\":42},{\"number\":7}]", response.path("headers").path("x-body-items").path(0).asText());
+        assertEquals("[42,7]", response.path("headers").path("x-body-numbers").path(0).asText());
+        assertFalse(response.path("headers").has("x-body-missing"));
+        assertFalse(response.path("headers").has("x-body-invalid"));
         assertEquals("true", response.path("headers").path("x-body-boolean").path(0).asText());
         assertTrue(response.path("query").asText().contains("copied=one&copied=two"));
         assertTrue(response.path("query").asText().contains("owner=stage-owner"));
         assertEquals("/users/stage-owner/orders/42", response.path("path").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTP_PROXY", "HTTP"})
+    void mapsArrayRootBodyFields(String type) throws Exception {
+        given().contentType(ContentType.JSON).body(Map.of("authorizationType", "NONE"))
+                .put(methodPath + "POST").then().statusCode(201);
+        configureIntegration(type, "POST", Map.of(
+                "integration.request.header.X-First-Price", "method.request.body[0].price",
+                "integration.request.header.X-Prices", "method.request.body[*].price",
+                "integration.request.path.principal", "'array'",
+                "integration.request.path.proxy", "method.request.path.proxy"));
+        deploy();
+        JsonNode response = MAPPER.readTree(given().contentType(ContentType.JSON)
+                .body("[{\"price\":42},{\"price\":7}]")
+                .post("/execute-api/" + apiId + "/test/orders/42")
+                .then().statusCode(200).extract().asByteArray());
+        assertEquals("42", response.path("headers").path("x-first-price").path(0).asText());
+        assertEquals("[42,7]", response.path("headers").path("x-prices").path(0).asText());
     }
 
     @ParameterizedTest
