@@ -928,6 +928,14 @@ public class IamPolicyEvaluator {
      */
     private enum SetQuantifier { NONE, FOR_ALL_VALUES, FOR_ANY_VALUE }
 
+    private static final Set<String> SUPPORTED_CONDITION_OPERATORS = Set.of(
+            "StringEquals", "StringNotEquals", "StringEqualsIgnoreCase", "StringNotEqualsIgnoreCase",
+            "StringLike", "StringNotLike", "ArnEquals", "ArnLike", "ArnNotEquals", "ArnNotLike", "Bool",
+            "NumericEquals", "NumericNotEquals", "NumericLessThan", "NumericLessThanEquals",
+            "NumericGreaterThan", "NumericGreaterThanEquals", "DateEquals", "DateNotEquals",
+            "DateLessThan", "DateLessThanEquals", "DateGreaterThan", "DateGreaterThanEquals",
+            "IpAddress", "NotIpAddress");
+
     private record ParsedOperator(SetQuantifier quantifier, String baseOp, boolean ifExists) {}
 
     /**
@@ -950,6 +958,20 @@ public class IamPolicyEvaluator {
         boolean ifExists = rest.endsWith("IfExists");
         String baseOp = ifExists ? rest.substring(0, rest.length() - "IfExists".length()) : rest;
         return new ParsedOperator(quantifier, baseOp, ifExists);
+    }
+
+    /**
+     * Returns whether {@link #evaluate} understands a condition operator, including its
+     * {@code ForAllValues:}/{@code ForAnyValue:} prefix and {@code IfExists} suffix. An unknown
+     * operator never matches, which silently disables a Deny, so callers that must fail closed
+     * on a malformed policy check this first.
+     */
+    public static boolean isSupportedConditionOperator(String operator) {
+        ParsedOperator parsed = parseOperator(operator);
+        if ("Null".equals(parsed.baseOp())) {
+            return !parsed.ifExists() && parsed.quantifier() == SetQuantifier.NONE;
+        }
+        return SUPPORTED_CONDITION_OPERATORS.contains(parsed.baseOp());
     }
 
     /**
@@ -1296,10 +1318,9 @@ public class IamPolicyEvaluator {
         Map<String, Map<String, List<String>>> result = new LinkedHashMap<>();
         condNode.fields().forEachRemaining(opEntry -> {
             Map<String, List<String>> kvMap = new LinkedHashMap<>();
-            boolean boolOperator = "Bool".equals(parseOperator(opEntry.getKey()).baseOp());
             opEntry.getValue().fields().forEachRemaining(kvEntry -> {
                 JsonNode value = kvEntry.getValue();
-                kvMap.put(kvEntry.getKey(), boolOperator && value.isBoolean()
+                kvMap.put(kvEntry.getKey(), value.isBoolean() || value.isNumber()
                         ? List.of(value.asText()) : nodeToList(value));
             });
             result.put(opEntry.getKey(), kvMap);

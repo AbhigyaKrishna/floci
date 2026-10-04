@@ -50,9 +50,52 @@ public class AuthorizerPolicyEvaluator {
                 || (statement.has("Resource") == statement.has("NotResource"))
                 || !validStringOrList(statement.has("Action") ? statement.get("Action") : statement.path("NotAction"))
                 || !validStringOrList(statement.has("Resource") ? statement.get("Resource") : statement.path("NotResource"))
-                || (statement.has("Condition") && !statement.get("Condition").isObject())) {
+                || (statement.has("Condition") && !validCondition(statement.get("Condition")))) {
             throw new IllegalArgumentException("Invalid authorizer policy statement");
         }
+    }
+
+    /**
+     * An operator IAM does not know, or one with no keys or values, would otherwise evaluate as
+     * a non-match or an unconditional match, so a malformed Deny could be skipped or a malformed
+     * Allow could grant access. An empty {@code Condition} object stays valid, as in IAM.
+     */
+    private static boolean validCondition(JsonNode condition) {
+        if (!condition.isObject()) {
+            return false;
+        }
+        for (Map.Entry<String, JsonNode> operator : condition.properties()) {
+            JsonNode keys = operator.getValue();
+            if (!IamPolicyEvaluator.isSupportedConditionOperator(operator.getKey())
+                    || !keys.isObject() || keys.isEmpty()) {
+                return false;
+            }
+            for (Map.Entry<String, JsonNode> key : keys.properties()) {
+                if (key.getKey().isEmpty() || !validConditionValues(key.getValue())) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean validConditionValues(JsonNode values) {
+        if (!values.isArray()) {
+            return validConditionValue(values);
+        }
+        if (values.isEmpty()) {
+            return false;
+        }
+        for (JsonNode value : values) {
+            if (!validConditionValue(value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean validConditionValue(JsonNode value) {
+        return value.isTextual() || value.isNumber() || value.isBoolean();
     }
 
     private static boolean validStringOrList(JsonNode value) {

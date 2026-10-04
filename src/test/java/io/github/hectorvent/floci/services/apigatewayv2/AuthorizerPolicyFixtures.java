@@ -65,7 +65,21 @@ public final class AuthorizerPolicyFixtures {
                         + conditionStatement("Allow", "Bool", "aws:SecureTransport", "\"true\"") + "]", 403),
                 Arguments.of("current time allow", "["
                         + conditionStatement("Allow", "DateGreaterThan", "aws:CurrentTime", "\"2000-01-01T00:00:00Z\"") + "]", 200),
-                Arguments.of("invalid condition", "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\",\"Condition\":true}]", 500));
+                Arguments.of("invalid condition", "[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\",\"Condition\":true}]", 500),
+                Arguments.of("condition operator without keys", "[{\"Effect\":\"Allow\",\"Action\":\"*\","
+                        + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":\"invalid\"}}]", 500),
+                Arguments.of("condition operator with empty keys", "[{\"Effect\":\"Allow\",\"Action\":\"*\","
+                        + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{}}}]", 500),
+                Arguments.of("unknown condition operator deny", "[" + allow + ","
+                        + conditionStatement("Deny", "IpAddres", "aws:SourceIp", localAddresses) + "]", 500),
+                Arguments.of("empty condition values deny", "[" + allow + ","
+                        + ipStatement("Deny", "NotIpAddress", "[]") + "]", 500),
+                Arguments.of("object condition value", "["
+                        + ipStatement("Allow", "IpAddress", "{\"cidr\":\"127.0.0.0/8\"}") + "]", 500),
+                Arguments.of("if exists operator", "["
+                        + conditionStatement("Allow", "StringEqualsIfExists", "aws:Unset", "\"x\"") + "]", 200),
+                Arguments.of("boolean condition value", "[" + allow + ","
+                        + conditionStatement("Deny", "Bool", "aws:SecureTransport", "false") + "]", 403));
     }
 
     private static String statement(String effect, String action, String resource) {
