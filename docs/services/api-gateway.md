@@ -357,6 +357,8 @@ HTTP proxy passthrough behavior.
 
 `method.request.*` sources always read the original inbound headers, query parameters and path
 parameters. Mapped destinations do not change another mapping's source, regardless of mapping order.
+Scalar `method.request.header.*` and `method.request.querystring.*` sources select the first
+inbound value.
 `method.request.multivalueheader.*` and `method.request.multivaluequerystring.*` preserve repeated
 values in either HTTP integration type. `stageVariables.*`, the raw `method.request.body` and
 `method.request.body.<JSONPath>` are supported too.

@@ -1695,8 +1695,9 @@ public class ApiGatewayExecuteController {
             for (Map.Entry<String, String> param : integrationReqParams.entrySet()) {
                 String dest = param.getKey();    // integration.request.header.X-Foo or integration.request.querystring.bar
                 String source = param.getValue(); // method.request.querystring.q or method.request.header.Auth or method.request.path.id
-                String resolvedValue = resolveAwsRequestParameter(source, scope,
+                List<String> resolvedValues = resolveRequestParameter(source, scope,
                         gatewayRequestPathParams(scope), httpRequestMappingContext(scope, requestId, authorizerResult));
+                String resolvedValue = resolvedValues != null ? String.join(",", resolvedValues) : null;
                 if (resolvedValue != null) {
                     if (dest.startsWith("integration.request.header.")) {
                         headerMap.put(dest.substring("integration.request.header.".length()), resolvedValue);
@@ -2159,23 +2160,6 @@ public class ApiGatewayExecuteController {
         return single;
     }
 
-    private String resolveAwsRequestParameter(String source, GatewayResponseScope scope,
-                                               Map<String, String> path, Map<String, Object> context) {
-        if (source == null) {
-            return null;
-        }
-        // AWS integration templates historically receive the first value for scalar sources.
-        if (source.startsWith("method.request.querystring.")) {
-            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
-        }
-        if (source.startsWith("method.request.header.")) {
-            List<String> values = scope.headers().getRequestHeader(source.substring("method.request.header.".length()));
-            return values != null && !values.isEmpty() ? values.getFirst() : null;
-        }
-        List<String> values = resolveRequestParameter(source, scope, path, context);
-        return values != null ? String.join(",", values) : null;
-    }
-
     private List<String> resolveRequestParameter(String source, GatewayResponseScope scope,
                                                  Map<String, String> path, Map<String, Object> context) {
         if (source == null) {
@@ -2198,14 +2182,14 @@ public class ApiGatewayExecuteController {
     private String resolveScalarRequestParameter(String source, GatewayResponseScope scope,
                                                   Map<String, String> path, Map<String, Object> context) {
         if (source.startsWith("method.request.querystring.")) {
-            List<String> values = scope.uriInfo().getQueryParameters().get(source.substring("method.request.querystring.".length()));
-            return values != null && !values.isEmpty() ? String.join(",", values) : null;
+            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("method.request.path.")) {
             return path.get(source.substring("method.request.path.".length()));
         }
         if (source.startsWith("method.request.header.")) {
-            return scope.headers().getHeaderString(source.substring("method.request.header.".length()));
+            List<String> values = scope.headers().getRequestHeader(source.substring("method.request.header.".length()));
+            return values != null && !values.isEmpty() ? values.getFirst() : null;
         }
         if (source.startsWith("context.")) {
             Object value = contextValue(context, source.substring("context.".length()));

@@ -144,6 +144,20 @@ class ApiGatewayHttpContextMappingIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"HTTP_PROXY", "HTTP"})
+    void rejectsObjectAuthorizerContextBeforeReachingBackend(String type) throws Exception {
+        configureAuthorizer(0, Map.of("objectKey", Map.of("nested", "value")));
+        configureIntegration(type, "GET", Map.of(
+                "integration.request.header.X-Object", "context.authorizer.objectKey",
+                "integration.request.path.principal", "context.authorizer.principalId",
+                "integration.request.path.proxy", "method.request.path.proxy"));
+        deploy();
+        given().header("Authorization", "Bearer allowed").header("X-Object", "forged")
+                .get("/execute-api/" + apiId + "/test/orders/42").then().statusCode(500);
+        assertEquals(0, backendRequests.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTP_PROXY", "HTTP"})
     void missingAuthorizerClaimDoesNotFallBackToClientHeader(String type) throws Exception {
         configureAuthorizer(0, Map.of());
         configureIntegration(type, "GET");
@@ -338,7 +352,9 @@ class ApiGatewayHttpContextMappingIntegrationTest {
                 .put(methodPath + "POST").then().statusCode(201);
         Map<String, String> parameters = new LinkedHashMap<>();
         parameters.put("integration.request.header.X-Header-Copy", "method.request.multivalueheader.X-Source");
+        parameters.put("integration.request.header.X-Scalar-Header", "method.request.header.X-Source");
         parameters.put("integration.request.querystring.copied", "method.request.multivaluequerystring.source");
+        parameters.put("integration.request.querystring.scalar", "method.request.querystring.source");
         parameters.put("integration.request.header.X-Raw-Body", "method.request.body");
         parameters.put("integration.request.header.X-Body-Number", "method.request.body.items[0].number");
         parameters.put("integration.request.header.X-Body-Items", "method.request.body.items[*]");
@@ -360,6 +376,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
                 .post("/execute-api/" + apiId + "/test/orders/42")
                 .then().statusCode(200).extract().asByteArray());
         assertEquals(MAPPER.valueToTree(List.of("first", "second")), response.path("headers").path("x-header-copy"));
+        assertEquals(MAPPER.valueToTree(List.of("first")), response.path("headers").path("x-scalar-header"));
         assertEquals(body, response.path("headers").path("x-raw-body").path(0).asText());
         assertEquals("42", response.path("headers").path("x-body-number").path(0).asText());
         assertEquals("[{\"number\":42},{\"number\":7}]", response.path("headers").path("x-body-items").path(0).asText());
@@ -368,6 +385,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         assertFalse(response.path("headers").has("x-body-invalid"));
         assertEquals("true", response.path("headers").path("x-body-boolean").path(0).asText());
         assertTrue(response.path("query").asText().contains("copied=one&copied=two"));
+        assertTrue(List.of(response.path("query").asText().split("&")).contains("scalar=one"));
         assertTrue(response.path("query").asText().contains("owner=stage-owner"));
         assertEquals("/users/stage-owner/orders/42", response.path("path").asText());
     }
