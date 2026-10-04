@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -17,7 +18,9 @@ import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsT
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -25,6 +28,7 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -36,6 +40,7 @@ class EventBridgeServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String DEFAULT_BUS = "arn:aws:events:us-east-1:000000000000:event-bus/default";
 
     private EventBridgeService service;
     private TargetDispatcher dispatcherMock;
@@ -216,6 +221,122 @@ class EventBridgeServiceTest {
 
         List<EventBus> result = service.listEventBuses("prod-", REGION);
         assertEquals(2, result.size());
+    }
+
+    // ──────────────────────────── Archives ────────────────────────────
+
+    @Test
+    void createArchiveAcceptsTheDefaultBusAndAnExistingCustomBus() {
+        String custom = service.createEventBus("orders", null, null, REGION).getArn();
+
+        assertEquals("arn:aws:events:us-east-1:000000000000:event-bus/default", service.createArchive(
+                "on-default", "arn:aws:events:us-east-1:000000000000:event-bus/default", null, null, 0, REGION)
+                .getEventSourceArn());
+        assertEquals(custom, service.createArchive("on-custom", custom, null, null, 0, REGION)
+                .getEventSourceArn());
+    }
+
+    /** The messages AWS returns; the account is checked before the region. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "arn:aws:events:us-east-1:000000000000:event-bus/missing|ResourceNotFoundException|"
+                    + "Event bus missing does not exist.",
+            "arn:aws:events:eu-west-1:000000000000:event-bus/default|ValidationException|"
+                    + "Parameter EventSourceArn is not valid. Reason: Creating cross-region archive is not permitted.",
+            "arn:aws:events:us-east-1:111111111111:event-bus/default|AccessDeniedException|"
+                    + "Archive event source arn:aws:events:us-east-1:111111111111:event-bus/default "
+                    + "does not belong to account 000000000000.",
+            "arn:aws:events:eu-west-1:111111111111:event-bus/missing|AccessDeniedException|"
+                    + "Archive event source arn:aws:events:eu-west-1:111111111111:event-bus/missing "
+                    + "does not belong to account 000000000000."
+    })
+    void createArchiveRejectsASourceThatIsNotAnExistingBusOfThisAccountAndRegion(
+            String sourceArn, String code, String message) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createArchive("orders-archive", sourceArn, null, null, 0, REGION));
+
+        assertEquals(code, error.getErrorCode());
+        assertEquals(message, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listArchives(null, null, null, REGION).isEmpty());
+    }
+
+    /** One out-of-range field each, with the message AWS returns for it. */
+    static Stream<Arguments> outOfRangeArchiveFields() {
+        String description = "d".repeat(513);
+        String pattern = patternOfLength(4097);
+        return Stream.of(
+                Arguments.of(null, null, -1, "1 validation error detected: Value '-1' at 'retentionDays' "
+                        + "failed to satisfy constraint: Member must have value greater than or equal to 0"),
+                Arguments.of(description, null, 0, "1 validation error detected: Value '" + description
+                        + "' at 'description' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 512"),
+                Arguments.of(null, pattern, 0, "1 validation error detected: Value '" + pattern
+                        + "' at 'eventPattern' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 4096"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("outOfRangeArchiveFields")
+    void createArchiveRejectsAnOutOfRangeField(String description, String pattern, int retention, String message) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createArchive("orders-archive", DEFAULT_BUS, description, pattern, retention, REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(message, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listArchives(null, null, null, REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @MethodSource("outOfRangeArchiveFields")
+    void updateArchiveRejectsAnOutOfRangeFieldBeforeLookingTheArchiveUp(
+            String description, String pattern, int retention, String message) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.updateArchive("missing-archive", description, pattern, retention, REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(message, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createArchiveReportsEveryViolationInAwsOrderBeforeCheckingTheSource() {
+        String description = "d".repeat(513);
+        String pattern = patternOfLength(4097);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createArchive("orders-archive",
+                "arn:aws:events:us-east-1:000000000000:event-bus/missing", description, pattern, -1, REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("3 validation errors detected: "
+                + "Value '-1' at 'retentionDays' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 0; "
+                + "Value '" + description + "' at 'description' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 512; "
+                + "Value '" + pattern + "' at 'eventPattern' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 4096", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void archiveFieldsAtTheirLimitsAreAccepted() {
+        String description = "d".repeat(512);
+        String pattern = patternOfLength(4096);
+
+        service.createArchive("orders-archive", DEFAULT_BUS, description, pattern, 0, REGION);
+        service.updateArchive("orders-archive", description, pattern, 0, REGION);
+
+        Archive archive = service.describeArchive("orders-archive", REGION);
+        assertEquals(description, archive.getDescription());
+        assertEquals(pattern, archive.getEventPattern());
+        assertEquals(0, archive.getRetentionDays());
+    }
+
+    private static String patternOfLength(int length) {
+        String pattern = "{\"source\":[\"" + "a".repeat(length - 15) + "\"]}";
+        assertEquals(length, pattern.length());
+        return pattern;
     }
 
     // ──────────────────────────── Rules ────────────────────────────

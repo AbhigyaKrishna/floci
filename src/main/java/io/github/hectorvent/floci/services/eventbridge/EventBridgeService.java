@@ -1206,12 +1206,14 @@ public class EventBridgeService implements ResourceProvider {
 
     public Archive createArchive(String archiveName, String eventSourceArn, String description,
                                  String eventPattern, int retentionDays, String region) {
+        requireArchiveFields(description, eventPattern, retentionDays);
         if (archiveName == null || archiveName.isBlank()) {
             throw new AwsException("ValidationException", "ArchiveName is required.", 400);
         }
         if (eventSourceArn == null || eventSourceArn.isBlank()) {
             throw new AwsException("ValidationException", "EventSourceArn is required.", 400);
         }
+        requireArchiveSource(eventSourceArn, region);
         String key = archiveKey(region, archiveName);
         if (archiveStore.get(key).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -1231,23 +1233,84 @@ public class EventBridgeService implements ResourceProvider {
         return archive;
     }
 
+    /**
+     * The request constraints CreateArchive and UpdateArchive enforce before any other check, all
+     * violations reported together in AWS's order. A null argument is absent and not checked.
+     */
+    private void requireArchiveFields(String description, String eventPattern, Integer retentionDays) {
+        List<String> violations = new ArrayList<>();
+        if (retentionDays != null && retentionDays < 0) {
+            violations.add("Value '" + retentionDays + "' at 'retentionDays' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 0");
+        }
+        if (description != null && description.length() > 512) {
+            violations.add("Value '" + description + "' at 'description' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 512");
+        }
+        if (eventPattern != null && eventPattern.length() > 4096) {
+            violations.add("Value '" + eventPattern + "' at 'eventPattern' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 4096");
+        }
+        if (!violations.isEmpty()) {
+            String header = violations.size() == 1
+                    ? "1 validation error detected: "
+                    : violations.size() + " validation errors detected: ";
+            throw new AwsException("ValidationException", header + String.join("; ", violations), 400);
+        }
+    }
+
+    /**
+     * Checked as AWS does, before the name: the source's account, then its region, then that it is
+     * the ARN of an existing bus. Anything else, a malformed ARN included, is reported as a missing
+     * bus, since an archive on it could never capture an event.
+     */
+    private void requireArchiveSource(String eventSourceArn, String region) {
+        String accountId = regionResolver.getAccountId();
+        AwsArnUtils.Arn source = AwsArnUtils.isArn(eventSourceArn) ? AwsArnUtils.parse(eventSourceArn) : null;
+        if (source != null && !accountId.equals(source.accountId())) {
+            throw new AwsException("AccessDeniedException", "Archive event source " + eventSourceArn
+                    + " does not belong to account " + accountId + ".", 400);
+        }
+        if (source != null && !region.equals(source.region())) {
+            throw new AwsException("ValidationException",
+                    "Parameter EventSourceArn is not valid. Reason: Creating cross-region archive is not permitted.",
+                    400);
+        }
+        String busName = eventSourceArn.substring(eventSourceArn.indexOf('/') + 1);
+        EventBus bus = "default".equals(busName)
+                ? getOrCreateDefaultBus(region)
+                : busStore.get(busKey(region, busName)).orElse(null);
+        if (bus == null || !eventSourceArn.equals(bus.getArn())) {
+            throw new AwsException("ResourceNotFoundException", "Event bus " + busName + " does not exist.", 400);
+        }
+    }
+
     public Archive describeArchive(String archiveName, String region) {
         return archiveStore.get(archiveKey(region, archiveName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Archive not found: " + archiveName, 400));
     }
 
+    /**
+     * A partial update, as on AWS: a null argument leaves the stored value alone, and an empty
+     * description or event pattern clears it.
+     */
     public Archive updateArchive(String archiveName, String description,
-                                 String eventPattern, int retentionDays, String region) {
+                                 String eventPattern, Integer retentionDays, String region) {
+        requireArchiveFields(description, eventPattern, retentionDays);
         String key = archiveKey(region, archiveName);
         Archive archive = archiveStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Archive not found: " + archiveName, 400));
         if (description != null) {
-            archive.setDescription(description);
+            archive.setDescription(description.isEmpty() ? null : description);
         }
-        archive.setEventPattern(eventPattern);
-        archive.setRetentionDays(retentionDays);
+        if (eventPattern != null) {
+            archive.setEventPattern(eventPattern.isEmpty() ? null : eventPattern);
+        }
+        if (retentionDays != null) {
+            archive.setRetentionDays(retentionDays);
+        }
         archiveStore.put(key, archive);
         return archive;
     }
