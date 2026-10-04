@@ -152,7 +152,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolUser` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `ScheduleGroup` |
@@ -408,6 +408,9 @@ Lambda. floci supports two shapes:
   is polled (via Step Functions [`Retry`](step-functions.md)) until it reports done, at which point the
   ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
   default); a resource that never completes fails the stack rather than hanging.
+
+The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
+reserves that prefix for its own resource state, which no template can read.
 
 ## Deleted Stacks
 
