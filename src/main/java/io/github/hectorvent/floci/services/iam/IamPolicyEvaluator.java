@@ -12,7 +12,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +22,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1085,18 +1088,18 @@ public class IamPolicyEvaluator {
             case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue);
             case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue);
             case "Bool"                      -> Boolean.parseBoolean(condValue) == Boolean.parseBoolean(ctxValue);
-            case "NumericEquals"             -> compareNumeric(ctxValue, condValue) == 0;
-            case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue) != 0;
-            case "NumericLessThan"           -> compareNumeric(ctxValue, condValue) < 0;
-            case "NumericLessThanEquals"     -> compareNumeric(ctxValue, condValue) <= 0;
-            case "NumericGreaterThan"        -> compareNumeric(ctxValue, condValue) > 0;
-            case "NumericGreaterThanEquals"  -> compareNumeric(ctxValue, condValue) >= 0;
-            case "DateEquals"                -> compareDates(ctxValue, condValue) == 0;
-            case "DateNotEquals"             -> compareDates(ctxValue, condValue) != 0;
-            case "DateLessThan"              -> compareDates(ctxValue, condValue) < 0;
-            case "DateLessThanEquals"        -> compareDates(ctxValue, condValue) <= 0;
-            case "DateGreaterThan"           -> compareDates(ctxValue, condValue) > 0;
-            case "DateGreaterThanEquals"     -> compareDates(ctxValue, condValue) >= 0;
+            case "NumericEquals"             -> compareNumeric(ctxValue, condValue, order -> order == 0);
+            case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue, order -> order != 0);
+            case "NumericLessThan"           -> compareNumeric(ctxValue, condValue, order -> order < 0);
+            case "NumericLessThanEquals"     -> compareNumeric(ctxValue, condValue, order -> order <= 0);
+            case "NumericGreaterThan"        -> compareNumeric(ctxValue, condValue, order -> order > 0);
+            case "NumericGreaterThanEquals"  -> compareNumeric(ctxValue, condValue, order -> order >= 0);
+            case "DateEquals"                -> compareDates(ctxValue, condValue, order -> order == 0);
+            case "DateNotEquals"             -> compareDates(ctxValue, condValue, order -> order != 0);
+            case "DateLessThan"              -> compareDates(ctxValue, condValue, order -> order < 0);
+            case "DateLessThanEquals"        -> compareDates(ctxValue, condValue, order -> order <= 0);
+            case "DateGreaterThan"           -> compareDates(ctxValue, condValue, order -> order > 0);
+            case "DateGreaterThanEquals"     -> compareDates(ctxValue, condValue, order -> order >= 0);
             case "IpAddress"                 -> matchesIpAddress(condValue, ctxValue);
             case "NotIpAddress"              -> !matchesIpAddress(condValue, ctxValue);
             default -> {
@@ -1106,19 +1109,26 @@ public class IamPolicyEvaluator {
         };
     }
 
-    private int compareNumeric(String ctxValue, String condValue) {
+    /**
+     * Compares exactly, so integers beyond a double's precision stay distinct. A value that
+     * does not parse never satisfies the operator, so it cannot pass as equal.
+     */
+    private static boolean compareNumeric(String ctxValue, String condValue, IntPredicate test) {
         try {
-            return Double.compare(Double.parseDouble(ctxValue), Double.parseDouble(condValue));
+            return test.test(new BigDecimal(ctxValue.trim()).compareTo(new BigDecimal(condValue.trim())));
         } catch (NumberFormatException e) {
-            return 0;
+            LOG.debugv("Numeric condition on non-numeric value {0} vs {1}: no match", ctxValue, condValue);
+            return false;
         }
     }
 
-    private int compareDates(String ctxValue, String condValue) {
+    /** A value that does not parse as a date never satisfies the operator. */
+    private static boolean compareDates(String ctxValue, String condValue, IntPredicate test) {
         try {
-            return Instant.parse(ctxValue).compareTo(Instant.parse(condValue));
-        } catch (Exception e) {
-            return 0;
+            return test.test(Instant.parse(ctxValue).compareTo(Instant.parse(condValue)));
+        } catch (DateTimeParseException e) {
+            LOG.debugv("Date condition on non-date value {0} vs {1}: no match", ctxValue, condValue);
+            return false;
         }
     }
 

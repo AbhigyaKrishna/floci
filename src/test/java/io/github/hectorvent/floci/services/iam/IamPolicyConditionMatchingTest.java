@@ -81,6 +81,23 @@ class IamPolicyConditionMatchingTest {
         assertEquals(negated, decision("NotIpAddress", List.of(range), List.of(sourceIp)));
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "NumericEquals, 10, invalid, DENY",
+            "NumericNotEquals, 10, invalid, DENY",
+            "NumericLessThanEquals, 10, invalid, DENY",
+            "NumericEquals, 10, 10.0, ALLOW",
+            "NumericLessThanEquals, 9007199254740992, 9007199254740993, DENY",
+            "NumericGreaterThan, 9007199254740992, 9007199254740993, ALLOW",
+            "DateEquals, 2026-01-01T00:00:00Z, invalid, DENY",
+            "DateNotEquals, 2026-01-01T00:00:00Z, invalid, DENY",
+            "DateLessThan, 2026-01-01T00:00:00Z, 2025-12-31T23:59:59Z, ALLOW"
+    })
+    void numericAndDateConditionsCompareExactlyAndRejectUnparsableValues(String operator, String policyValue,
+                                                                          String requestValue, Decision expected) {
+        assertEquals(expected, decision(operator, List.of(policyValue), List.of(requestValue)));
+    }
+
     @Test
     void setOperatorsRemainCaseSensitive() {
         assertEquals(Decision.DENY, decision("ForAllValues:StringLike",
