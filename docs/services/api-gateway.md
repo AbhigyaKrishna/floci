@@ -87,7 +87,7 @@ includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 | **Integrations** | PutIntegration, GetIntegration, UpdateIntegration, DeleteIntegration |
 | **Integration Responses** | PutIntegrationResponse, GetIntegrationResponse, UpdateIntegrationResponse, DeleteIntegrationResponse |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
+| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageAuthorizersCache |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
@@ -152,6 +152,34 @@ immediately.
 > Floci does not implement the `apiKeyRequired` gate on methods, so a request carrying an unknown,
 > disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
 > than being rejected with `403`.
+
+### REST Lambda Authorizers
+
+TOKEN and REQUEST authorizers must return a nonempty `principalId` and an IAM policy. Floci
+checks all statements against `execute-api:Invoke` and the current method ARN, including
+wildcards, conditions and explicit deny precedence. A policy that does not grant the method
+returns `403`. Invalid policies or non-scalar context values return `500`. Scalar context keys,
+including keys such as `tenant-id`, are retained in Lambda proxy events.
+The alphanumeric and underscore restriction in the mapping reference applies to properties
+referenced through `$context.authorizer.property`, not to the returned context map.
+
+A missing TOKEN identity header returns `401` without invoking Lambda. For a REQUEST
+authorizer with caching enabled, every configured identity source must be present and nonempty.
+Creating or updating a cached REQUEST authorizer without an identity source returns `400`.
+The default TTL is 300 seconds, so omitting the TTL still requires an identity source.
+With caching disabled, REQUEST authorizers receive the request even when identity sources
+are missing. A Lambda `Unauthorized` error returns `401`; other function errors return `500`.
+
+`authorizerResultTtlInSeconds` caches the validated policy, principal and context together.
+A zero TTL disables caching. Cache entries are scoped to the account, region, API, stage,
+deployment, authorizer configuration and ordered identity values. Each cache hit evaluates
+the policy for the current method again. `FlushStageAuthorizersCache` clears a stage's entries
+through `DELETE /restapis/{apiId}/stages/{stageName}/cache/authorizers` and returns `202`.
+A flush also invalidates pending invocations, so a result started before the flush cannot
+repopulate that stage's cache afterward.
+
+See the AWS [Lambda authorizer workflow](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-use-lambda-authorizer.html)
+and [response contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-lambda-authorizer-output.html).
 
 ### Custom Domain Names
 
@@ -337,8 +365,8 @@ Use alphanumeric or underscore authorizer context keys, as required by the
 [AWS mapping contract](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-mapping-template-reference.html).
 For example, return `userClaims` in the authorizer context and map
 `integration.request.header.X-User-Claims` from `context.authorizer.userClaims`. The HTTP header
-name can contain hyphens. REST Lambda authorizer result caching is not implemented; setting
-`authorizerResultTtlInSeconds` does not currently suppress repeat Lambda invocations.
+name can contain hyphens. REST Lambda authorizer policy evaluation, response validation and
+result caching are handled separately from these integration mappings.
 
 A backend response body larger than the 10 MB API Gateway payload quota yields `413` with `{"message":"Request Entity Too Large"}`. The same limit applies to HTTP API `HTTP_PROXY` integrations.
 

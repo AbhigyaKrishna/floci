@@ -230,6 +230,7 @@ class ApiGatewayHttpContextMappingIntegrationTest {
             assertNotEquals(previousRequestId, requestId);
             previousRequestId = requestId;
         }
+        verify(lambdaService).invoke(eq("us-east-1"), eq(FUNCTION), any(byte[].class), eq(InvocationType.RequestResponse));
     }
 
     @ParameterizedTest
@@ -238,13 +239,10 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         configureAuthorizer(0);
         configureIntegration(type, "GET");
         deploy();
-        for (String token : List.of("", "Bearer forged")) {
-            RequestSpecification request = given().header("X-User-Claims", "forged");
-            if (!token.isEmpty()) {
-                request.header("Authorization", token);
-            }
-            request.get("/execute-api/" + apiId + "/test/orders/42").then().statusCode(403);
-        }
+        given().header("X-User-Claims", "forged")
+                .get("/execute-api/" + apiId + "/test/orders/42").then().statusCode(401);
+        given().header("X-User-Claims", "forged").header("Authorization", "Bearer forged")
+                .get("/execute-api/" + apiId + "/test/orders/42").then().statusCode(403);
         assertEquals(0, backendRequests.get());
     }
 
@@ -319,7 +317,8 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         given().contentType(ContentType.JSON).body(Map.of("responseParameters", Map.of(
                         "gatewayresponse.header.X-Domain", "context.domainName")))
                 .put("/restapis/" + apiId + "/gatewayresponses/ACCESS_DENIED").then().statusCode(201);
-        given().header("Host", host).get("/execute-api/" + apiId + "/test/orders/42")
+        given().header("Host", host).header("Authorization", "Bearer forged")
+                .get("/execute-api/" + apiId + "/test/orders/42")
                 .then().statusCode(403).header("X-Domain", equalTo(apiId + ".execute-api.us-east-1.amazonaws.com"));
     }
 
@@ -515,7 +514,8 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         parameters.put("integration.request.header.X-Number", "context.authorizer.numberKey");
         parameters.put("integration.request.header.X-Boolean", "context.authorizer.booleanKey");
         parameters.put("integration.request.header.X-Missing", "context.authorizer.missing");
-        parameters.put("integration.request.header.X-Object", "context.authorizer.objectKey");
+        // REST authorizer context rejects objects, so use the identity map to test non-scalar mappings.
+        parameters.put("integration.request.header.X-Object", "context.identity");
         parameters.put("integration.request.header.X-Request-Id", "context.requestId");
         parameters.put("integration.request.header.X-Context-Stage", "context.stage");
         parameters.put("integration.request.header.X-Context-Path", "context.path");
