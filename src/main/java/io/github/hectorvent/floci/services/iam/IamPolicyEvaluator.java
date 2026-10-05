@@ -1114,6 +1114,9 @@ public class IamPolicyEvaluator {
      * does not parse never satisfies the operator, so it cannot pass as equal.
      */
     private static boolean compareNumeric(String ctxValue, String condValue, IntPredicate test) {
+        if (ctxValue == null || condValue == null) {
+            return false;
+        }
         try {
             return test.test(new BigDecimal(ctxValue.trim()).compareTo(new BigDecimal(condValue.trim())));
         } catch (NumberFormatException e) {
@@ -1124,6 +1127,9 @@ public class IamPolicyEvaluator {
 
     /** A value that does not parse as a date never satisfies the operator. */
     private static boolean compareDates(String ctxValue, String condValue, IntPredicate test) {
+        if (ctxValue == null || condValue == null) {
+            return false;
+        }
         try {
             return test.test(Instant.parse(ctxValue).compareTo(Instant.parse(condValue)));
         } catch (DateTimeParseException e) {

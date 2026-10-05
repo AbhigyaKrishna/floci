@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -96,6 +97,13 @@ class IamPolicyConditionMatchingTest {
     void numericAndDateConditionsCompareExactlyAndRejectUnparsableValues(String operator, String policyValue,
                                                                           String requestValue, Decision expected) {
         assertEquals(expected, decision(operator, List.of(policyValue), List.of(requestValue)));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"NumericEquals, 10", "NumericNotEquals, 10", "DateEquals, 2026-01-01T00:00:00Z",
+            "DateNotEquals, 2026-01-01T00:00:00Z"})
+    void numericAndDateConditionsNeverMatchANullRequestValue(String operator, String policyValue) {
+        assertEquals(Decision.DENY, decision(operator, List.of(policyValue), Collections.singletonList(null)));
     }
 
     @Test
