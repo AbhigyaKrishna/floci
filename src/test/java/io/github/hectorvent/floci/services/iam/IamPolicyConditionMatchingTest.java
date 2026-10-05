@@ -92,7 +92,19 @@ class IamPolicyConditionMatchingTest {
             "NumericGreaterThan, 9007199254740992, 9007199254740993, ALLOW",
             "DateEquals, 2026-01-01T00:00:00Z, invalid, DENY",
             "DateNotEquals, 2026-01-01T00:00:00Z, invalid, DENY",
-            "DateLessThan, 2026-01-01T00:00:00Z, 2025-12-31T23:59:59Z, ALLOW"
+            "DateLessThan, 2026-01-01T00:00:00Z, 2025-12-31T23:59:59Z, ALLOW",
+            "DateEquals, 1893456000, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T00:00Z, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T05:30+05:30, 2030-01-01T00:00:00Z, ALLOW",
+            "DateEquals, 2030-01-01T00:00:00.000Z, 2030-01-01T00:00:00Z, ALLOW",
+            "DateGreaterThanEquals, 2020-01-01, 2026-10-05T04:58:46Z, ALLOW",
+            "DateLessThan, 2020-01-01, 1577836800, DENY",
+            "DateLessThan, 2020-01-01, 1577836799, ALLOW",
+            "DateEquals, 2030-01-01T00:00, 2030-01-01T00:00:00Z, DENY",
+            "DateEquals, 2030-13-01, 2030-01-01T00:00:00Z, DENY",
+            "DateEquals, 99999999999999999999, 2030-01-01T00:00:00Z, DENY"
     })
     void numericAndDateConditionsCompareExactlyAndRejectUnparsableValues(String operator, String policyValue,
                                                                           String requestValue, Decision expected) {

@@ -13,8 +13,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.time.DateTimeException;
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -94,6 +99,8 @@ public class IamPolicyEvaluator {
     // Condition value. Stops at the first ',' or '}' so a default value (${key, 'default'}),
     // whose default may itself contain '{{' / '}}' placeholder markers, doesn't get swept into
     // the captured key name.
+    private static final Pattern EPOCH_SECONDS = Pattern.compile("-?\\d+");
+    private static final Pattern YEAR_MONTH = Pattern.compile("\\d{4}-\\d{2}");
     private static final Pattern POLICY_VARIABLE = Pattern.compile("\\$\\{\\s*([^,}]+?)\\s*[,}]");
 
     private final ObjectMapper objectMapper;
@@ -1131,11 +1138,30 @@ public class IamPolicyEvaluator {
             return false;
         }
         try {
-            return test.test(Instant.parse(ctxValue).compareTo(Instant.parse(condValue)));
-        } catch (DateTimeParseException e) {
+            return test.test(parseConditionDate(ctxValue).compareTo(parseConditionDate(condValue)));
+        } catch (DateTimeException | ArithmeticException | NumberFormatException e) {
             LOG.debugv("Date condition on non-date value {0} vs {1}: no match", ctxValue, condValue);
             return false;
         }
+    }
+
+    /**
+     * Reads epoch seconds or a W3C ISO 8601 profile date: {@code YYYY-MM}, {@code YYYY-MM-DD},
+     * or a date-time with or without seconds and fraction. A bare {@code YYYY} is read as epoch
+     * seconds, as the two forms cannot be told apart. Dates without a time start at midnight UTC.
+     */
+    private static Instant parseConditionDate(String value) {
+        String trimmed = value.trim();
+        if (EPOCH_SECONDS.matcher(trimmed).matches()) {
+            return Instant.ofEpochSecond(Long.parseLong(trimmed));
+        }
+        if (trimmed.indexOf('T') >= 0) {
+            return OffsetDateTime.parse(trimmed, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant();
+        }
+        if (YEAR_MONTH.matcher(trimmed).matches()) {
+            return YearMonth.parse(trimmed).atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        }
+        return LocalDate.parse(trimmed).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private boolean matchesIpAddress(String condValue, String ctxValue) {
