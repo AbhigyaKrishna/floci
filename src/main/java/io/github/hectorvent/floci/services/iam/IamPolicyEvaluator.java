@@ -1155,7 +1155,7 @@ public class IamPolicyEvaluator {
         if (EPOCH_SECONDS.matcher(trimmed).matches()) {
             return Instant.ofEpochSecond(Long.parseLong(trimmed));
         }
-        if (trimmed.indexOf('T') >= 0) {
+        if (trimmed.indexOf('T') >= 0 || trimmed.indexOf('t') >= 0) {
             return OffsetDateTime.parse(trimmed, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant();
         }
         if (YEAR_MONTH.matcher(trimmed).matches()) {

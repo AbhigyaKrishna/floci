@@ -102,6 +102,7 @@ class IamPolicyConditionMatchingTest {
             "DateGreaterThanEquals, 2020-01-01, 2026-10-05T04:58:46Z, ALLOW",
             "DateLessThan, 2020-01-01, 1577836800, DENY",
             "DateLessThan, 2020-01-01, 1577836799, ALLOW",
+            "DateEquals, 2030-01-01t00:00:00z, 2030-01-01T00:00:00Z, ALLOW",
             "DateEquals, 2030-01-01T00:00, 2030-01-01T00:00:00Z, DENY",
             "DateEquals, 2030-13-01, 2030-01-01T00:00:00Z, DENY",
             "DateEquals, 99999999999999999999, 2030-01-01T00:00:00Z, DENY"
