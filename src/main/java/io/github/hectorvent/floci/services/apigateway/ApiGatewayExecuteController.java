@@ -122,6 +122,7 @@ public class ApiGatewayExecuteController {
     private final RequestContext requestContext;
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
     private final RestLambdaAuthorizer restLambdaAuthorizer;
+    private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -135,7 +136,8 @@ public class ApiGatewayExecuteController {
                                        ApiGatewayExecuteRouteContext routeContext,
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
-                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer) {
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
+                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -156,6 +158,7 @@ public class ApiGatewayExecuteController {
         this.requestContext = requestContext;
         this.sigV4Authorizer = sigV4Authorizer;
         this.restLambdaAuthorizer = restLambdaAuthorizer;
+        this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -1037,9 +1040,8 @@ public class ApiGatewayExecuteController {
                 }
             }
             String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, requestPath);
-            Map<String, List<String>> conditions = Map.of("aws:SourceIp", List.of(routeContext.sourceIp()),
-                    "aws:SecureTransport", List.of(Boolean.toString("https".equals(uriInfo.getRequestUri().getScheme()))),
-                    "aws:CurrentTime", List.of(Instant.now().toString()));
+            Map<String, List<String>> conditions = AuthorizerPolicyEvaluator.requestConditions(
+                    routeContext.sourceIp(), isSecureTransport(uriInfo));
             if (!restLambdaAuthorizer.permits(verified, methodArn, conditions)) {
                 return authorizerError(scope, GatewayResponseType.ACCESS_DENIED, 403);
             }
@@ -3111,26 +3113,11 @@ public class ApiGatewayExecuteController {
                         .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
-            JsonNode statements = policyDocument.path("Statement");
-            if (statements.isMissingNode() || statements.isNull()
-                    || !statements.isArray() || statements.isEmpty()) {
-                LOG.warnv("Authorizer response missing or empty Statement array for API {0}", apiId);
-                return new RequestAuthorizerResult(Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
-                        .type(MediaType.APPLICATION_JSON).build(), null);
-            }
-
-            String effect = statements.get(0).path("Effect").asText("Deny");
-            if ("Deny".equalsIgnoreCase(effect)) {
+            String methodArn = buildMethodArn(region, apiId, stageName, httpMethod, path);
+            if (!authorizerPolicyEvaluator.permits(policyDocument, methodArn,
+                    routeContext.sourceIp(), isSecureTransport(uriInfo))) {
                 return new RequestAuthorizerResult(Response.status(403)
                         .entity(jsonMessage("User is not authorized to access this resource"))
-                        .type(MediaType.APPLICATION_JSON).build(), null);
-            }
-
-            if (!"Allow".equalsIgnoreCase(effect)) {
-                LOG.warnv("Authorizer response has unrecognized Effect '{0}' for API {1}", effect, apiId);
-                return new RequestAuthorizerResult(Response.status(500)
-                        .entity(jsonMessage("Internal Server Error"))
                         .type(MediaType.APPLICATION_JSON).build(), null);
             }
 
@@ -3153,6 +3140,10 @@ public class ApiGatewayExecuteController {
     private ObjectNode requestAuthorizerContext(JsonNode response) {
         JsonNode context = response.path("context");
         return context.isObject() && !context.isEmpty() ? (ObjectNode) context : null;
+    }
+
+    private static boolean isSecureTransport(UriInfo uriInfo) {
+        return "https".equals(uriInfo.getRequestUri().getScheme());
     }
 
     /**
