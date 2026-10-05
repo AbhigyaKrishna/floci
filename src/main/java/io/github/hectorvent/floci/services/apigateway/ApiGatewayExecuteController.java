@@ -3203,9 +3203,9 @@ public class ApiGatewayExecuteController {
      * Builds a REQUEST authorizer event in payload format version 2.0.
      * Uses the newer HTTP API-native shape with routeArn, routeKey, rawPath, and requestContext.http.
      */
-    private String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
-                                                  String apiId, String stageName, String region,
-                                                  HttpHeaders headers, UriInfo uriInfo) {
+    String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
+                                          String apiId, String stageName, String region,
+                                          HttpHeaders headers, UriInfo uriInfo) {
         // rawPath is by contract the raw, unmodified path, so recover the trailing slash the
         // JAX-RS {proxy} binding stripped. routeArn keeps the normalized path for the same reason
         // methodArn does in the 1.0 shape above.
@@ -3249,8 +3249,7 @@ public class ApiGatewayExecuteController {
         ctx.put("requestId", UUID.randomUUID().toString());
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
         ctx.put("stage", stageName);
-        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now()));
+        ctx.put("time", GATEWAY_REQUEST_TIME.format(Instant.now().atZone(ZoneOffset.UTC)));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode http = ctx.putObject("http");
@@ -3474,8 +3473,7 @@ public class ApiGatewayExecuteController {
         ctx.put("requestId", requestId);
         ctx.put("routeKey", routeKey != null ? routeKey : "$default");
         ctx.put("stage", stageName);
-        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
-                .format(java.time.ZonedDateTime.now()));
+        ctx.put("time", GATEWAY_REQUEST_TIME.format(Instant.now().atZone(ZoneOffset.UTC)));
         ctx.put("timeEpoch", System.currentTimeMillis());
 
         ObjectNode http = ctx.putObject("http");
@@ -3570,8 +3568,8 @@ public class ApiGatewayExecuteController {
     // ──────────────────────────── Gateway responses ────────────────────────────
 
     private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
-    private static final DateTimeFormatter GATEWAY_REQUEST_TIME =
-            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z");
+    static final DateTimeFormatter GATEWAY_REQUEST_TIME =
+            DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z", Locale.ENGLISH);
 
     /**
      * The {@code {"message": ...}} answer a REST API gives when it, rather than the integration,
