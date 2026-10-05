@@ -95,12 +95,13 @@ public class IamPolicyEvaluator {
     // only guards against growth from many distinct session policies.
     static final int MAX_CACHED_DOCUMENTS = 2048;
 
+    private static final Pattern EPOCH_SECONDS = Pattern.compile("-?\\d+");
+    private static final Pattern YEAR_MONTH = Pattern.compile("\\d{4}-\\d{2}");
+
     // Matches an IAM policy variable such as ${aws:username} inside a Resource pattern or a
     // Condition value. Stops at the first ',' or '}' so a default value (${key, 'default'}),
     // whose default may itself contain '{{' / '}}' placeholder markers, doesn't get swept into
     // the captured key name.
-    private static final Pattern EPOCH_SECONDS = Pattern.compile("-?\\d+");
-    private static final Pattern YEAR_MONTH = Pattern.compile("\\d{4}-\\d{2}");
     private static final Pattern POLICY_VARIABLE = Pattern.compile("\\$\\{\\s*([^,}]+?)\\s*[,}]");
 
     private final ObjectMapper objectMapper;
