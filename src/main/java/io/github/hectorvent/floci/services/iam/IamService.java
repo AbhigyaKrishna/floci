@@ -3424,12 +3424,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Stores a non-expiring Lambda execution-role session with its session token. */
     public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
                                                    String secretAccessKey, String sessionToken, String roleArn) {
+        registerLambdaExecutionRoleSession(accountId, sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
+                null, null);
+    }
+
+    /** Stores a non-expiring Lambda execution-role session with its session token and assumed role ID. */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String sessionToken, String roleArn,
+                                                   String roleSessionName, String assumedRoleId) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Lambda function account ID must not be blank");
         }
         SessionCredential session = new SessionCredential(
                 sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, null, null, accountId);
         session.setLambdaExecutionRole(true);
+        session.setRoleSessionName(roleSessionName);
+        session.setAssumedRoleId(assumedRoleId);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
         } else {
@@ -3750,16 +3760,60 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
+        return resolveCallerUserId(accessKeyId, null);
+    }
+
+    public Optional<String> resolveCallerUserId(String accessKeyId, String sessionToken) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            String userName = akOpt.get().getUserName();
+            return users.get(userName).map(IamUser::getUserId);
+        }
+
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
-        if (sessionOpt.isEmpty()) {
-            return Optional.empty();
+        if (sessionOpt.isPresent()) {
+            SessionCredential session = sessionOpt.get();
+            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+                deleteSession(accessKeyId, session);
+                return Optional.empty();
+            }
+            if (isTemporaryAccessKey(accessKeyId) && session.getSessionToken() != null
+                    && !hasMatchingSessionToken(session, sessionToken)) {
+                return Optional.empty();
+            }
+            if (session.getAssumedRoleId() != null) {
+                return Optional.of(session.getAssumedRoleId());
+            } else if (session.getEc2RoleId() != null && session.getEc2InstanceId() != null) {
+                return Optional.of(session.getEc2RoleId() + ":" + session.getEc2InstanceId());
+            } else if (session.getRoleArn() != null) {
+                String roleArn = session.getRoleArn();
+                String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+                String accountId = AwsArnUtils.accountOrDefault(roleArn,
+                        session.getOriginAccountId() != null ? session.getOriginAccountId() : regionResolver.getAccountId());
+                Optional<IamRole> roleOpt = findRole(accountId, roleName);
+                String roleId = roleOpt.map(IamRole::getRoleId).filter(id -> !id.isBlank()).orElse(null);
+                if (roleId != null) {
+                    String sessionName = session.getRoleSessionName();
+                    if (sessionName == null || sessionName.isBlank()) {
+                        if (session.getEc2InstanceId() != null) {
+                            sessionName = session.getEc2InstanceId();
+                        } else if (session.getEcsTaskArn() != null) {
+                            String taskArn = session.getEcsTaskArn();
+                            sessionName = taskArn.contains("/") ? taskArn.substring(taskArn.lastIndexOf('/') + 1) : taskArn;
+                        } else {
+                            sessionName = "floci-session";
+                        }
+                    }
+                    return Optional.of(roleId + ":" + sessionName);
+                }
+            }
         }
-        SessionCredential session = sessionOpt.get();
-        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
-            deleteSession(accessKeyId, session);
-            return Optional.empty();
-        }
-        return Optional.ofNullable(session.getAssumedRoleId());
+
+        return Optional.empty();
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */
