@@ -765,6 +765,27 @@ public class CognitoService implements ResourceProvider {
         });
     }
 
+    /** {@link #requireUserPoolInRegion} for an operation that names the pool by its ARN, as tagging does. */
+    public void requireUserPoolArnInRegion(String resourceArn, String region) {
+        requireUserPoolInRegion(extractUserPoolIdFromArn(resourceArn), region);
+    }
+
+    /**
+     * Refuses a domain whose user pool lives in another region, as the same not found an unknown
+     * domain gets: domains are stored by name alone, but a domain belongs to its pool's region.
+     */
+    public void requireUserPoolDomainInRegion(String domain, String region) {
+        if (domain == null || domain.isBlank()) {
+            return;
+        }
+        domainStore.get(domain).map(UserPoolDomain::getUserPoolId).flatMap(poolStore::get).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
+            }
+        });
+    }
+
     /** Pools are stored by id for every region; the region comes from the pool ARN, else the id prefix. */
     private static String poolRegion(UserPool pool) {
         if (pool.getArn() != null && AwsArnUtils.isArn(pool.getArn())) {
@@ -798,9 +819,14 @@ public class CognitoService implements ResourceProvider {
         return Set.of(new SupportedResourceType("cognito-idp:userpool", "cognito-idp", true));
     }
 
+    /** The ARN must name the pool itself: the same id under another region or account is another pool. */
     private UserPool describeUserPoolByArn(String resourceArn) {
         String poolId = extractUserPoolIdFromArn(resourceArn);
-        return describeUserPool(poolId);
+        UserPool pool = describeUserPool(poolId);
+        if (pool.getArn() != null && !pool.getArn().equals(resourceArn)) {
+            throw userPoolNotFound(poolId);
+        }
+        return pool;
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
@@ -1658,7 +1684,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
         return domainStore.get(domain)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Domain does not exist", 400));
     }
 
     /**
@@ -1713,7 +1739,7 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
         String previousCertificateArn = userPoolDomain.getCertificateArn();
         String certificateArn = previousCertificateArn;
@@ -1758,7 +1784,7 @@ public class CognitoService implements ResourceProvider {
     public void deleteUserPoolDomain(String domain, String userPoolId) {
         UserPoolDomain userPoolDomain = describeUserPoolDomain(domain);
         if (!userPoolDomain.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Domain does not exist", 400);
         }
         domainStore.delete(domain);
         if (userPoolDomain.isCustomDomain()) {
