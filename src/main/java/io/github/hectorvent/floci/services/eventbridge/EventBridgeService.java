@@ -812,6 +812,10 @@ public class EventBridgeService implements ResourceProvider {
                 if (rule.getState() != RuleState.ENABLED) {
                     continue;
                 }
+                // A rule without an event pattern is a schedule rule: it never matches put events.
+                if (rule.getEventPattern() == null || rule.getEventPattern().isBlank()) {
+                    continue;
+                }
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
