@@ -24,6 +24,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -372,7 +373,19 @@ class EventBridgeServiceTest {
     @Test
     void putRuleForNonExistentBusThrows() {
         assertThrows(AwsException.class, () ->
-                service.putRule("rule", "missing-bus", null, null, null, null, null, null, REGION));
+                service.putRule("rule", "missing-bus", "{\"source\":[\"my.app\"]}", null, null,
+                        null, null, null, REGION));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void putRuleWithoutPatternOrScheduleThrowsValidation(String missing) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("rule", null, missing, missing, RuleState.ENABLED, null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Parameter(s) EventPattern or ScheduleExpression must be specified.", error.getMessage());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
     }
 
     @Test
