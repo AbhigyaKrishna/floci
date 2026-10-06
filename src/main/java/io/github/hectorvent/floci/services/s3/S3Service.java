@@ -1005,7 +1005,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String normalizeEntityTag(String value) {
+    static String normalizeEntityTag(String value) {
         String normalized = value == null ? "" : value.trim();
         if (normalized.length() >= 2 && normalized.startsWith("\"") && normalized.endsWith("\"")) {
             normalized = normalized.substring(1, normalized.length() - 1);
