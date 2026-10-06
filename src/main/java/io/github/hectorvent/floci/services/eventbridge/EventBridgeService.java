@@ -313,6 +313,11 @@ public class EventBridgeService implements ResourceProvider {
     public Rule putRule(String name, String busName, String eventPattern,
                         String scheduleExpression, RuleState state, String description,
                         String roleArn, Map<String, String> tags, String region) {
+        if ((eventPattern == null || eventPattern.isBlank())
+                && (scheduleExpression == null || scheduleExpression.isBlank())) {
+            throw new AwsException("ValidationException",
+                    "Parameter(s) EventPattern or ScheduleExpression must be specified.", 400);
+        }
         String effectiveBus = resolvedBusName(busName);
         ensureBusExists(effectiveBus, region);
 
