@@ -1544,11 +1544,32 @@ public class ApiGatewayExecuteController {
     }
 
     Response buildProxyResponse(InvokeResult result, boolean httpApiV2) {
+        return buildProxyResponse(result, httpApiV2, httpApiV2);
+    }
+
+    // httpApi selects the HTTP API error response; payloadV2 selects the integration's format 2.0
+    // response rules (inference and cookies). An HTTP API integration can still use format 1.0.
+    Response buildProxyResponse(InvokeResult result, boolean httpApi, boolean payloadV2) {
+        if (httpApi && result.getFunctionError() != null) {
+            // An HTTP API never relays the error payload: the client gets AWS's generic message.
+            return Response.status(502).entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getFunctionError() != null ? 502 : result.getStatusCode()).build();
         }
         try {
             JsonNode node = objectMapper.readTree(result.getPayload());
+            if (payloadV2 && !node.has("statusCode")) {
+                // Format 2.0 infers the response when the function's JSON result carries no
+                // statusCode: 200, application/json, and the result itself as the body. A string
+                // result is the body text; any other result is returned exactly as the function
+                // produced it, response-shaped fields included.
+                byte[] inferredBody = node.isTextual()
+                        ? node.textValue().getBytes(StandardCharsets.UTF_8)
+                        : result.getPayload();
+                return Response.status(200).entity(inferredBody).type(MediaType.APPLICATION_JSON).build();
+            }
             int statusCode = node.path("statusCode").asInt(200);
             if (result.getFunctionError() != null && !node.has("statusCode")) statusCode = 502;
 
@@ -1564,7 +1585,7 @@ public class ApiGatewayExecuteController {
                     if (e.getValue().isArray()) e.getValue().forEach(v -> builder.header(e.getKey(), v.asText()));
                 });
             }
-            if (httpApiV2) {
+            if (payloadV2) {
                 JsonNode cookies = node.get("cookies");
                 if (cookies != null && cookies.isArray()) {
                     cookies.forEach(cookie -> builder.header(HttpHeaders.SET_COOKIE, cookie.asText()));
@@ -2608,7 +2629,7 @@ public class ApiGatewayExecuteController {
         try {
             InvokeResult result = lambdaService.invoke(region, functionName,
                     eventJson.getBytes(), InvocationType.RequestResponse);
-            return buildProxyResponse(result, true);
+            return buildProxyResponse(result, true, !"1.0".equals(integration.getPayloadFormatVersion()));
         } catch (AwsException e) {
             if (e.getHttpStatus() == 404) {
                 return Response.status(404)
