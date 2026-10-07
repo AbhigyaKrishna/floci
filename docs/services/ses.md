@@ -229,6 +229,29 @@ Alongside the LocalStack fields, each captured message carries a
 `RejectReason` and none of its content: no `Subject`, `Body`, `Headers`,
 `ReplyToAddresses` or `RawData`, in neither the Simple nor the raw shape.
 
+A v2 `SendEmail` with `Content.Simple.Attachments` keeps the Simple shape and
+adds two fields: `Attachments`, one entry per attachment with `FileName`,
+`ContentType`, `ContentDisposition` (`ATTACHMENT` or `INLINE`), `ContentId`
+(angle-bracketed, when given), `ContentDescription` (when given) and `Size`
+in decoded bytes; and `RawData`, the assembled MIME message, base64-encoded,
+as the request addressed it: every `To` and `Cc` recipient the request named,
+including any suppression later kept from delivery, and no `Bcc` header. The content scan runs over
+that MIME message as it does for a raw send. An `INLINE` attachment with a
+`ContentId` is placed in a `multipart/related` part next to the HTML body.
+A `ContentType` that is not given is guessed from the file name, falling back
+to `application/octet-stream`.
+`ContentTransferEncoding` is validated but not applied: every attachment part
+is base64-encoded, whatever the request asks for.
+
+A message carrying an attachment whose file name ends in one of the
+[unsupported attachment types](https://docs.aws.amazon.com/ses/latest/dg/attachments.html#mime-types)
+(`.exe`, `.bat`, `.js`, `.vbs` and the rest of that list, in any case) is
+refused with `MessageRejected` and nothing is recorded, for a Simple send with
+attachments and a raw send alike. The name is read from `Content-Disposition`,
+or from the `name` parameter of `Content-Type`, in every MIME part, including
+a forwarded message. AWS does not document the error, so the message text is
+Floci's own.
+
 ## Examples
 
 ```bash
