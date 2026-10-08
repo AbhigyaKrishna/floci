@@ -463,6 +463,27 @@ trimmed the way AWS trims them: modify omits the `tagSet`, and delete omits both
 the subnets. `Ipv6Support` is accepted without checking that the subnets carry IPv6 CIDRs, which
 real AWS rejects; Floci does not model subnet IPv6 allocation.
 
+### Transit Gateway Peering Attachments
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayPeeringAttachment | Requests a peering between a local transit gateway and a peer one, pending acceptance. |
+| DescribeTransitGatewayPeeringAttachments | Lists or returns peering attachments, from either side's region. |
+| AcceptTransitGatewayPeeringAttachment | Accepts a pending peering attachment from the accepter's region. |
+| DeleteTransitGatewayPeeringAttachment | Deletes a peering attachment from either side. |
+
+The requester's gateway must exist; the peer gateway is recorded as given and not resolved, since
+it may belong to an account this emulator cannot see. One attachment id serves both sides, so a
+cross-region peering is visible from both regions, and the `transit-gateway-id` filter matches
+either side's gateway. Creation reports `pendingAcceptance` (AWS passes through
+`initiatingRequest` first), accepting moves it to `available`, and accepting anything but a pending
+attachment returns `IncorrectState`. Across accounts, only the peer account can see the attachment
+from its side and accept it, and accepting checks that the peer gateway exists in the accepter's
+account and region, returning `InvalidTransitGatewayID.NotFound` otherwise. Each account keeps its
+own tags on the attachment. A pending peering does not stop the peer gateway's owner deleting it;
+that rejects the peering instead. Peering attachments do not yet appear in
+`DescribeTransitGatewayAttachments` and cannot be associated with a route table.
+
 ### Transit Gateway Route Tables
 
 | Action | Description |
