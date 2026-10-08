@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -87,12 +88,36 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2ServiceTest {
+
+    @Test
+    void createAndDescribeVpcsDoNotContactDockerEvenOnFirstUse() {
+        EmulatorConfig config = mockConfig(false);
+        EmulatorConfig.VpcNetworksConfig networks = mock(EmulatorConfig.VpcNetworksConfig.class);
+        when(config.services().ec2().vpcNetworks()).thenReturn(networks);
+        when(networks.enabled()).thenReturn(true);
+        when(config.docker()).thenReturn(mock(EmulatorConfig.DockerConfig.class));
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        DockerClient docker = mock(DockerClient.class);
+        VpcNetworkManager manager = new VpcNetworkManager(config, docker, null);
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), manager);
+
+        Vpc created = service.createVpc("eu-central-1", "42.0.0.0/16", false);
+        service.createTags("eu-central-1", List.of(created.getVpcId()), List.of(new Tag("Name", "probe")));
+        List<Vpc> found = service.describeVpcs("eu-central-1", List.of(), Map.of("tag:Name", List.of("probe")));
+
+        assertEquals(List.of(created.getVpcId()), found.stream().map(Vpc::getVpcId).toList());
+        assertTrue(service.describeVpcs("eu-central-1", List.of(), Map.of()).stream().anyMatch(Vpc::isDefault));
+        verifyNoInteractions(docker);
+    }
 
     @Test
     void sharedDescribeVpcsOmitsUnknownIdsButExplicitLookupStillRejectsThem() {
@@ -4516,6 +4541,7 @@ class Ec2ServiceTest {
     private static final class InMemoryStorageFactory extends StorageFactory {
         private final Map<String, AccountAwareStorageBackend<?>> overrides;
         private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
+        private final List<AccountAwareStorageBackend<?>> created = new ArrayList<>();
 
         private InMemoryStorageFactory() {
             this(Map.of(), null);
@@ -4544,11 +4570,18 @@ class Ec2ServiceTest {
             if (override != null) {
                 return (AccountAwareStorageBackend<V>) override;
             }
-            if (requestContextInstance != null) {
-                return new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
-                        requestContextInstance, "000000000000");
-            }
-            return AccountAwareStorageBackend.inMemory("000000000000");
+            AccountAwareStorageBackend<V> backend = requestContextInstance != null
+                    ? new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                            requestContextInstance, "000000000000")
+                    : AccountAwareStorageBackend.inMemory("000000000000");
+            created.add(backend);
+            return backend;
+        }
+
+        // Same effect as StorageFactory.clearAll() on the backends this factory handed out.
+        @Override
+        public synchronized void clearAll() {
+            created.forEach(AccountAwareStorageBackend::clear);
         }
     }
 
@@ -4996,6 +5029,40 @@ class Ec2ServiceTest {
         assertTrue(released[0], "the hook must have released the host between the two checks");
         assertEquals("InvalidHostID.NotFound", e.getErrorCode());
         assertTrue(service.hostInstances("us-east-1", hostId[0]).isEmpty());
+    }
+
+    @Test
+    void seedDefaultRegionIfEnabledDoesNothingWhenEc2IsDisabled() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().enabled()).thenReturn(false);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        Ec2Service service = spy(new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+
+        service.seedDefaultRegionIfEnabled();
+
+        verify(service, never()).ensureDefaultResources(anyString());
+    }
+
+    @Test
+    void clearSeedsDefaultVpcAndSubnetsAgainAfterStorageWipe() {
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().enabled()).thenReturn(true);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory();
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), storageFactory);
+        service.ensureDefaultResources("us-east-1");
+        // A reset wipes storage before it calls clear().
+        storageFactory.clearAll();
+        assertTrue(service.describeVpcs("us-east-1", List.of(), Map.of()).isEmpty());
+
+        service.clear();
+
+        assertTrue(service.describeVpcs("us-east-1", List.of(), Map.of()).stream().anyMatch(Vpc::isDefault));
+        assertFalse(service.describeSubnets("us-east-1", List.of(), Map.of()).isEmpty());
     }
 
     @Test
