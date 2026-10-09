@@ -60,6 +60,25 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void invalidAutoMinorVersionUpgradeIsRejectedBeforeCreateOrModify() {
+        for (String action : List.of("CreateDBInstance", "ModifyDBInstance")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("DBInstanceIdentifier", "invalid-boolean");
+            p.putSingle("Engine", "postgres");
+            p.putSingle("MasterUsername", "admin");
+            p.putSingle("MasterUserPassword", "password");
+            p.putSingle("AutoMinorVersionUpgrade", "invalid");
+
+            Response response = handler.handle(action, p);
+
+            assertEquals(400, response.getStatus());
+            assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+            assertTrue(((String) response.getEntity()).contains("AutoMinorVersionUpgrade must be true or false."));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @Test
     void describeEvents_reconcilesOnlyTheRequestedDbInstance() {
         DbInstance requested = makeInstance("requested");
         when(service.listDbInstances("requested", null)).thenReturn(List.of(requested));
