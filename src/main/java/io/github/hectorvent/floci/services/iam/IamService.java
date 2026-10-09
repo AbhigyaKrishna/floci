@@ -99,6 +99,7 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
+    private static final int ROLE_INLINE_POLICY_SIZE_LIMIT = 10_240;
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
@@ -1806,8 +1807,30 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
-        role.getInlinePolicies().put(policyName, policyDocument);
-        roles.put(roleName, role);
+        Map<String, String> inlinePolicies = role.getInlinePolicies();
+        synchronized (inlinePolicies) {
+            long aggregateSize = inlinePolicies.entrySet().stream()
+                    .filter(entry -> !entry.getKey().equals(policyName))
+                    .mapToLong(entry -> nonWhitespaceLength(entry.getValue()))
+                    .sum() + nonWhitespaceLength(policyDocument);
+            if (aggregateSize > ROLE_INLINE_POLICY_SIZE_LIMIT) {
+                throw new AwsException("LimitExceeded",
+                        "Maximum policy size of 10240 bytes exceeded for role " + roleName, 409);
+            }
+            inlinePolicies.put(policyName, policyDocument);
+            roles.put(roleName, role);
+        }
+    }
+
+    private static int nonWhitespaceLength(String policyDocument) {
+        int size = 0;
+        for (int i = 0; i < policyDocument.length(); i++) {
+            char character = policyDocument.charAt(i);
+            if (character != ' ' && character != '\t' && character != '\n' && character != '\r') {
+                size++;
+            }
+        }
+        return size;
     }
 
     public String getRolePolicy(String roleName, String policyName) {
