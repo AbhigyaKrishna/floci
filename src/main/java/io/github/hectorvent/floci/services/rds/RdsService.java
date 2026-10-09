@@ -841,7 +841,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         masterUsername, masterPassword, dbName,
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
-                        proxyBinding(engine, instance.getEndpoint().address(), proxyPort,
+                        proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
                                 instanceRegion, accountId, instance.getDbiResourceId()));
             } catch (RuntimeException | Error e) {
                 try {
@@ -3195,7 +3195,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.getEndpoint().address(),
                     effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
                     (user, pw) -> validateDbPasswordForScope(accountId, instanceRegion, id, user, pw),
-                    proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getProxyPort(),
+                    proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
                             instanceRegion, accountId, instance.getDbiResourceId()));
         }
     }
@@ -3362,7 +3362,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     cluster.getMasterUsername() != null ? cluster.getMasterUsername() : "root",
                     cluster.getMasterPassword(), cluster.getDatabaseName(),
                     (user, pw) -> validateDbClusterPasswordForScope(accountId, clusterRegion, id, user, pw),
-                    proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getProxyPort(),
+                    proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getEndpoint().port(),
                             clusterRegion, accountId, cluster.getDbClusterResourceId()));
             applyAutoPause(cluster);
         }
@@ -3430,7 +3430,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
                         proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
-                                instance.getProxyPort(), instanceRegion, accountId, instance.getDbiResourceId()));
+                                instance.getEndpoint().port(), instanceRegion, accountId, instance.getDbiResourceId()));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
                 instance = ensureInstanceBackend(id, effectiveRegion);
@@ -3538,7 +3538,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw),
                     proxyBinding(instance.getEngine(), relayEndpoint.address(),
-                            relayPort, instanceRegion, accountId, instance.getDbiResourceId()));
+                            relayEndpoint.port(), instanceRegion, accountId, instance.getDbiResourceId()));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -3632,7 +3632,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbClusterPasswordForScope(
                             accountId, clusterRegion, id, user, pw),
                     proxyBinding(cluster.getEngine(), relayEndpoint.address(),
-                            relayPort, clusterRegion, accountId, cluster.getDbClusterResourceId()));
+                            relayEndpoint.port(), clusterRegion, accountId, cluster.getDbClusterResourceId()));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -4021,7 +4021,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         effectiveMasterUser, masterPassword, databaseName,
                         (user, pw) -> validateDbClusterPasswordForScope(
                                 accountId, clusterRegion, id, user, pw),
-                        proxyBinding(engine, cluster.getEndpoint().address(), proxyPort,
+                        proxyBinding(engine, cluster.getEndpoint().address(), cluster.getEndpoint().port(),
                                 clusterRegion, accountId, cluster.getDbClusterResourceId()));
             }
 
@@ -5077,9 +5077,9 @@ public class RdsService implements Resettable, ResourceProvider {
     // ── DB Proxies (AWS::RDS::DBProxy) ──────────────────────────────────────────
 
     /**
-     * Creates a DB Proxy. No relay is started here — the backend target is unknown until a target
+     * Creates a DB Proxy. No relay is started here: the backend target is unknown until a target
      * group registers a cluster/instance (see {@link #registerDbProxyTargets}). The relay listens on
-     * the engine family's default port so the endpoint is a bare host clients reach at 5432/3306.
+     * the engine family's default port when available, otherwise an allocated pool port.
      */
     public DbProxy createDbProxy(String dbProxyName, String engineFamily, boolean requireTls,
                                  boolean iamAuth, String roleArn, List<String> vpcSubnetIds,
@@ -5135,9 +5135,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         boolean mock = config.services().rds().mock();
-        // RDS Proxy exposes a bare hostname on the engine's default port. Floci currently models
-        // that contract directly; a separate endpoint-routing design is required before multiple
-        // same-engine proxies can be made externally reachable through one Docker host.
+        // Proxies share a hostname, so each needs its own listener port.
         int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
@@ -7533,7 +7531,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
     }
 
-    /** The engine's default listener port — an RDS Proxy endpoint is a bare host reached on this port. */
+    /** The preferred listener port, used when no other proxy has reserved it. */
     private int defaultPortForEngineFamily(String engineFamily) {
         if (engineFamily == null) {
             return 5432;
@@ -7614,7 +7612,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             (user, pw) -> validateDbClusterPasswordForScope(
                                     accountId, clusterRegion,
                                     cluster.getDbClusterIdentifier(), user, pw),
-                            proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), proxyPort,
+                            proxyBinding(cluster.getEngine(), cluster.getEndpoint().address(), cluster.getEndpoint().port(),
                                     clusterRegion, accountId, cluster.getDbClusterResourceId()));
                 }
                 cluster.setStatus(DbInstanceStatus.AVAILABLE);
@@ -7757,7 +7755,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             (user, pw) -> validateDbPasswordForScope(
                                     accountId, instanceRegion,
                                     instance.getDbInstanceIdentifier(), user, pw),
-                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(), proxyPort,
+                            proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
                                     instanceRegion, accountId, instance.getDbiResourceId()));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
