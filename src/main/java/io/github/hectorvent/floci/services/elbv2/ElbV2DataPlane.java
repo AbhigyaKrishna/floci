@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -606,9 +607,11 @@ public class ElbV2DataPlane {
         if (multiValueHeaders instanceof Map<?, ?> mvh) {
             for (Map.Entry<?, ?> entry : mvh.entrySet()) {
                 if (entry.getValue() instanceof List<?> values) {
+                    List<String> headerValues = new ArrayList<>();
                     for (Object v : values) {
-                        req.response().putHeader(String.valueOf(entry.getKey()), String.valueOf(v));
+                        headerValues.add(String.valueOf(v));
                     }
+                    req.response().headers().set(String.valueOf(entry.getKey()), headerValues);
                 }
             }
         }
@@ -722,11 +725,7 @@ public class ElbV2DataPlane {
                 .setMethod(req.method());
         proxyClient.request(opts)
                 .onSuccess(clientReq -> {
-                    req.headers().forEach(entry -> {
-                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                            clientReq.putHeader(entry.getKey(), entry.getValue());
-                        }
-                    });
+                    copyEndToEndHeaders(req.headers(), clientReq.headers());
                     if (!preserveHostHeader) {
                         clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
                     }
@@ -738,11 +737,7 @@ public class ElbV2DataPlane {
                         }
                         responseStarted.set(true);
                         req.response().setStatusCode(resp.statusCode());
-                        resp.headers().forEach(entry -> {
-                            if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                req.response().putHeader(entry.getKey(), entry.getValue());
-                            }
-                        });
+                        copyEndToEndHeaders(resp.headers(), req.response().headers());
                         if (resp.getHeader("Content-Length") == null) {
                             req.response().setChunked(true);
                         }
@@ -829,11 +824,7 @@ public class ElbV2DataPlane {
                 .setMethod(req.method());
         proxyClient.request(opts)
                 .onSuccess(clientReq -> {
-                    req.headers().forEach(entry -> {
-                        if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                            clientReq.putHeader(entry.getKey(), entry.getValue());
-                        }
-                    });
+                    copyEndToEndHeaders(req.headers(), clientReq.headers());
                     clientReq.putHeader("Connection", "Upgrade");
                     clientReq.putHeader("Upgrade", req.getHeader("Upgrade"));
                     if (!preserveHostHeader) {
@@ -842,11 +833,7 @@ public class ElbV2DataPlane {
                     clientReq.connect()
                             .onSuccess(resp -> {
                                 req.response().setStatusCode(resp.statusCode());
-                                resp.headers().forEach(entry -> {
-                                    if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                                        req.response().putHeader(entry.getKey(), entry.getValue());
-                                    }
-                                });
+                                copyEndToEndHeaders(resp.headers(), req.response().headers());
                                 if (resp.statusCode() != 101) {
                                     req.resume();
                                     if (resp.getHeader("Content-Length") == null) {
@@ -1029,6 +1016,14 @@ public class ElbV2DataPlane {
             }
         }
         return last;
+    }
+
+    private static void copyEndToEndHeaders(MultiMap from, MultiMap to) {
+        for (String name : from.names()) {
+            if (!HOP_BY_HOP_HEADERS.contains(name.toLowerCase())) {
+                to.set(name, from.getAll(name));
+            }
+        }
     }
 
     private static boolean globMatches(String pattern, String text) {

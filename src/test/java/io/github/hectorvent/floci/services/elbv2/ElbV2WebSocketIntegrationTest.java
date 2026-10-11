@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -60,6 +61,14 @@ class ElbV2WebSocketIntegrationTest {
                 .requestHandler(request -> {
                     if (!"websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         request.response().setStatusCode(400).end("not an upgrade");
+                    } else if ("/multi-headers/".equals(request.path())) {
+                        List<String> cookies = List.of("a=1; Path=/", "b=2; Path=/");
+                        request.response()
+                                .setStatusCode(403)
+                                .putHeader("Set-Cookie", cookies)
+                                .putHeader("X-Received-Multi",
+                                        String.join(",", request.headers().getAll("X-Multi")))
+                                .end();
                     } else if (!request.path().startsWith("/socket.io/")) {
                         request.response().setStatusCode(404).end();
                     } else {
@@ -137,6 +146,25 @@ class ElbV2WebSocketIntegrationTest {
 
         UpgradeRejectedException rejected = assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
         assertEquals(404, rejected.getStatus());
+    }
+
+    @Test
+    void forwardsRepeatedHeadersOnUpgradeExchange() {
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> client.webSocket(new WebSocketConnectOptions()
+                                .setHost("127.0.0.1")
+                                .setPort(LISTENER_PORT)
+                                .setURI("/multi-headers/?transport=websocket")
+                                .addHeader("X-Multi", "one")
+                                .addHeader("X-Multi", "two"))
+                        .toCompletionStage()
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS));
+
+        UpgradeRejectedException rejected = assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
+        assertEquals(403, rejected.getStatus());
+        assertEquals(List.of("a=1; Path=/", "b=2; Path=/"), rejected.getHeaders().getAll("Set-Cookie"));
+        assertEquals("one,two", rejected.getHeaders().get("X-Received-Multi"));
     }
 
     @Test
